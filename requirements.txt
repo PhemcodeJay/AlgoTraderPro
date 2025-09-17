@@ -1,0 +1,15 @@
+aiohttp>=3.12.15
+fpdf>=1.7.2
+joblib>=1.5.2
+numpy>=2.3.3
+pandas>=2.3.2
+plotly>=6.3.0
+psycopg2-binary>=2.9.10
+python-dotenv>=1.1.1
+requests>=2.32.5
+scikit-learn>=1.7.2
+sqlalchemy>=2.0.43
+streamlit-autorefresh>=1.0.1
+streamlit>=1.49.1
+tenacity>=9.1.2
+websockets>=15.0.1
