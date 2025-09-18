@@ -10,6 +10,7 @@ from signal_generator import generate_signals, get_usdt_symbols
 from db import db_manager, Trade, Signal, TradeModel
 from logging_config import get_trading_logger
 
+
 logger = get_trading_logger(__name__)
 
 class AutomatedTrader:

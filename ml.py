@@ -11,6 +11,7 @@ import json
 import sys
 import argparse
 from db import DatabaseManager
+from numpy.typing import NDArray
 
 # Configure logging to match db.py
 from logging_config import get_logger
@@ -31,7 +32,7 @@ class MLFilter:
         # Load existing model if available
         self.load_model()
 
-    def prepare_features(self, indicators: Dict[str, Any]) -> np.ndarray:
+    def prepare_features(self, indicators: Dict[str, Any]) -> NDArray[np.float64]:
         """Prepare features from indicators for ML prediction"""
         try:
             # Extract basic indicators
