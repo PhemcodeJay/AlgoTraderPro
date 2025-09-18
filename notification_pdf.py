@@ -7,6 +7,8 @@ import requests
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 
+from dotenv import load_dotenv
+load_dotenv()
 
 tz_utc3 = timezone(timedelta(hours=3))
 
