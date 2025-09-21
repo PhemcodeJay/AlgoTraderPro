@@ -649,6 +649,7 @@ class BybitClient:
             # Step 2: Build order params
             params = {
                 "category": "linear",
+                "accountType": self.account_type, 
                 "symbol": symbol,
                 "side": side.title(),
                 "orderType": "Market" if order_type.lower() == "market" else "Limit",
@@ -669,6 +670,7 @@ class BybitClient:
                 return {
                     "order_id": result.get("orderId"),
                     "symbol": symbol,
+                    "accountType": self.account_type, 
                     "side": side,
                     "qty": qty,
                     "price": price or self.get_current_price(symbol),
@@ -689,6 +691,7 @@ class BybitClient:
         try:
             result = self._make_request("POST", "/v5/order/cancel", {
                 "category": "linear",
+                "accountType": self.account_type, 
                 "symbol": symbol,
                 "orderId": order_id
             })
@@ -711,6 +714,7 @@ class BybitClient:
                 for order in result["list"]:
                     orders.append({
                         "order_id": order.get("orderId"),
+                        "accountType": self.account_type, 
                         "symbol": order.get("symbol"),
                         "side": order.get("side"),
                         "qty": float(order.get("qty", 0)),
@@ -727,7 +731,10 @@ class BybitClient:
     def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
         """Get current positions"""
         try:
-            params = {"category": "linear"}
+            params = {
+                "category": "linear",
+                "accountType": self.account_type   # ✅ must be in request
+            }
             if symbol:
                 params["symbol"] = symbol
                 
@@ -742,10 +749,11 @@ class BybitClient:
                             "symbol": pos.get("symbol"),
                             "side": pos.get("side"),
                             "size": size,
+                            "accountType": self.account_type, 
                             "entry_price": float(pos.get("avgPrice", 0)),
                             "mark_price": float(pos.get("markPrice", 0)),
                             "unrealized_pnl": float(pos.get("unrealisedPnl", 0)),
-                            "leverage": float(pos.get("leverage", 1))
+                            "leverage": float(pos.get("leverage", 10))
                         })
                 return positions
             return []

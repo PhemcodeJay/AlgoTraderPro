@@ -137,6 +137,12 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
+    # --- Logo Row ---
+    col1, col2, col3 = st.columns([1, 2, 1])  # center column = 50%
+    with col2:
+        st.image("logo.png", width=150)  # ✅ half-width, centered
+
+
     # Header
     st.markdown(f"""
     <div class="main-header">
