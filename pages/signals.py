@@ -550,7 +550,7 @@ def main():
             "ML Score Threshold",
             min_value=0.0,
             max_value=1.0,
-            value=0.6,
+            value=0.4,
             step=0.05,
             help="Minimum ML probability for signal to pass filter"
         )

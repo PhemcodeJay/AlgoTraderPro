@@ -112,7 +112,7 @@ class MLFilter:
             logger.error(f"Error predicting signal quality: {e}")
             return 0.5
 
-    def filter_signals(self, signals: List[Signal], threshold: float = 0.6) -> List[Signal]:
+    def filter_signals(self, signals: List[Signal], threshold: float = 0.4) -> List[Signal]:
         """Filter signals based on ML model prediction"""
         filtered_signals: List[Signal] = []
         for sig in signals:
