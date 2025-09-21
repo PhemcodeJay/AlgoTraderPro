@@ -540,9 +540,12 @@ def main():
                 except Exception as e:
                     st.error(f"Real trade error: {e}")
 
-    with tab4:
-        st.subheader("🤖 ML-Powered Signal Filtering & Live Scoring")
+    with st.container():
+        st.subheader("🤖 ML-Powered Signal Filtering")
+
         ml_filter = MLFilter()
+
+        # ML Threshold slider
         threshold = st.slider(
             "ML Score Threshold",
             min_value=0.0,
@@ -551,13 +554,19 @@ def main():
             step=0.05,
             help="Minimum ML probability for signal to pass filter"
         )
+
+        # Fetch signals from DB
         signals = db_manager.get_signals(limit=100)
         st.write(f"Fetched {len(signals)} signals from database")
-        signals_dicts = [s.to_dict() for s in signals]
-        filtered_signals = ml_filter.filter_signals(signals_dicts, threshold=threshold)
+
+        # Filter signals with ML
+        filtered_signals = ml_filter.filter_signals(signals, threshold=threshold)
         st.write(f"{len(filtered_signals)} signals passed the ML filter")
-        st.dataframe(pd.DataFrame(filtered_signals))
+        st.dataframe(pd.DataFrame([s.to_dict() for s in filtered_signals]))
+
         st.markdown("---")
+
+        # Feature Importance
         if st.button("Show Feature Importance"):
             importance = ml_filter.get_feature_importance()
             if importance:
@@ -566,20 +575,28 @@ def main():
                 st.bar_chart(importance_df)
             else:
                 st.info("No trained ML model available")
+
         st.markdown("---")
-        st.markdown("### Train ML Model from Trades Database")
-        if st.button("Train Model from Trades"):
+
+        # Train ML Model button
+        if st.button("Train ML Model from Trades"):
             trades = db_manager.get_trades(limit=1000)
             training_data = []
+
             for trade in trades:
-                # Fetch corresponding signal for the trade
-                signals = db_manager.get_signals(limit=1)
-                signal = next((s for s in signals if s.symbol == trade.symbol and abs((s.created_at - trade.timestamp).total_seconds()) < 3600), None)
+                # Match trade with closest signal (within 1 hour)
+                signals_for_trade = db_manager.get_signals(limit=50)  # limit to recent signals
+                signal = next(
+                    (s for s in signals_for_trade 
+                    if s.symbol == trade.symbol and abs((s.created_at - trade.timestamp).total_seconds()) < 3600),
+                    None
+                )
                 if signal and signal.indicators:
                     training_data.append({
                         'indicators': signal.indicators,
                         'profit': trade.pnl if trade.pnl is not None else 0
                     })
+
             if not training_data:
                 st.error("No trades with matching signal indicators found for training")
             else:
@@ -588,34 +605,7 @@ def main():
                     st.success("ML model trained successfully")
                 else:
                     st.error("Failed to train ML model. Check logs for details")
-        st.markdown("---")
-        st.markdown("### Live Signal Scoring (Auto)")
-        rsi = st.number_input("RSI", value=50.0)
-        macd = st.number_input("MACD", value=0.0)
-        macd_signal = st.number_input("MACD Signal", value=0.0)
-        macd_hist = st.number_input("MACD Histogram", value=0.0)
-        bb_upper = st.number_input("BB Upper", value=0.0)
-        bb_middle = st.number_input("BB Middle", value=0.0)
-        bb_lower = st.number_input("BB Lower", value=0.0)
-        price = st.number_input("Price", value=0.0)
-        volume_ratio = st.number_input("Volume Ratio", value=1.0)
-        trend_score = st.number_input("Trend Score", value=0.0)
-        volatility = st.number_input("Volatility", value=0.0)
-        indicators = {
-            "rsi": rsi,
-            "macd": macd,
-            "macd_signal": macd_signal,
-            "macd_histogram": macd_hist,
-            "bb_upper": bb_upper,
-            "bb_middle": bb_middle,
-            "bb_lower": bb_lower,
-            "price": price,
-            "volume_ratio": volume_ratio,
-            "trend_score": trend_score,
-            "volatility": volatility
-        }
-        score = ml_filter.predict_signal_quality(indicators)
-        st.metric("Predicted ML Score", f"{score:.2f}")
+                    
         st.markdown("""
         ## 🧠 How ML Works with Signals & Trades
         1. **Signals Collection**:  
