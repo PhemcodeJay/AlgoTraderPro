@@ -232,18 +232,51 @@ class DatabaseManager:
 
     def _initialize_db(self):
         try:
-            database_url = os.getenv("DATABASE_URL", "sqlite:///algotrader.db")
-            self.engine = create_engine(database_url, echo=False)
+            # === PostgreSQL Configuration ===
+            db_host = os.getenv("DB_HOST", "localhost")
+            db_port = os.getenv("DB_PORT", 5432)
+            db_name = os.getenv("DB_NAME", "Algotrader")
+            db_user = os.getenv("DB_USER", "postgres")
+            db_password = os.getenv("DB_PASSWORD", "1234")
+
+            # Construct PostgreSQL URL
+            postgres_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+
+            # Try connecting to PostgreSQL
+            self.engine = create_engine(postgres_url, echo=False)
             Base.metadata.create_all(self.engine)
             Session = sessionmaker(bind=self.engine)
             self.session = Session()
-            logger.info("Database initialized successfully")
+            logger.info("PostgreSQL database initialized successfully")
+
+        except OperationalError as pg_err:
+            logger.warning(f"PostgreSQL connection failed: {pg_err}. Falling back to SQLite.")
+            try:
+                # Fallback to SQLite
+                sqlite_url = os.getenv("SQLITE_URL", "sqlite:///algotrader.db")
+                self.engine = create_engine(sqlite_url, echo=False)
+                Base.metadata.create_all(self.engine)
+                Session = sessionmaker(bind=self.engine)
+                self.session = Session()
+                logger.info("SQLite database initialized successfully")
+            except Exception as sqlite_err:
+                error_context = create_error_context(
+                    module=__name__,
+                    function='_initialize_db'
+                )
+                logger.error(f"Failed to initialize SQLite database: {sqlite_err}")
+                raise DatabaseConnectionException(
+                    f"Database initialization failed: {sqlite_err}",
+                    context=error_context,
+                    original_exception=sqlite_err
+                )
+
         except Exception as e:
             error_context = create_error_context(
                 module=__name__,
                 function='_initialize_db'
             )
-            logger.error(f"Failed to initialize database: {e}")
+            logger.error(f"Unexpected error during database initialization: {e}")
             raise DatabaseConnectionException(
                 f"Database initialization failed: {e}",
                 context=error_context,
