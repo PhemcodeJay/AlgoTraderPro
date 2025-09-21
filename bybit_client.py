@@ -32,12 +32,17 @@ class RateLimitInfo:
 
 class BybitClient:
     def __init__(self):
-        self.api_key = os.getenv("BYBIT_API_KEY", "")
-        self.api_secret = os.getenv("BYBIT_API_SECRET", "")
-        self.testnet = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
-        
-        self.base_url = "https://api-testnet.bybit.com" if self.testnet else "https://api.bybit.com"
-        self.ws_url = "wss://stream-testnet.bybit.com" if self.testnet else "wss://stream.bybit.com"
+        self.api_key: str = os.getenv("BYBIT_API_KEY", "")
+        self.api_secret: str = os.getenv("BYBIT_API_SECRET", "")
+        self.account_type: str = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
+
+        # Mainnet only
+        self.base_url: str = "https://api.bybit.com"
+        self.ws_url: str = "wss://stream.bybit.com"
+
+        # Optional sanity check
+        if os.getenv("BYBIT_MAINNET", "true").lower() != "true":
+            raise ValueError("Mainnet only mode is enabled. Please set BYBIT_MAINNET=true")
         
         # Connection and session management
         self.session: Optional[requests.Session] = None
@@ -73,7 +78,7 @@ class BybitClient:
         # Start background event loop for WebSocket
         self._start_background_loop()
         
-        logger.info(f"BybitClient initialized - Environment: {'testnet' if self.testnet else 'mainnet'}")
+        logger.info(f"BybitClient initialized - Environment: mainnet - Account Type: {self.account_type}")
     
     def _initialize_session(self):
         """Initialize HTTP session with proper configuration"""
@@ -439,7 +444,8 @@ class BybitClient:
                 "API connection test successful",
                 extra={
                     'endpoint': '/v5/market/time',
-                    'environment': 'testnet' if self.testnet else 'mainnet'
+                    'environment': 'mainnet',
+                    'account_type': self.account_type
                 }
             )
             return True
@@ -448,8 +454,13 @@ class BybitClient:
             self._connected = False
             logger.error(
                 f"API authentication failed during connection test: {str(e)}",
-                extra={'error_type': 'authentication', 'testnet': self.testnet}
+                extra={
+                    'error_type': 'authentication',
+                    'environment': 'mainnet',
+                    'account_type': self.account_type
+                }
             )
+
             return False
             
         except APIRateLimitException as e:
@@ -480,7 +491,8 @@ class BybitClient:
         """Get comprehensive connection health information"""
         health_info = {
             'connected': self._connected,
-            'environment': 'testnet' if self.testnet else 'mainnet',
+            'environment': 'mainnet',
+            'account_type': self.account_type,
             'api_configured': bool(self.api_key and self.api_secret),
             'last_successful_request': self.last_successful_request.isoformat() if self.last_successful_request else None,
             'consecutive_errors': self.consecutive_errors,
@@ -496,7 +508,7 @@ class BybitClient:
                 'current_minute_count': self.rate_limit.minute_count
             }
         }
-        
+
         # Determine overall health status
         if not health_info['api_configured']:
             health_info['status'] = 'unconfigured'
