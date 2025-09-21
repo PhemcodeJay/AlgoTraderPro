@@ -142,7 +142,6 @@ def main():
     with col2:
         st.image("logo.png", width=150)  # ✅ half-width, centered
 
-
     # Header
     st.markdown(f"""
     <div class="main-header">
