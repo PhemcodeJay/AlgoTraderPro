@@ -37,7 +37,7 @@ def create_equity_curve(trades):
         
         # Calculate cumulative performance
         equity_data = []
-        cumulative_pnl = 1000.0  # Starting balance
+        cumulative_pnl = 100.0  # Starting balance
         
         for trade in sorted_trades:
             pnl = trade.pnl or 0

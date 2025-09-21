@@ -606,11 +606,35 @@ class BybitClient:
             logger.error(f"Error getting klines for {symbol}: {e}")
             return []
 
-    async def place_order(self, symbol: str, side: str, order_type: str, qty: float, 
-                         price: Optional[float] = None, stop_loss: Optional[float] = None,
-                         take_profit: Optional[float] = None) -> Dict:
-        """Place a trading order"""
+    async def place_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        qty: float,
+        price: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+        leverage: Optional[int] = None,
+        mode: str = "ISOLATED"
+    ) -> Dict:
+        """Place a trading order with leverage and margin mode"""
         try:
+            # Default leverage = 10 if not provided
+            leverage = leverage or 10
+
+            # Step 1: Set leverage & margin mode (sync call in thread executor)
+            lev_params = {
+                "category": "linear",
+                "symbol": symbol,
+                "buyLeverage": str(leverage),
+                "sellLeverage": str(leverage),
+                "mode": mode.upper()
+            }
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/set-leverage", lev_params)
+
+            # Step 2: Build order params
             params = {
                 "category": "linear",
                 "symbol": symbol,
@@ -619,18 +643,16 @@ class BybitClient:
                 "qty": str(qty),
                 "timeInForce": "GTC"
             }
-            
             if price and order_type.lower() == "limit":
                 params["price"] = str(price)
-            
             if stop_loss:
                 params["stopLoss"] = str(stop_loss)
-            
             if take_profit:
                 params["takeProfit"] = str(take_profit)
 
-            result = self._make_request("POST", "/v5/order/create", params)
-            
+            # Step 3: Place order (sync call via executor)
+            result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
+
             if result:
                 return {
                     "order_id": result.get("orderId"),
@@ -640,13 +662,15 @@ class BybitClient:
                     "price": price or self.get_current_price(symbol),
                     "status": "pending",
                     "timestamp": datetime.now(),
-                    "virtual": False
+                    "virtual": False,
+                    "leverage": leverage,
+                    "margin_mode": mode.upper()
                 }
             return {}
-            
+
         except Exception as e:
             logger.error(f"Error placing order: {e}")
-            return {}
+            return {"error": str(e)}
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel an order"""

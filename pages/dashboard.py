@@ -137,7 +137,7 @@ def create_portfolio_chart(engine):
 def load_capital_data(bybit_client: Optional['BybitClient'] = None) -> dict:
     """Load capital data from database, syncing real balance if Bybit client is connected"""
     # Default fallback
-    default_virtual = {"available": 1000.0, "capital": 1000.0, "used": 0.0, "start_balance": 1000.0}
+    default_virtual = {"available": 100.0, "capital": 100.0, "used": 0.0, "start_balance": 100.0}
     default_real = {"available": 0.0, "capital": 0.0, "used": 0.0, "start_balance": 0.0}
 
     try:
