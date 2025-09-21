@@ -540,7 +540,7 @@ def main():
                 except Exception as e:
                     st.error(f"Real trade error: {e}")
 
-    with st.container():
+    with tab4:
         st.subheader("🤖 ML-Powered Signal Filtering")
 
         ml_filter = MLFilter()
