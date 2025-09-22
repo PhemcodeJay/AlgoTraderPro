@@ -224,35 +224,67 @@ class TradingEngine:
             logger.error(f"Error getting symbol info for {symbol}: {e}")
             return {}
 
-    def calculate_position_size(self, symbol: str, entry_price: float, 
-                            risk_percent: Optional[float] = None, leverage: Optional[int] = None) -> float:
-        """Calculate position size based on risk management"""
+    def calculate_position_size(self, symbol: str, entry_price: float,
+                            risk_percent: Optional[float] = None,
+                            leverage: Optional[int] = None) -> float:
+        """Calculate position size based on risk management and symbol rules"""
         try:
+            import math
+
+            # Risk & leverage
             risk_pct = risk_percent or self.settings.get("RISK_PCT", 0.01)
             lev = leverage or self.settings.get("LEVERAGE", 10)
-            wallet_balance = self.db.get_wallet_balance("real" if self.db.get_setting("trading_mode") == "real" else "virtual")
+
+            # Get balance
+            mode = "real" if self.db.get_setting("trading_mode") == "real" else "virtual"
+            wallet_balance = self.db.get_wallet_balance(mode)
             if not wallet_balance:
                 self.db.migrate_capital_json_to_db()
-                wallet_balance = self.db.get_wallet_balance("real" if self.db.get_setting("trading_mode") == "real" else "virtual")
+                wallet_balance = self.db.get_wallet_balance(mode)
             balance = wallet_balance.available if wallet_balance else 100.0
-            risk_amount = balance * risk_pct
+            if balance <= 0:
+                logger.warning(f"Cannot calculate position size for {symbol}: Available balance is {balance}")
+                return 0.0
+
+            # Risk-based sizing
+            risk_amount = max(balance * risk_pct, 1.0)  # enforce at least $1 risk
             position_value = risk_amount * lev
             position_size = position_value / entry_price
+
+            # Get symbol filters
             symbol_info = self.get_symbol_info(symbol)
-            if symbol_info:
-                lot_size_filter = symbol_info.get("lotSizeFilter", {})
-                min_qty = float(lot_size_filter.get("minOrderQty", 0))
-                qty_step = float(lot_size_filter.get("qtyStep", 0))
-                if position_size < min_qty:
-                    logger.warning(f"Position size {position_size} below minimum {min_qty} for {symbol}")
+            if not symbol_info:
+                logger.error(f"No symbol info for {symbol}")
+                return 0.0
+            lot_size_filter = symbol_info.get("lotSizeFilter", {})
+            min_qty = float(lot_size_filter.get("minOrderQty", 0))
+            qty_step = float(lot_size_filter.get("qtyStep", 0))
+
+            # Enforce minimum qty
+            if min_qty > 0 and position_size < min_qty:
+                min_position_value = min_qty * entry_price
+                min_margin_required = min_position_value / lev
+                if min_margin_required > balance:
+                    logger.warning(
+                        f"Skipping {symbol}: required margin {min_margin_required:.2f}, available {balance:.2f}"
+                    )
                     return 0.0
-                if qty_step > 0:
-                    position_size = round(position_size / qty_step) * qty_step
-            return round(position_size, 6)
+                logger.info(f"Adjusted position size up to minimum {min_qty} for {symbol}")
+                position_size = min_qty
+
+            # Snap to qty step
+            if qty_step > 0:
+                position_size = math.floor(position_size / qty_step) * qty_step
+                # Ensure still >= min_qty
+                if min_qty > 0 and position_size < min_qty:
+                    position_size = min_qty
+
+            return round(position_size, 6) if position_size > 0 else 0.0
+
         except Exception as e:
-            logger.error(f"Error calculating position size for {symbol}: {e}")
+            logger.error(f"Error calculating position size for {symbol}: {e}", exc_info=True)
             return 0.0
-        
+
     def calculate_virtual_pnl(self, trade: Dict) -> float:
         """Calculate unrealized PnL for virtual trades"""
         try:

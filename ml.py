@@ -111,17 +111,33 @@ class MLFilter:
         except Exception as e:
             logger.error(f"Error predicting signal quality: {e}")
             return 0.5
-
-    def filter_signals(self, signals: List[Signal], threshold: float = 0.4) -> List[Signal]:
+    
+    def filter_signals(self, signals: List[Any], threshold: float = 0.4) -> List[Any]:
         """Filter signals based on ML model prediction"""
-        filtered_signals: List[Signal] = []
+        filtered_signals: List[Any] = []
         for sig in signals:
-            quality = self.predict_signal_quality(sig.indicators or {})
+            # handle both Signal objects and dicts
+            if hasattr(sig, "indicators"):
+                indicators = sig.indicators or {}
+                score = getattr(sig, "score", 0) or 0
+            elif isinstance(sig, dict):
+                indicators = sig.get("indicators", {})
+                score = sig.get("score", 0) or 0
+            else:
+                continue
+
+            quality = self.predict_signal_quality(indicators)
             if quality >= threshold:
-                sig.score = min(100, (sig.score or 0) * (1 + quality))
+                new_score = min(100, score * (1 + quality))
+                if hasattr(sig, "score"):
+                    sig.score = new_score
+                elif isinstance(sig, dict):
+                    sig["score"] = new_score
                 filtered_signals.append(sig)
+
         logger.info(f"{len(filtered_signals)}/{len(signals)} signals passed ML filter")
         return filtered_signals
+
 
     def get_feature_importance(self) -> Dict[str, float] | None:
         """Return feature importance if model is trained"""

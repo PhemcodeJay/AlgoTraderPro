@@ -238,9 +238,9 @@ class AutomatedTrader:
             # Calculate position size
             position_size = self.engine.calculate_position_size(symbol, entry_price)
             if position_size <= 0:
-                logger.warning(f"Invalid position size for {symbol}: {position_size}")
+                logger.info(f"Skipped trade for {symbol}: insufficient balance to meet minimum order size")
                 return
-            
+        
             # Initialize order_id
             order_id = f"auto_{symbol}_{int(time.time())}"
             
@@ -266,11 +266,12 @@ class AutomatedTrader:
                     min_qty = float(lot_size_filter.get("minOrderQty", 0))
                     qty_step = float(lot_size_filter.get("qtyStep", 0))
                     if position_size < min_qty:
-                        logger.warning(f"Position size {position_size} below minimum {min_qty} for {symbol}")
+                        logger.info(f"Skipped trade for {symbol}: position size {position_size} < min {min_qty}")
                         return
                     if qty_step > 0:
-                        position_size = round(position_size / qty_step) * qty_step
-                
+                        position_size = (position_size // qty_step) * qty_step
+
+
                 # Place order on Bybit mainnet
                 order_result = await self.client.place_order(
                     symbol=symbol,
