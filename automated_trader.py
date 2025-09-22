@@ -10,7 +10,6 @@ from signal_generator import generate_signals, get_usdt_symbols
 from db import db_manager, Trade, Signal, TradeModel
 from logging_config import get_trading_logger
 
-
 logger = get_trading_logger(__name__)
 
 class AutomatedTrader:
@@ -18,10 +17,12 @@ class AutomatedTrader:
         self.engine = engine
         self.client = client
         self.db = db_manager
-        
         self.is_running = False
         self.task = None
         self.stop_event = asyncio.Event()
+        
+        # Ensure BybitClient uses mainnet
+        self.client.base_url = "https://api.bybit.com"
         
         # Trading parameters
         self.scan_interval, self.top_n_signals = self.engine.get_settings()
@@ -39,7 +40,7 @@ class AutomatedTrader:
             "last_scan": None
         }
         
-        logger.info("Automated trader initialized", extra={
+        logger.info("Automated trader initialized for Bybit mainnet", extra={
             'scan_interval': self.scan_interval,
             'max_positions': self.max_positions,
             'risk_per_trade': self.risk_per_trade,
@@ -64,7 +65,7 @@ class AutomatedTrader:
             # Start the main trading loop
             self.task = asyncio.create_task(self._trading_loop(status_container))
             
-            logger.info("Automated trading started")
+            logger.info("Automated trading started on mainnet")
             if status_container:
                 status_container.success("🤖 Automated trading started")
             return True
@@ -110,7 +111,8 @@ class AutomatedTrader:
                 "max_positions": self.max_positions,
                 "scan_interval": self.scan_interval,
                 "risk_per_trade": self.risk_per_trade,
-                "leverage": self.leverage
+                "leverage": self.leverage,
+                "base_url": self.client.base_url
             }
         except Exception as e:
             logger.error(f"Error getting trader status: {e}", exc_info=True)
@@ -229,11 +231,69 @@ class AutomatedTrader:
                 logger.warning(f"Invalid entry price for {symbol}: {entry_price}")
                 return
             
-            position_size = self.engine.calculate_position_size(symbol, entry_price)
+            # Get stop loss and take profit, set defaults
+            stop_loss = float(signal.get("sl", entry_price * (0.95 if side.lower() == "buy" else 1.05)))  # 5% SL
+            take_profit = float(signal.get("tp", entry_price * (1.10 if side.lower() == "buy" else 0.90)))  # 10% TP
             
+            # Calculate position size
+            position_size = self.engine.calculate_position_size(symbol, entry_price)
             if position_size <= 0:
                 logger.warning(f"Invalid position size for {symbol}: {position_size}")
                 return
+            
+            # Initialize order_id
+            order_id = f"auto_{symbol}_{int(time.time())}"
+            
+            # For real mode, check balance and symbol rules
+            if trading_mode == "real":
+                # Check balance
+                balance = self.client.get_account_balance()
+                usdt_balance = balance.get("USDT")
+                if not usdt_balance or usdt_balance.available <= 0:
+                    logger.warning(f"No available balance for {symbol}: Available={usdt_balance.available if usdt_balance else 0}")
+                    return
+                
+                # Estimate required margin (qty * price / leverage)
+                required_margin = (position_size * entry_price) / self.leverage
+                if required_margin > usdt_balance.available:
+                    logger.warning(f"Insufficient balance for {symbol}: Required={required_margin:.2f}, Available={usdt_balance.available:.2f}")
+                    return
+                
+                # Validate quantity against symbol rules
+                symbol_info = self.engine.get_symbol_info(symbol)
+                if symbol_info:
+                    lot_size_filter = symbol_info.get("lotSizeFilter", {})
+                    min_qty = float(lot_size_filter.get("minOrderQty", 0))
+                    qty_step = float(lot_size_filter.get("qtyStep", 0))
+                    if position_size < min_qty:
+                        logger.warning(f"Position size {position_size} below minimum {min_qty} for {symbol}")
+                        return
+                    if qty_step > 0:
+                        position_size = round(position_size / qty_step) * qty_step
+                
+                # Place order on Bybit mainnet
+                order_result = await self.client.place_order(
+                    symbol=symbol,
+                    side=side,
+                    qty=position_size,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    leverage=self.leverage,
+                    mode="ISOLATED"
+                )
+                
+                # Check for errors
+                if "error" in order_result:
+                    logger.error(f"Failed to place order for {symbol}: {order_result['error']}")
+                    return
+                
+                if "order_id" not in order_result:
+                    logger.error(f"No order_id returned for {symbol}: {order_result}")
+                    return
+                
+                # Update order_id and entry_price for real trade
+                order_id = order_result["order_id"]
+                entry_price = order_result["price"]  # Use Bybit's price
             
             # Create trade data
             trade = Trade(
@@ -241,7 +301,7 @@ class AutomatedTrader:
                 side=side,
                 qty=position_size,
                 entry_price=entry_price,
-                order_id=f"auto_{symbol}_{int(time.time())}",
+                order_id=order_id,
                 virtual=(trading_mode == "virtual"),
                 status="open",
                 score=score,
@@ -250,13 +310,13 @@ class AutomatedTrader:
                 timestamp=datetime.now(timezone.utc)
             )
             
+            # Save trade to database
             trade_dict = asdict(trade)
-            
-            # Execute trade
             success = self.db.add_trade(trade_dict)
             if success:
                 self.stats["trades_executed"] += 1
-                logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}")
+                logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}", 
+                           extra={"order_id": trade_dict["order_id"], "qty": position_size})
                 
                 # Save signal to DB
                 signal_obj = Signal(
@@ -267,8 +327,8 @@ class AutomatedTrader:
                     indicators=signal.get("indicators", {}),
                     strategy=signal.get("strategy", "Auto"),
                     side=side,
-                    sl=signal.get("sl"),
-                    tp=signal.get("tp"),
+                    sl=stop_loss,
+                    tp=take_profit,
                     trail=signal.get("trail"),
                     liquidation=signal.get("liquidation"),
                     leverage=signal.get("leverage", self.leverage),
@@ -280,7 +340,7 @@ class AutomatedTrader:
                 
                 self.db.add_signal(signal_obj)
             else:
-                logger.error(f"Failed to execute trade for {symbol}")
+                logger.error(f"Failed to save trade for {symbol} in database")
                 
         except Exception as e:
             logger.error(f"Error executing signal for {symbol}: {e}", exc_info=True)
@@ -366,6 +426,13 @@ class AutomatedTrader:
             
             trade_dict = asdict(trade)
             pnl = self.engine.calculate_virtual_pnl(trade_dict)
+            
+            if trading_mode == "real":
+                # Cancel order on Bybit if still open
+                if trade.order_id:
+                    success = await self.client.cancel_order(trade.symbol, trade.order_id)
+                    if not success:
+                        logger.warning(f"Failed to cancel order {trade.order_id} for {trade.symbol}")
             
             # Update trade in database
             success = False

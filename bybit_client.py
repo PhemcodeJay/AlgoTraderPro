@@ -198,8 +198,8 @@ class BybitClient:
         
         # Map specific error codes to exceptions
         if ret_code == 10001:
-            raise APIAuthenticationException(
-                f"Invalid API key or signature: {ret_msg}",
+            raise APIDataException(
+                f"Request parameter error: {ret_msg}",
                 context=create_error_context(module=__name__, function='_handle_api_error')
             )
         elif ret_code == 10002:
@@ -622,46 +622,40 @@ class BybitClient:
         self,
         symbol: str,
         side: str,
-        order_type: str,
         qty: float,
-        price: Optional[float] = None,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
-        leverage: Optional[int] = None,
+        stop_loss: float,
+        take_profit: float,
+        leverage: Optional[int] = 10,
         mode: str = "ISOLATED"
     ) -> Dict:
-        """Place a trading order with leverage and margin mode"""
+        """Place a market trading order with leverage, isolated margin mode, required TP and SL"""
         try:
-            # Default leverage = 10 if not provided
+            # Default leverage = 10
             leverage = leverage or 10
 
-            # Step 1: Set leverage & margin mode (sync call in thread executor)
+            # Step 1: Set margin mode and leverage using correct endpoint
+            trade_mode = 1 if mode.upper() == "ISOLATED" else 0
             lev_params = {
                 "category": "linear",
                 "symbol": symbol,
+                "tradeMode": trade_mode,
                 "buyLeverage": str(leverage),
-                "sellLeverage": str(leverage),
-                "mode": mode.upper()
+                "sellLeverage": str(leverage)
             }
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/set-leverage", lev_params)
+            await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
-            # Step 2: Build order params
+            # Step 2: Build order params (always market order, with TP/SL required)
             params = {
                 "category": "linear",
-                "accountType": self.account_type, 
                 "symbol": symbol,
                 "side": side.title(),
-                "orderType": "Market" if order_type.lower() == "market" else "Limit",
+                "orderType": "Market",
                 "qty": str(qty),
-                "timeInForce": "GTC"
+                "timeInForce": "IOC",  # Immediate or Cancel for market orders
+                "stopLoss": str(stop_loss),
+                "takeProfit": str(take_profit)
             }
-            if price and order_type.lower() == "limit":
-                params["price"] = str(price)
-            if stop_loss:
-                params["stopLoss"] = str(stop_loss)
-            if take_profit:
-                params["takeProfit"] = str(take_profit)
 
             # Step 3: Place order (sync call via executor)
             result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
@@ -673,7 +667,7 @@ class BybitClient:
                     "accountType": self.account_type, 
                     "side": side,
                     "qty": qty,
-                    "price": price or self.get_current_price(symbol),
+                    "price": self.get_current_price(symbol),
                     "status": "pending",
                     "timestamp": datetime.now(),
                     "virtual": False,
@@ -691,7 +685,6 @@ class BybitClient:
         try:
             result = self._make_request("POST", "/v5/order/cancel", {
                 "category": "linear",
-                "accountType": self.account_type, 
                 "symbol": symbol,
                 "orderId": order_id
             })
@@ -714,7 +707,6 @@ class BybitClient:
                 for order in result["list"]:
                     orders.append({
                         "order_id": order.get("orderId"),
-                        "accountType": self.account_type, 
                         "symbol": order.get("symbol"),
                         "side": order.get("side"),
                         "qty": float(order.get("qty", 0)),
@@ -732,8 +724,7 @@ class BybitClient:
         """Get current positions"""
         try:
             params = {
-                "category": "linear",
-                "accountType": self.account_type   # ✅ must be in request
+                "category": "linear"
             }
             if symbol:
                 params["symbol"] = symbol
@@ -749,7 +740,6 @@ class BybitClient:
                             "symbol": pos.get("symbol"),
                             "side": pos.get("side"),
                             "size": size,
-                            "accountType": self.account_type, 
                             "entry_price": float(pos.get("avgPrice", 0)),
                             "mark_price": float(pos.get("markPrice", 0)),
                             "unrealized_pnl": float(pos.get("unrealisedPnl", 0)),

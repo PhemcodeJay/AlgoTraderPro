@@ -57,7 +57,7 @@ def calculate_signal_score(analysis: Dict[str, Any]) -> float:
 
     return min(100, max(0, score))
 
-def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
+def enhance_signal(analysis: Dict[str, Any]) -> Any:
     indicators = analysis.get("indicators", {})
     price = indicators.get("price", 0)
     atr = indicators.get("atr", 0)
@@ -146,27 +146,40 @@ def generate_signals(
     # Enhance and store signals
     final_signals = []
     for s in filtered_signals[:top_n]:
-        enhanced = enhance_signal(s)
+        if isinstance(s, Signal):
+            s_dict = {
+                "symbol": s.symbol,
+                "interval": s.interval,
+                "signal_type": s.signal_type,
+                "score": s.score,
+                "indicators": s.indicators,
+                "side": s.side,
+                # … add any other fields you need
+            }
+            enhanced = enhance_signal(s_dict)
+        else:
+            enhanced = enhance_signal(s)
+
         final_signals.append(enhanced)
 
         # Save to DB
         signal_obj = Signal(
-        symbol=str(enhanced.get("symbol") or "UNKNOWN"),   # ensure str, fallback
-        interval=interval,
-        signal_type=str(enhanced.get("signal_type", "BUY")),
-        score=float(enhanced.get("score", 0)),
-        indicators=enhanced.get("indicators", {}),
-        side=str(enhanced.get("side", "BUY")),
-        sl=float(enhanced.get("sl") or 0),
-        tp=float(enhanced.get("tp") or 0),
-        trail=float(enhanced.get("trail") or 0),
-        liquidation=float(enhanced.get("liquidation") or 0),
-        leverage=int(enhanced.get("leverage", 10)),
-        margin_usdt=float(enhanced.get("margin_usdt") or 0),
-        entry=float(enhanced.get("entry") or 0),
-        market=str(enhanced.get("market", "Unknown")),
-        created_at=enhanced.get("created_at") or datetime.now(timezone.utc)  # always datetime
-    )
+            symbol=str(enhanced.get("symbol") or "UNKNOWN"),   # ensure str, fallback
+            interval=interval,
+            signal_type=str(enhanced.get("signal_type", "BUY")),
+            score=float(enhanced.get("score", 0)),
+            indicators=enhanced.get("indicators", {}),
+            side=str(enhanced.get("side", "BUY")),
+            sl=float(enhanced.get("sl") or 0),
+            tp=float(enhanced.get("tp") or 0),
+            trail=float(enhanced.get("trail") or 0),
+            liquidation=float(enhanced.get("liquidation") or 0),
+            leverage=int(enhanced.get("leverage", 10)),
+            margin_usdt=float(enhanced.get("margin_usdt") or 0),
+            entry=float(enhanced.get("entry") or 0),
+            market=str(enhanced.get("market", "Unknown")),
+            created_at=enhanced.get("created_at") or datetime.now(timezone.utc)  # always datetime
+        )
 
         try:
             db_manager.add_signal(signal_obj)

@@ -210,33 +210,49 @@ class TradingEngine:
             "XRPUSDT", "BNBUSDT", "AVAXUSDT"
         ])
 
+    def get_symbol_info(self, symbol: str) -> Dict:
+        """Get symbol information (e.g., lot size)"""
+        try:
+            result = self.client._make_request("GET", "/v5/market/instruments-info", {
+                "category": "linear",
+                "symbol": symbol
+            })
+            if result and "list" in result and result["list"]:
+                return result["list"][0]
+            return {}
+        except Exception as e:
+            logger.error(f"Error getting symbol info for {symbol}: {e}")
+            return {}
+
     def calculate_position_size(self, symbol: str, entry_price: float, 
-                              risk_percent: Optional[float] = None, leverage: Optional[int] = None) -> float:
+                            risk_percent: Optional[float] = None, leverage: Optional[int] = None) -> float:
         """Calculate position size based on risk management"""
         try:
             risk_pct = risk_percent or self.settings.get("RISK_PCT", 0.01)
             lev = leverage or self.settings.get("LEVERAGE", 10)
-            
-            # Load current balance from database
-            wallet_balance = self.db.get_wallet_balance("virtual")
+            wallet_balance = self.db.get_wallet_balance("real" if self.db.get_setting("trading_mode") == "real" else "virtual")
             if not wallet_balance:
-                # Fallback: migrate if no database wallet exists
                 self.db.migrate_capital_json_to_db()
-                wallet_balance = self.db.get_wallet_balance("virtual")
-            
-            # Use virtual balance by default
+                wallet_balance = self.db.get_wallet_balance("real" if self.db.get_setting("trading_mode") == "real" else "virtual")
             balance = wallet_balance.available if wallet_balance else 100.0
-            
-            # Calculate position size
             risk_amount = balance * risk_pct
             position_value = risk_amount * lev
             position_size = position_value / entry_price
-            
+            symbol_info = self.get_symbol_info(symbol)
+            if symbol_info:
+                lot_size_filter = symbol_info.get("lotSizeFilter", {})
+                min_qty = float(lot_size_filter.get("minOrderQty", 0))
+                qty_step = float(lot_size_filter.get("qtyStep", 0))
+                if position_size < min_qty:
+                    logger.warning(f"Position size {position_size} below minimum {min_qty} for {symbol}")
+                    return 0.0
+                if qty_step > 0:
+                    position_size = round(position_size / qty_step) * qty_step
             return round(position_size, 6)
         except Exception as e:
-            logger.error(f"Error calculating position size: {e}")
-            return 0.01
-
+            logger.error(f"Error calculating position size for {symbol}: {e}")
+            return 0.0
+        
     def calculate_virtual_pnl(self, trade: Dict) -> float:
         """Calculate unrealized PnL for virtual trades"""
         try:
