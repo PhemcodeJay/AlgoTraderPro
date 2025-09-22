@@ -528,9 +528,12 @@ def main():
                                     symbol=symbol,
                                     side=side,
                                     qty=trade_data["qty"],
-                                    price=entry_price,
-                                    order_type="Market"
+                                    stop_loss=float(trade_data["sl"]),
+                                    take_profit=float(trade_data["tp"]),
+                                    leverage=trade_data.get("leverage", 10),
+                                    mode="ISOLATED"
                                 ))
+
                                 if order_result.get("success"):
                                     engine.db.add_trade(trade_data)
                                     engine.sync_real_balance()
