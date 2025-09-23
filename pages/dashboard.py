@@ -136,85 +136,76 @@ def create_portfolio_chart(engine):
 
 def load_capital_data(bybit_client: Optional['BybitClient'] = None) -> dict:
     """Load capital data from database, syncing real balance if Bybit client is connected"""
-    # Default fallback
     default_virtual = {"available": 100.0, "capital": 100.0, "used": 0.0, "start_balance": 100.0}
     default_real = {"available": 0.0, "capital": 0.0, "used": 0.0, "start_balance": 0.0}
 
     try:
-        # Fetch balances from database
+        # --- Virtual balance ---
         virtual_balance = db_manager.get_wallet_balance("virtual")
-        real_balance_db = db_manager.get_wallet_balance("real")
+        if not virtual_balance and os.path.exists("capital.json"):
+            try:
+                with open("capital.json", "r") as f:
+                    json.load(f)  # just validate JSON
+                db_manager.migrate_capital_json_to_db()
+                virtual_balance = db_manager.get_wallet_balance("virtual")
+                logger.info("Virtual capital migrated from capital.json to DB")
+            except Exception as e:
+                logger.warning(f"Could not migrate capital.json: {e}")
 
-        # Fallback for virtual balance: migrate from capital.json if missing
-        if not virtual_balance:
-            if os.path.exists("capital.json"):
-                try:
-                    with open("capital.json", "r") as f:
-                        _ = json.load(f)  # verify JSON
-                    db_manager.migrate_capital_json_to_db()
-                    virtual_balance = db_manager.get_wallet_balance("virtual")
-                    logger.info("Virtual capital data migrated from capital.json to DB")
-                except Exception as e:
-                    logger.warning(f"Could not migrate capital.json: {e}")
-
-        capital_data = {
-            "virtual": {
-                "available": getattr(virtual_balance, "available", default_virtual["available"]) if virtual_balance else default_virtual["available"],
-                "capital": getattr(virtual_balance, "capital", default_virtual["capital"]) if virtual_balance else default_virtual["capital"],
-                "used": getattr(virtual_balance, "used", default_virtual["used"]) if virtual_balance else default_virtual["used"],
-                "start_balance": getattr(virtual_balance, "start_balance", default_virtual["start_balance"]) if virtual_balance else default_virtual["start_balance"],
-            },
-            "real": {
-                "available": getattr(real_balance_db, "available", default_real["available"]) if real_balance_db else default_real["available"],
-                "capital": getattr(real_balance_db, "capital", default_real["capital"]) if real_balance_db else default_real["capital"],
-                "used": getattr(real_balance_db, "used", default_real["used"]) if real_balance_db else default_real["used"],
-                "start_balance": getattr(real_balance_db, "start_balance", default_real["start_balance"]) if real_balance_db else default_real["start_balance"],
-            }
+        # Format virtual
+        virtual_data = {
+            "available": getattr(virtual_balance, "available", default_virtual["available"]) if virtual_balance else default_virtual["available"],
+            "capital": getattr(virtual_balance, "capital", default_virtual["capital"]) if virtual_balance else default_virtual["capital"],
+            "used": getattr(virtual_balance, "used", default_virtual["used"]) if virtual_balance else default_virtual["used"],
+            "start_balance": getattr(virtual_balance, "start_balance", default_virtual["start_balance"]) if virtual_balance else default_virtual["start_balance"],
         }
 
-        # Sync real balance with Bybit API if client is connected
+        # --- Real balance ---
+        real_balance = db_manager.get_wallet_balance("real")
         if bybit_client and bybit_client.is_connected():
             try:
                 engine = TradingEngine()
                 if engine.sync_real_balance():
-                    real_balance_db = db_manager.get_wallet_balance("real")
-                    logger.info(f"Post-sync real balance from DB: available={real_balance_db.available if real_balance_db else 'None'}")
-                    if real_balance_db:
-                        capital_data["real"] = {
-                            "available": real_balance_db.available,
-                            "capital": real_balance_db.capital,
-                            "used": real_balance_db.used,
-                            "start_balance": real_balance_db.start_balance
-                        }
-                        logger.info(f"Real balance synced: capital=${capital_data['real']['capital']:.2f}, available=${capital_data['real']['available']:.2f}, used=${capital_data['real']['used']:.2f}")
+                    real_balance = db_manager.get_wallet_balance("real")
+                    if real_balance:
+                        logger.info(
+                            f"✅ Real balance synced: capital=${real_balance.capital:.2f}, "
+                            f"available=${real_balance.available:.2f}, used=${real_balance.used:.2f}"
+                        )
                     else:
                         logger.warning("Failed to retrieve real balance after sync")
-                        st.error("❌ Failed to retrieve real balance after sync. Check Bybit account or API permissions.")
+                        st.error("❌ Could not refresh real balance from DB after sync.")
                 else:
                     logger.warning("Real balance sync failed")
-                    st.error("❌ Failed to sync real balance. Check Bybit account or API permissions.")
+                    st.error("❌ Failed to sync real balance. Check Bybit API keys/permissions.")
             except Exception as e:
                 logger.error(f"Failed to sync real balance from Bybit: {e}", exc_info=True)
                 st.error(f"❌ Sync failed: {e}")
         else:
-            logger.warning("Bybit client not connected, skipping real balance sync")
+            logger.debug("Bybit client not connected, skipping real balance sync")
             if st.session_state.get("trading_mode") == "real":
-                st.warning("Bybit API not connected. Check API keys in .env file.")
+                st.warning("⚠️ Bybit API not connected. Check API keys in .env file.")
 
-        # Conditional messaging for real balance
-        if capital_data["real"]["available"] == 0.0 and capital_data["real"]["capital"] > 0.0:
-            st.info("Real available balance is $0.00. Funds may be in use (e.g., open positions).")
-        elif capital_data["real"]["available"] == 0.0 and capital_data["real"]["capital"] == 0.0 and bybit_client and bybit_client.is_connected():
-            st.warning("No funds available in Bybit account. Verify account balance or API permissions.")
+        # Format real
+        real_data = {
+            "available": getattr(real_balance, "available", default_real["available"]) if real_balance else default_real["available"],
+            "capital": getattr(real_balance, "capital", default_real["capital"]) if real_balance else default_real["capital"],
+            "used": getattr(real_balance, "used", default_real["used"]) if real_balance else default_real["used"],
+            "start_balance": getattr(real_balance, "start_balance", default_real["start_balance"]) if real_balance else default_real["start_balance"],
+        }
 
-        return capital_data
+        # Conditional messages (only for real account)
+        if real_data["available"] == 0.0 and real_data["capital"] > 0.0:
+            st.info("ℹ️ Real available balance is $0.00. Funds may be tied up in open positions.")
+        elif real_data["available"] == 0.0 and real_data["capital"] == 0.0 and bybit_client and bybit_client.is_connected():
+            st.warning("⚠️ No funds detected in Bybit account. Verify account balance or API permissions.")
+
+        return {"virtual": virtual_data, "real": real_data}
 
     except Exception as e:
         logger.error(f"Error loading capital data: {e}", exc_info=True)
-        return {
-            "virtual": default_virtual,
-            "real": default_real
-        }
+        return {"virtual": default_virtual, "real": default_real}
+
 
 def main():
     # Ensure trading mode is initialized

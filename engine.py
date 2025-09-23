@@ -446,7 +446,7 @@ class TradingEngine:
                 logger.error("Bybit client not initialized. Check API credentials in .env")
                 return False
 
-            # Attempt to ensure client is connected
+            # Ensure client connection
             if not self.client.is_connected():
                 logger.warning("Bybit client not connected. Attempting to reconnect...")
                 try:
@@ -459,7 +459,7 @@ class TradingEngine:
                     logger.error(f"Reconnection failed: {e}", exc_info=True)
                     return False
 
-            # Fetch raw response
+            # Fetch balance from Bybit
             result = self.client._make_request(
                 "GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"}
             )
@@ -470,31 +470,39 @@ class TradingEngine:
 
             wallet = result["list"][0]
 
-            # Top-level balances
-            total_equity = float(wallet.get("totalEquity", "0") or 0)
-            total_available = float(wallet.get("totalAvailableBalance", "0") or 0)
+            # Total equity (margin balance / net assets)
+            total_equity = float(wallet.get("totalEquity") or 0.0)
 
-            # Coin-specific fallback for USDT
+            # Look for USDT balance
             coins = wallet.get("coin", [])
             usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
+
             if usdt_coin:
-                usdt_available = float(usdt_coin.get("availableToWithdraw", "0") or 0)
-                if total_available == 0 and usdt_available > 0:
-                    logger.info(f"Using USDT availableToWithdraw={usdt_available} as fallback for available balance")
-                    total_available = usdt_available
+                # Use walletBalance (real available balance in isolated/unified accounts)
+                total_available = float(usdt_coin.get("walletBalance") or 0.0)
             else:
-                logger.warning("No USDT coin data found in Bybit response")
+                total_available = total_equity  # fallback if USDT not found
 
+            # Used margin = equity - available
             used = total_equity - total_available
+            if used < 1e-6:  # Avoid floating-point noise
+                used = 0.0
 
-            if total_available == 0:
-                logger.warning("Available balance is still 0. Either funds not usable for margin, or collateral not enabled.")
+            if total_available == 0 and total_equity > 0:
+                logger.warning(
+                    "Available balance is 0 while equity > 0. "
+                    "Funds may be locked in margin, open positions, or collateral disabled in Bybit."
+                )
 
-            # Get existing start_balance from DB
+            # Get existing DB record for start balance preservation
             existing_balance: Optional[DBWalletBalance] = self.db.get_wallet_balance("real")
-            start_balance = existing_balance.start_balance if existing_balance and existing_balance.start_balance > 0 else total_equity
+            start_balance = (
+                existing_balance.start_balance
+                if existing_balance and existing_balance.start_balance > 0
+                else total_equity
+            )
 
-            # Create WalletBalance
+            # Build wallet balance model
             wallet_balance = DBWalletBalance(
                 trading_mode="real",
                 capital=total_equity,
@@ -506,9 +514,8 @@ class TradingEngine:
                 id=existing_balance.id if existing_balance else None,
             )
 
-            # Update database
-            success = self.db.update_wallet_balance(wallet_balance)
-            if success:
+            # Save to DB
+            if self.db.update_wallet_balance(wallet_balance):
                 logger.info(
                     f"✅ Real balance synced with Bybit: Capital=${total_equity:.2f}, "
                     f"Available=${total_available:.2f}, Used=${used:.2f}"
@@ -522,7 +529,7 @@ class TradingEngine:
             logger.error(f"❌ Error syncing real balance: {e}", exc_info=True)
             return False
 
-         
+            
     def execute_virtual_trade(self, signal: Dict, trading_mode: str = "virtual") -> bool:
         """Execute a virtual trade based on a signal"""
         try:
