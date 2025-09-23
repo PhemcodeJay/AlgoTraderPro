@@ -40,7 +40,7 @@ class AutomatedTrader:
             "last_scan": None
         }
         
-        logger.info("Automated trader initialized for Bybit mainnet with ISOLATED margin", extra={
+        logger.info("Automated trader initialized for Bybit mainnet with UNIFIED account and ISOLATED margin futures", extra={
             'scan_interval': self.scan_interval,
             'max_positions': self.max_positions,
             'risk_per_trade': self.risk_per_trade,
@@ -65,7 +65,7 @@ class AutomatedTrader:
             # Start the main trading loop
             self.task = asyncio.create_task(self._trading_loop(status_container))
             
-            logger.info("Automated trading started on mainnet with ISOLATED margin")
+            logger.info("Automated trading started on mainnet with ISOLATED margin futures")
             if status_container:
                 status_container.success("🤖 Automated trading started")
             return True
@@ -113,7 +113,8 @@ class AutomatedTrader:
                 "risk_per_trade": self.risk_per_trade,
                 "leverage": self.leverage,
                 "base_url": self.client.base_url,
-                "margin_mode": "ISOLATED"
+                "margin_mode": "ISOLATED",
+                "account_type": "UNIFIED"
             }
         except Exception as e:
             logger.error(f"Error getting trader status: {e}", exc_info=True)
@@ -222,10 +223,10 @@ class AutomatedTrader:
                 logger.warning("Signal missing symbol")
                 return
 
-            # Validate symbol exists and is tradable
+            # Validate symbol exists and is tradable (USDT perpetual futures)
             ticker_info = self.client._make_request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol})
             if not ticker_info or "result" not in ticker_info or not ticker_info["result"].get("list"):
-                logger.warning(f"Symbol {symbol} not found or not tradable")
+                logger.warning(f"Symbol {symbol} not found or not tradable in futures")
                 return
 
             side = signal.get("side", "Buy")
@@ -242,30 +243,26 @@ class AutomatedTrader:
             stop_loss = float(signal.get("sl", entry_price * sl_multiplier))
             take_profit = float(signal.get("tp", entry_price * tp_multiplier))
 
-            # Get available balance for this symbol
+            # Get available balance for UNIFIED account
             if trading_mode == "real":
                 available_balance = 0.0
                 try:
-                    # Fetch isolated margin balance for the specific symbol
+                    # Fetch unified wallet balance (covers futures)
                     result = self.client._make_request(
                         "GET",
                         "/v5/account/wallet-balance",
-                        {"accountType": "CONTRACT", "coin": symbol.replace("USDT", "")}
+                        {"accountType": "UNIFIED"}
                     )
 
                     if result and "result" in result and result["result"].get("list"):
-                        for coin_info in result["result"]["list"]:
-                            if coin_info.get("coin") == symbol.replace("USDT", ""):
-                                available_balance = float(coin_info.get("availableToWithdraw", 0.0))
-                                logger.info(f"Fetched isolated margin balance for {symbol}: Available={available_balance:.2f}")
-                                break
-                        else:
-                            logger.warning(f"No isolated margin balance found for {symbol}")
+                        account_info = result["result"]["list"][0]
+                        available_balance = float(account_info.get("totalAvailableBalance", 0.0))
+                        logger.info(f"Fetched UNIFIED balance for {symbol}: Available={available_balance:.2f}")
                     else:
-                        logger.warning(f"No isolated margin data returned for {symbol}")
+                        logger.warning(f"No UNIFIED wallet data returned")
 
                 except Exception as e:
-                    logger.error(f"Failed to fetch isolated margin balance for {symbol}: {e}")
+                    logger.error(f"Failed to fetch UNIFIED wallet balance for {symbol}: {e}")
                     available_balance = 0.0
 
             else:
@@ -311,21 +308,28 @@ class AutomatedTrader:
                     if qty_step > 0:
                         position_size = (position_size // qty_step) * qty_step
 
-                # Ensure isolated margin mode is set for the symbol
+                # Set isolated margin mode for futures
                 try:
-                    margin_result = self.client._make_request(
+                    switch_result = self.client._make_request(
                         "POST",
-                        "/v5/account/set-margin-mode",
-                        {"symbol": symbol, "marginMode": "ISOLATED"}
+                        "/v5/position/switch-isolated",
+                        {
+                            "category": "linear",
+                            "symbol": symbol,
+                            "tradeMode": 2,  # 2 = Isolated Margin
+                            "buyLeverage": str(self.leverage),
+                            "sellLeverage": str(self.leverage)
+                        }
                     )
-                    if margin_result.get("retCode") != 0:
-                        logger.error(f"Failed to set isolated margin for {symbol}: {margin_result.get('retMsg')}")
+                    if switch_result.get("retCode") != 0:
+                        logger.error(f"Failed to set isolated margin for {symbol}: {switch_result.get('retMsg')}")
                         return
+                    logger.info(f"Set isolated margin mode for {symbol} futures")
                 except Exception as e:
                     logger.error(f"Error setting isolated margin for {symbol}: {e}")
                     return
 
-                # Place the order
+                # Place the order (futures with isolated margin)
                 order_result = await self.client.place_order(
                     symbol=symbol,
                     side=side,
@@ -365,7 +369,7 @@ class AutomatedTrader:
             trade_dict = asdict(trade)
             if self.db.add_trade(trade_dict):
                 self.stats["trades_executed"] += 1
-                logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}",
+                logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}, Futures ISOLATED",
                             extra={"order_id": trade_dict["order_id"], "qty": position_size})
 
                 # Save signal to DB
@@ -384,7 +388,7 @@ class AutomatedTrader:
                     leverage=signal.get("leverage", self.leverage),
                     margin_usdt=signal.get("margin_usdt"),
                     entry=entry_price,
-                    market=signal.get("market"),
+                    market=signal.get("market", "futures"),
                     created_at=signal.get("created_at", datetime.now(timezone.utc))
                 )
                 self.db.add_signal(signal_obj)
