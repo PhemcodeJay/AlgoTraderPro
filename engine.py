@@ -470,7 +470,7 @@ class TradingEngine:
 
             wallet = result["list"][0]
 
-            # Total equity (margin balance / net assets)
+            # Total equity (net assets)
             total_equity = float(wallet.get("totalEquity") or 0.0)
 
             # Look for USDT balance
@@ -478,14 +478,14 @@ class TradingEngine:
             usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
 
             if usdt_coin:
-                # Use walletBalance (real available balance in isolated/unified accounts)
+                # Use walletBalance (available to trade/withdraw)
                 total_available = float(usdt_coin.get("walletBalance") or 0.0)
             else:
                 total_available = total_equity  # fallback if USDT not found
 
-            # Used margin = equity - available
-            used = total_equity - total_available
-            if used < 1e-6:  # Avoid floating-point noise
+            # Recalculate used accurately
+            used = max(total_equity - total_available, 0.0)
+            if used < 1e-6:  # suppress tiny floating point noise
                 used = 0.0
 
             if total_available == 0 and total_equity > 0:
@@ -494,7 +494,7 @@ class TradingEngine:
                     "Funds may be locked in margin, open positions, or collateral disabled in Bybit."
                 )
 
-            # Get existing DB record for start balance preservation
+            # Preserve start balance from DB
             existing_balance: Optional[DBWalletBalance] = self.db.get_wallet_balance("real")
             start_balance = (
                 existing_balance.start_balance

@@ -396,7 +396,12 @@ def main():
 
             capital_val = wallet_balance.capital if wallet_balance else 0.0
             available_val = wallet_balance.available if wallet_balance else 0.0
-            used_val = wallet_balance.used if wallet_balance else 0.0
+
+            # Recalculate used based on capital - available
+            used_val = capital_val - available_val
+            # Suppress tiny floating point noise
+            if abs(used_val) < 0.01:
+                used_val = 0.0
 
             if current_mode == "virtual":
                 st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
@@ -406,6 +411,7 @@ def main():
                 st.metric("🏦 Real Capital", f"${capital_val:.2f}")
                 st.metric("🏦 Real Available", f"${available_val:.2f}")
                 st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
+
 
                         
         except Exception as e:

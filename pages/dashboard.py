@@ -152,13 +152,23 @@ def load_capital_data(bybit_client: Optional['BybitClient'] = None) -> dict:
             except Exception as e:
                 logger.warning(f"Could not migrate capital.json: {e}")
 
-        # Format virtual
-        virtual_data = {
-            "available": getattr(virtual_balance, "available", default_virtual["available"]) if virtual_balance else default_virtual["available"],
-            "capital": getattr(virtual_balance, "capital", default_virtual["capital"]) if virtual_balance else default_virtual["capital"],
-            "used": getattr(virtual_balance, "used", default_virtual["used"]) if virtual_balance else default_virtual["used"],
-            "start_balance": getattr(virtual_balance, "start_balance", default_virtual["start_balance"]) if virtual_balance else default_virtual["start_balance"],
-        }
+        def fmt_balance(balance, defaults):
+            """Helper to safely extract balance fields with rounding"""
+            if not balance:
+                return defaults
+            available = round(float(getattr(balance, "available", defaults["available"])), 2)
+            capital = round(float(getattr(balance, "capital", defaults["capital"])), 2)
+            used = round(float(getattr(balance, "used", defaults["used"])), 2)
+            if abs(used) < 0.01:  # suppress floating point noise
+                used = 0.0
+            return {
+                "available": available,
+                "capital": capital,
+                "used": used,
+                "start_balance": float(getattr(balance, "start_balance", defaults["start_balance"])),
+            }
+
+        virtual_data = fmt_balance(virtual_balance, default_virtual)
 
         # --- Real balance ---
         real_balance = db_manager.get_wallet_balance("real")
@@ -186,13 +196,7 @@ def load_capital_data(bybit_client: Optional['BybitClient'] = None) -> dict:
             if st.session_state.get("trading_mode") == "real":
                 st.warning("⚠️ Bybit API not connected. Check API keys in .env file.")
 
-        # Format real
-        real_data = {
-            "available": getattr(real_balance, "available", default_real["available"]) if real_balance else default_real["available"],
-            "capital": getattr(real_balance, "capital", default_real["capital"]) if real_balance else default_real["capital"],
-            "used": getattr(real_balance, "used", default_real["used"]) if real_balance else default_real["used"],
-            "start_balance": getattr(real_balance, "start_balance", default_real["start_balance"]) if real_balance else default_real["start_balance"],
-        }
+        real_data = fmt_balance(real_balance, default_real)
 
         # Conditional messages (only for real account)
         if real_data["available"] == 0.0 and real_data["capital"] > 0.0:
