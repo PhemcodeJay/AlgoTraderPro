@@ -223,10 +223,10 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Error getting symbol info for {symbol}: {e}")
             return {}
-
+    
     def calculate_position_size(
-        self, 
-        symbol: str, 
+        self,
+        symbol: str,
         entry_price: float,
         risk_percent: Optional[float] = None,
         leverage: Optional[int] = None,
@@ -236,11 +236,11 @@ class TradingEngine:
         try:
             import math
 
-            # Determine risk and leverage
+            # --- Determine risk & leverage ---
             risk_pct = risk_percent or self.settings.get("RISK_PCT", 0.01)
             lev = leverage or self.settings.get("LEVERAGE", 10)
 
-            # Get wallet balance
+            # --- Get wallet balance ---
             mode = "real" if self.db.get_setting("trading_mode") == "real" else "virtual"
             wallet_balance = self.db.get_wallet_balance(mode)
             if not wallet_balance:
@@ -252,12 +252,12 @@ class TradingEngine:
                 logger.warning(f"Cannot calculate position size for {symbol}: Available balance is {balance}")
                 return 0.0
 
-            # Risk-based position sizing
+            # --- Risk-based position sizing ---
             risk_amount = max(balance * risk_pct, 1.0)  # enforce at least $1 risk
             position_value = risk_amount * lev
             position_size = position_value / entry_price
 
-            # Get symbol trading rules
+            # --- Symbol trading rules ---
             symbol_info = self.get_symbol_info(symbol)
             if not symbol_info:
                 logger.error(f"No symbol info for {symbol}")
@@ -267,24 +267,34 @@ class TradingEngine:
             min_qty = float(lot_size_filter.get("minOrderQty", 0))
             qty_step = float(lot_size_filter.get("qtyStep", 0))
 
-            # Enforce minimum quantity
+            # --- Enforce minimum quantity safely ---
             if min_qty > 0 and position_size < min_qty:
                 min_position_value = min_qty * entry_price
                 min_margin_required = min_position_value / lev
                 if min_margin_required > balance:
-                    logger.warning(
-                        f"Skipping {symbol}: required margin {min_margin_required:.2f}, available {balance:.2f}"
-                    )
-                    return 0.0
-                position_size = min_qty
-                logger.info(f"Adjusted position size up to minimum {min_qty} for {symbol}")
+                    # Try to allocate at least a fraction of min_qty if balance is very small
+                    fraction = balance * lev / entry_price
+                    if fraction >= qty_step:
+                        position_size = max(fraction, qty_step)
+                        logger.info(f"Adjusted tiny balance to position size {position_size} for {symbol}")
+                    else:
+                        logger.warning(
+                            f"Skipping {symbol}: required margin {min_margin_required:.2f}, available {balance:.2f}"
+                        )
+                        return 0.0
+                else:
+                    position_size = min_qty
+                    logger.info(f"Adjusted position size up to minimum {min_qty} for {symbol}")
 
-            # Align to quantity step
+            # --- Align to quantity step ---
             if qty_step > 0:
-                position_size = math.floor(position_size / qty_step) * qty_step
+                steps = math.floor(position_size / qty_step)
+                position_size = steps * qty_step
+                # Ensure still >= min_qty
                 if min_qty > 0 and position_size < min_qty:
                     position_size = min_qty
 
+            # --- Return safe rounded value ---
             return round(position_size, 6) if position_size > 0 else 0.0
 
         except Exception as e:

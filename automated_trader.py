@@ -235,8 +235,9 @@ class AutomatedTrader:
 
             # Get available balance for this symbol
             if trading_mode == "real":
-                # Fetch isolated margin info for the symbol
+                available_balance = 0.0
                 try:
+                    # Synchronous request to fetch isolated margin
                     result = self.client._make_request(
                         "GET",
                         "/v5/account/isolated/wallet-balance",
@@ -247,7 +248,7 @@ class AutomatedTrader:
                         symbol_balance = result["result"][symbol]
                         available_balance = float(symbol_balance.get("availableBalance", 0.0))
                     else:
-                        available_balance = 0.0
+                        logger.warning(f"No isolated margin data returned for {symbol}")
 
                 except Exception as e:
                     logger.error(f"Failed to fetch isolated margin for {symbol}: {e}")
@@ -260,7 +261,6 @@ class AutomatedTrader:
             if available_balance <= 0:
                 logger.warning(f"No available balance for {symbol}: Available={available_balance:.2f}")
                 return
-
 
             # Calculate position size based on available balance
             position_size = self.engine.calculate_position_size(
@@ -340,6 +340,7 @@ class AutomatedTrader:
                 logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}",
                             extra={"order_id": trade_dict["order_id"], "qty": position_size})
 
+                # Save signal to DB
                 signal_obj = Signal(
                     symbol=symbol,
                     interval=signal.get("interval", "60"),
