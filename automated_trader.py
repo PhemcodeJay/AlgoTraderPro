@@ -233,10 +233,41 @@ class AutomatedTrader:
             stop_loss = float(signal.get("sl", entry_price * (0.95 if side.lower() == "buy" else 1.05)))
             take_profit = float(signal.get("tp", entry_price * (1.10 if side.lower() == "buy" else 0.90)))
 
-            # Calculate position size using available balance
-            wallet_balance = self.db.get_wallet_balance(trading_mode)
-            available_balance = getattr(wallet_balance, "available", 0.0) if wallet_balance else 0.0
-            position_size = self.engine.calculate_position_size(symbol, entry_price, available_balance=available_balance)
+            # Get available balance for this symbol
+            if trading_mode == "real":
+                # Fetch isolated margin info for the symbol
+                try:
+                    result = self.client._make_request(
+                        "GET",
+                        "/v5/account/isolated/wallet-balance",
+                        {"symbol": symbol}
+                    )
+
+                    if result and "result" in result and symbol in result["result"]:
+                        symbol_balance = result["result"][symbol]
+                        available_balance = float(symbol_balance.get("availableBalance", 0.0))
+                    else:
+                        available_balance = 0.0
+
+                except Exception as e:
+                    logger.error(f"Failed to fetch isolated margin for {symbol}: {e}")
+                    available_balance = 0.0
+
+            else:
+                wallet_balance = self.db.get_wallet_balance("virtual")
+                available_balance = getattr(wallet_balance, "available", 0.0) if wallet_balance else 0.0
+
+            if available_balance <= 0:
+                logger.warning(f"No available balance for {symbol}: Available={available_balance:.2f}")
+                return
+
+
+            # Calculate position size based on available balance
+            position_size = self.engine.calculate_position_size(
+                symbol,
+                entry_price,
+                available_balance=available_balance
+            )
 
             if position_size <= 0:
                 logger.info(f"Skipped trade for {symbol}: insufficient balance to meet minimum order size")
@@ -246,11 +277,7 @@ class AutomatedTrader:
             order_id = f"auto_{symbol}_{int(time.time())}"
 
             if trading_mode == "real":
-                # Ensure available balance is enough
-                if available_balance <= 0:
-                    logger.warning(f"No available balance for {symbol}: Available={available_balance:.2f}")
-                    return
-
+                # Ensure required margin <= available
                 required_margin = (position_size * entry_price) / self.leverage
                 if required_margin > available_balance:
                     logger.warning(f"Insufficient balance for {symbol}: Required={required_margin:.2f}, Available={available_balance:.2f}")
@@ -292,7 +319,7 @@ class AutomatedTrader:
                 order_id = order_result["order_id"]
                 entry_price = order_result.get("price", entry_price)
 
-            # Create trade object
+            # Save trade
             trade = Trade(
                 symbol=symbol,
                 side=side,
@@ -307,14 +334,12 @@ class AutomatedTrader:
                 timestamp=datetime.now(timezone.utc)
             )
 
-            # Save trade to DB
             trade_dict = asdict(trade)
             if self.db.add_trade(trade_dict):
                 self.stats["trades_executed"] += 1
                 logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}",
                             extra={"order_id": trade_dict["order_id"], "qty": position_size})
 
-                # Save signal to DB
                 signal_obj = Signal(
                     symbol=symbol,
                     interval=signal.get("interval", "60"),
