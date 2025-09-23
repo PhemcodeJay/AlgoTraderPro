@@ -1,4 +1,6 @@
 from dotenv import load_dotenv
+
+import bybit_client
 load_dotenv()
 
 import streamlit as st
@@ -127,6 +129,38 @@ def get_wallet_balance() -> dict:
             st.warning("No funds available in Bybit account. Verify account balance or API permissions.")
 
     return balance_data
+    
+        # Helper: fetch real-time Bybit wallet balance
+def fetch_real_balance(client) -> dict:
+    """Fetch real balance from Bybit Unified account."""
+    balance_data = {"capital": 0.0, "available": 0.0, "used": 0.0}
+    try:
+        if not client:
+            return balance_data
+
+        # Use public method of Bybit SDK instead of _make_request
+        result = client.get_wallet_balance(account_type="UNIFIED")  # adjust to your SDK
+
+        if result and "result" in result and result["result"]:
+            wallet = result["result"][0] if isinstance(result["result"], list) else result["result"]
+
+            # Capital (total equity)
+            balance_data["capital"] = float(wallet.get("totalEquity", 0.0))
+
+            # Find USDT wallet
+            coins = wallet.get("coin", [])
+            usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
+            balance_data["available"] = float(usdt_coin.get("walletBalance", 0.0)) if usdt_coin else balance_data["capital"]
+
+            # Used margin
+            balance_data["used"] = balance_data["capital"] - balance_data["available"]
+            if abs(balance_data["used"]) < 0.01:
+                balance_data["used"] = 0.0
+
+    except Exception as e:
+        logger.error(f"Failed to fetch real balance: {e}", exc_info=True)
+    return balance_data
+
 
 # --- Main App ---
 def main():
@@ -214,10 +248,27 @@ def main():
 
         st.divider()
 
-        # Display wallet balance
-        balance_data = get_wallet_balance()
-        mode = st.session_state.trading_mode
 
+
+
+        # --- Display wallet balance ---
+        mode = st.session_state.trading_mode
+        balance_data = {"capital": 0.0, "available": 0.0, "used": 0.0}
+
+        if mode == "virtual":
+            # Virtual balance from DB
+            wallet_balance = db_manager.get_wallet_balance("virtual")
+            if wallet_balance:
+                balance_data["capital"] = wallet_balance.capital
+                balance_data["available"] = wallet_balance.available
+                balance_data["used"] = wallet_balance.used
+        else:
+            # Real-time balance from Bybit
+            balance_data = fetch_real_balance(bybit_client)
+            if balance_data["capital"] == 0.0:
+                st.warning("⚠️ Could not fetch real balance. Check Bybit API keys or network.")
+
+        # Display metrics
         if mode == "virtual":
             st.metric("💻 Virtual Capital", f"${balance_data['capital']:.2f}")
             st.metric("💻 Virtual Available", f"${balance_data['available']:.2f}")
@@ -226,7 +277,6 @@ def main():
             st.metric("🏦 Real Capital", f"${balance_data['capital']:.2f}")
             st.metric("🏦 Real Available", f"${balance_data['available']:.2f}")
             st.metric("🏦 Real Used Margin", f"${balance_data['used']:.2f}")
-
 
         # Optional: show last updated timestamp
         st.markdown(

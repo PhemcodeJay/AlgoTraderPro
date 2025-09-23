@@ -392,17 +392,45 @@ def main():
             st.metric("Open Real", open_real)
             
             # Load balance from DB
-            wallet_balance = db.get_wallet_balance(current_mode)
+            if current_mode == "virtual":
+                # Fetch virtual balance from DB
+                wallet_balance = db.get_wallet_balance("virtual")
+                capital_val = wallet_balance.capital if wallet_balance else 100.0
+                available_val = wallet_balance.available if wallet_balance else 100.0
 
-            capital_val = wallet_balance.capital if wallet_balance else 0.0
-            available_val = wallet_balance.available if wallet_balance else 0.0
+            else:
+                # Fetch real-time balance from Bybit
+                try:
+                    result = engine.client._make_request(
+                        "GET",
+                        "/v5/account/wallet-balance",
+                        {"accountType": "UNIFIED"}
+                    )
 
-            # Recalculate used based on capital - available
+                    if result and "list" in result and result["list"]:
+                        wallet = result["list"][0]
+                        capital_val = float(wallet.get("totalEquity", 0.0))
+
+                        # Look for USDT balance
+                        coins = wallet.get("coin", [])
+                        usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
+                        available_val = float(usdt_coin.get("walletBalance", 0.0)) if usdt_coin else capital_val
+                    else:
+                        capital_val = available_val = 0.0
+
+                except Exception as e:
+                    logger.error(f"Failed to fetch real balance from Bybit: {e}")
+                    capital_val = available_val = 0.0
+
+            # Ensure available is not negative
+            available_val = max(available_val, 0.0)
+
+            # Recalculate used as the difference
             used_val = capital_val - available_val
-            # Suppress tiny floating point noise
             if abs(used_val) < 0.01:
                 used_val = 0.0
 
+            # Display metrics
             if current_mode == "virtual":
                 st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
                 st.metric("💻 Virtual Available", f"${available_val:.2f}")
@@ -411,6 +439,8 @@ def main():
                 st.metric("🏦 Real Capital", f"${capital_val:.2f}")
                 st.metric("🏦 Real Available", f"${available_val:.2f}")
                 st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
+
+
 
 
                         

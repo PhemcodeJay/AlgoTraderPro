@@ -171,40 +171,61 @@ def load_capital_data(bybit_client: Optional['BybitClient'] = None) -> dict:
         virtual_data = fmt_balance(virtual_balance, default_virtual)
 
         # --- Real balance ---
-        real_balance = db_manager.get_wallet_balance("real")
+        real_data = default_real.copy()  # fallback defaults
+
         if bybit_client and bybit_client.is_connected():
             try:
-                engine = TradingEngine()
-                if engine.sync_real_balance():
-                    real_balance = db_manager.get_wallet_balance("real")
-                    if real_balance:
-                        logger.info(
-                            f"✅ Real balance synced: capital=${real_balance.capital:.2f}, "
-                            f"available=${real_balance.available:.2f}, used=${real_balance.used:.2f}"
-                        )
-                    else:
-                        logger.warning("Failed to retrieve real balance after sync")
-                        st.error("❌ Could not refresh real balance from DB after sync.")
+                # Fetch real-time balance from Bybit
+                result = bybit_client._make_request(
+                    "GET",
+                    "/v5/account/wallet-balance",
+                    {"accountType": "UNIFIED"}
+                )
+
+                if result and "list" in result and result["list"]:
+                    wallet = result["list"][0]
+                    capital_val = float(wallet.get("totalEquity", 0.0))
+
+                    # Look for USDT balance
+                    coins = wallet.get("coin", [])
+                    usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
+                    available_val = float(usdt_coin.get("walletBalance", 0.0)) if usdt_coin else capital_val
+
+                    # Recalculate used margin
+                    used_val = capital_val - available_val
+                    if abs(used_val) < 0.01:
+                        used_val = 0.0
+
+                    real_data = {
+                        "capital": capital_val,
+                        "available": max(available_val, 0.0),
+                        "used": used_val,
+                        "start_balance": capital_val  # optional: could preserve previous start balance if needed
+                    }
+
+                    logger.info(f"✅ Real balance fetched: capital=${capital_val:.2f}, available=${available_val:.2f}, used=${used_val:.2f}")
+
                 else:
-                    logger.warning("Real balance sync failed")
-                    st.error("❌ Failed to sync real balance. Check Bybit API keys/permissions.")
+                    logger.warning("No real account data received from Bybit")
+                    st.error("❌ Could not fetch real balance from Bybit.")
+
             except Exception as e:
-                logger.error(f"Failed to sync real balance from Bybit: {e}", exc_info=True)
-                st.error(f"❌ Sync failed: {e}")
+                logger.error(f"Failed to fetch real balance from Bybit: {e}", exc_info=True)
+                st.error(f"❌ Real balance fetch failed: {e}")
+
         else:
-            logger.debug("Bybit client not connected, skipping real balance sync")
+            logger.debug("Bybit client not connected, skipping real balance fetch")
             if st.session_state.get("trading_mode") == "real":
                 st.warning("⚠️ Bybit API not connected. Check API keys in .env file.")
 
-        real_data = fmt_balance(real_balance, default_real)
-
-        # Conditional messages (only for real account)
+        # Conditional messages
         if real_data["available"] == 0.0 and real_data["capital"] > 0.0:
             st.info("ℹ️ Real available balance is $0.00. Funds may be tied up in open positions.")
         elif real_data["available"] == 0.0 and real_data["capital"] == 0.0 and bybit_client and bybit_client.is_connected():
             st.warning("⚠️ No funds detected in Bybit account. Verify account balance or API permissions.")
 
         return {"virtual": virtual_data, "real": real_data}
+
 
     except Exception as e:
         logger.error(f"Error loading capital data: {e}", exc_info=True)
