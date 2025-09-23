@@ -1,6 +1,4 @@
 from dotenv import load_dotenv
-
-import bybit_client
 load_dotenv()
 
 import streamlit as st
@@ -10,7 +8,6 @@ from logging_config import get_logger
 from bybit_client import BybitClient
 
 # Logging using centralized system
-from logging_config import get_logger
 logger = get_logger(__name__)
 
 # Configure Streamlit page
@@ -98,7 +95,10 @@ def get_wallet_balance() -> dict:
                         "available": getattr(wallet, "available", default_real["available"]),
                         "used": getattr(wallet, "used", default_real["used"])
                     }
-                    logger.info(f"Fetched real wallet balance after sync: capital=${balance_data['capital']:.2f}, available=${balance_data['available']:.2f}, used=${balance_data['used']:.2f}")
+                    logger.info(
+                        f"Fetched real wallet balance after sync: capital=${balance_data['capital']:.2f}, "
+                        f"available=${balance_data['available']:.2f}, used=${balance_data['used']:.2f}"
+                    )
                 else:
                     logger.warning("Failed to retrieve real balance after sync")
                     st.error("❌ Failed to retrieve real balance. Check Bybit account or API permissions.")
@@ -129,38 +129,6 @@ def get_wallet_balance() -> dict:
             st.warning("No funds available in Bybit account. Verify account balance or API permissions.")
 
     return balance_data
-    
-        # Helper: fetch real-time Bybit wallet balance
-def fetch_real_balance(client) -> dict:
-    """Fetch real balance from Bybit Unified account."""
-    balance_data = {"capital": 0.0, "available": 0.0, "used": 0.0}
-    try:
-        if not client:
-            return balance_data
-
-        # Use public method of Bybit SDK instead of _make_request
-        result = client.get_wallet_balance(account_type="UNIFIED")  # adjust to your SDK
-
-        if result and "result" in result and result["result"]:
-            wallet = result["result"][0] if isinstance(result["result"], list) else result["result"]
-
-            # Capital (total equity)
-            balance_data["capital"] = float(wallet.get("totalEquity", 0.0))
-
-            # Find USDT wallet
-            coins = wallet.get("coin", [])
-            usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
-            balance_data["available"] = float(usdt_coin.get("walletBalance", 0.0)) if usdt_coin else balance_data["capital"]
-
-            # Used margin
-            balance_data["used"] = balance_data["capital"] - balance_data["available"]
-            if abs(balance_data["used"]) < 0.01:
-                balance_data["used"] = 0.0
-
-    except Exception as e:
-        logger.error(f"Failed to fetch real balance: {e}", exc_info=True)
-    return balance_data
-
 
 # --- Main App ---
 def main():
@@ -172,9 +140,9 @@ def main():
     """, unsafe_allow_html=True)
 
     # --- Logo Row ---
-    col1, col2, col3 = st.columns([1, 2, 1])  # center column = 50%
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image("logo.png", width=150)  # ✅ half-width, centered
+        st.image("logo.png", width=150)
 
     # Header
     st.markdown(f"""
@@ -187,7 +155,7 @@ def main():
     if not initialize_engine():
         st.stop()
 
-    # Load saved trading mode from database if available
+    # Load saved trading mode from DB
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
         saved_mode = st.session_state.engine.db.get_setting("trading_mode")
         st.session_state.trading_mode = saved_mode if saved_mode in ["virtual", "real"] else "virtual"
@@ -209,9 +177,9 @@ def main():
         if selected_mode.lower() != st.session_state.trading_mode:
             st.session_state.trading_mode = selected_mode.lower()
             st.session_state.engine.db.save_setting("trading_mode", st.session_state.trading_mode)
-            # Clear cached balance for the new mode
             st.session_state.wallet_cache.clear()
             logger.info(f"Switched to {st.session_state.trading_mode} mode, cleared cache")
+
             # Sync real balance if switching to real mode
             if st.session_state.trading_mode == "real":
                 initialize_bybit()
@@ -248,37 +216,48 @@ def main():
 
         st.divider()
 
-
-
-
-        # --- Display wallet balance ---
-        mode = st.session_state.trading_mode
-        balance_data = {"capital": 0.0, "available": 0.0, "used": 0.0}
-
-        if mode == "virtual":
-            # Virtual balance from DB
+        # Wallet Balance
+        current_mode = st.session_state.trading_mode
+        if current_mode == "virtual":
             wallet_balance = db_manager.get_wallet_balance("virtual")
-            if wallet_balance:
-                balance_data["capital"] = wallet_balance.capital
-                balance_data["available"] = wallet_balance.available
-                balance_data["used"] = wallet_balance.used
+            capital_val = wallet_balance.capital if wallet_balance else 100.0
+            available_val = wallet_balance.available if wallet_balance else 100.0
         else:
-            # Real-time balance from Bybit
-            balance_data = fetch_real_balance(bybit_client)
-            if balance_data["capital"] == 0.0:
-                st.warning("⚠️ Could not fetch real balance. Check Bybit API keys or network.")
+            try:
+                result = st.session_state.engine.client._make_request(
+                    "GET",
+                    "/v5/account/wallet-balance",
+                    {"accountType": "UNIFIED"}
+                )
 
-        # Display metrics
-        if mode == "virtual":
-            st.metric("💻 Virtual Capital", f"${balance_data['capital']:.2f}")
-            st.metric("💻 Virtual Available", f"${balance_data['available']:.2f}")
-            st.metric("💻 Virtual Used", f"${balance_data['used']:.2f}")
+                if result and "list" in result and result["list"]:
+                    wallet = result["list"][0]
+                    capital_val = float(wallet.get("totalEquity", 0.0))
+                    coins = wallet.get("coin", [])
+                    usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
+                    available_val = float(usdt_coin.get("walletBalance", 0.0)) if usdt_coin else capital_val
+                else:
+                    capital_val = available_val = 0.0
+
+            except Exception as e:
+                logger.error(f"Failed to fetch real balance from Bybit: {e}")
+                capital_val = available_val = 0.0
+
+        available_val = max(available_val, 0.0)
+        used_val = capital_val - available_val
+        if abs(used_val) < 0.01:
+            used_val = 0.0
+
+        if current_mode == "virtual":
+            st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
+            st.metric("💻 Virtual Available", f"${available_val:.2f}")
+            st.metric("💻 Virtual Used", f"${used_val:.2f}")
         else:
-            st.metric("🏦 Real Capital", f"${balance_data['capital']:.2f}")
-            st.metric("🏦 Real Available", f"${balance_data['available']:.2f}")
-            st.metric("🏦 Real Used Margin", f"${balance_data['used']:.2f}")
+            st.metric("🏦 Real Capital", f"${capital_val:.2f}")
+            st.metric("🏦 Real Available", f"${available_val:.2f}")
+            st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
 
-        # Optional: show last updated timestamp
+        # Last updated
         st.markdown(
             f"<small style='color:#888;'>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small>",
             unsafe_allow_html=True
@@ -304,6 +283,7 @@ def main():
         f"<div style='text-align:center;color:#888;'>AlgoTrader Pro v1.0 | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>",
         unsafe_allow_html=True
     )
+
 
 if __name__ == "__main__":
     main()
