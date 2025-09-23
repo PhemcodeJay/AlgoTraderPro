@@ -554,10 +554,10 @@ class DatabaseManager:
                 logger.warning(f"Capital file {capital_file_path} not found, initializing default balances")
                 default_virtual = WalletBalance(
                     trading_mode="virtual",
-                    capital=1000.0,
-                    available=1000.0,
+                    capital=100.0,
+                    available=100.0,
                     used=0.0,
-                    start_balance=1000.0,
+                    start_balance=100.0,
                     currency="USDT",
                     updated_at=datetime.now(timezone.utc),
                 )
@@ -582,10 +582,10 @@ class DatabaseManager:
                 v = capital_data["virtual"]
                 virtual_balance = WalletBalance(
                     trading_mode="virtual",
-                    capital=float(v.get("capital", 1000.0)),
-                    available=float(v.get("available", 1000.0)),
+                    capital=float(v.get("capital", 100.0)),
+                    available=float(v.get("available", 100.0)),
                     used=float(v.get("used", 0.0)),
-                    start_balance=float(v.get("start_balance", 1000.0)),
+                    start_balance=float(v.get("start_balance", 100.0)),
                     currency=v.get("currency", "USDT"),
                     updated_at=datetime.now(timezone.utc),
                 )

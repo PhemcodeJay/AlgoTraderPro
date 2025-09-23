@@ -13,7 +13,7 @@ def load_settings() -> Dict[str, Any]:
         "SCAN_INTERVAL": int(os.getenv("DEFAULT_SCAN_INTERVAL", 3600)),
         "TOP_N_SIGNALS": int(os.getenv("DEFAULT_TOP_N_SIGNALS", 5)),
         "MAX_LOSS_PCT": -15.0,
-        "TP_PERCENT": 0.15,
+        "TP_PERCENT": 0.25,
         "SL_PERCENT": 0.05,
         "MAX_DRAWDOWN_PCT": -15.0,
         "LEVERAGE": float(os.getenv("LEVERAGE", 10)),

@@ -20,7 +20,7 @@ class AutomatedTrader:
         self.is_running = False
         self.task = None
         self.stop_event = asyncio.Event()
-        self.engine: TradingEngine = TradingEngine()
+        
         # Ensure BybitClient uses mainnet
         self.client.base_url = "https://api.bybit.com"
         
@@ -40,7 +40,7 @@ class AutomatedTrader:
             "last_scan": None
         }
         
-        logger.info("Automated trader initialized for Bybit mainnet", extra={
+        logger.info("Automated trader initialized for Bybit mainnet with ISOLATED margin", extra={
             'scan_interval': self.scan_interval,
             'max_positions': self.max_positions,
             'risk_per_trade': self.risk_per_trade,
@@ -65,7 +65,7 @@ class AutomatedTrader:
             # Start the main trading loop
             self.task = asyncio.create_task(self._trading_loop(status_container))
             
-            logger.info("Automated trading started on mainnet")
+            logger.info("Automated trading started on mainnet with ISOLATED margin")
             if status_container:
                 status_container.success("🤖 Automated trading started")
             return True
@@ -112,7 +112,8 @@ class AutomatedTrader:
                 "scan_interval": self.scan_interval,
                 "risk_per_trade": self.risk_per_trade,
                 "leverage": self.leverage,
-                "base_url": self.client.base_url
+                "base_url": self.client.base_url,
+                "margin_mode": "ISOLATED"
             }
         except Exception as e:
             logger.error(f"Error getting trader status: {e}", exc_info=True)
@@ -221,6 +222,12 @@ class AutomatedTrader:
                 logger.warning("Signal missing symbol")
                 return
 
+            # Validate symbol exists and is tradable
+            ticker_info = self.client._make_request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol})
+            if not ticker_info or "result" not in ticker_info or not ticker_info["result"].get("list"):
+                logger.warning(f"Symbol {symbol} not found or not tradable")
+                return
+
             side = signal.get("side", "Buy")
             score = signal.get("score", 0)
             entry_price = signal.get("entry") or self.client.get_current_price(symbol)
@@ -229,29 +236,36 @@ class AutomatedTrader:
                 logger.warning(f"Invalid entry price for {symbol}: {entry_price}")
                 return
 
-            # Stop loss / take profit defaults
-            stop_loss = float(signal.get("sl", entry_price * (0.95 if side.lower() == "buy" else 1.05)))
-            take_profit = float(signal.get("tp", entry_price * (1.10 if side.lower() == "buy" else 0.90)))
+            # Stop loss / take profit defaults (TP 25%, SL 5% for 5:1 reward:risk ratio)
+            sl_multiplier = 0.95 if side.lower() == "buy" else 1.05
+            tp_multiplier = 1.25 if side.lower() == "buy" else 0.75
+            stop_loss = float(signal.get("sl", entry_price * sl_multiplier))
+            take_profit = float(signal.get("tp", entry_price * tp_multiplier))
 
             # Get available balance for this symbol
             if trading_mode == "real":
                 available_balance = 0.0
                 try:
-                    # Synchronous request to fetch isolated margin
+                    # Fetch isolated margin balance for the specific symbol
                     result = self.client._make_request(
                         "GET",
-                        "/v5/account/isolated/wallet-balance",
-                        {"symbol": symbol}
+                        "/v5/account/wallet-balance",
+                        {"accountType": "CONTRACT", "coin": symbol.replace("USDT", "")}
                     )
 
-                    if result and "result" in result and symbol in result["result"]:
-                        symbol_balance = result["result"][symbol]
-                        available_balance = float(symbol_balance.get("availableBalance", 0.0))
+                    if result and "result" in result and result["result"].get("list"):
+                        for coin_info in result["result"]["list"]:
+                            if coin_info.get("coin") == symbol.replace("USDT", ""):
+                                available_balance = float(coin_info.get("availableToWithdraw", 0.0))
+                                logger.info(f"Fetched isolated margin balance for {symbol}: Available={available_balance:.2f}")
+                                break
+                        else:
+                            logger.warning(f"No isolated margin balance found for {symbol}")
                     else:
                         logger.warning(f"No isolated margin data returned for {symbol}")
 
                 except Exception as e:
-                    logger.error(f"Failed to fetch isolated margin for {symbol}: {e}")
+                    logger.error(f"Failed to fetch isolated margin balance for {symbol}: {e}")
                     available_balance = 0.0
 
             else:
@@ -296,6 +310,20 @@ class AutomatedTrader:
 
                     if qty_step > 0:
                         position_size = (position_size // qty_step) * qty_step
+
+                # Ensure isolated margin mode is set for the symbol
+                try:
+                    margin_result = self.client._make_request(
+                        "POST",
+                        "/v5/account/set-margin-mode",
+                        {"symbol": symbol, "marginMode": "ISOLATED"}
+                    )
+                    if margin_result.get("retCode") != 0:
+                        logger.error(f"Failed to set isolated margin for {symbol}: {margin_result.get('retMsg')}")
+                        return
+                except Exception as e:
+                    logger.error(f"Error setting isolated margin for {symbol}: {e}")
+                    return
 
                 # Place the order
                 order_result = await self.client.place_order(
@@ -366,7 +394,6 @@ class AutomatedTrader:
         except Exception as e:
             logger.error(f"Error executing signal for {symbol}: {e}", exc_info=True)
 
-
     def _get_open_trades(self, trading_mode: Optional[str] = None) -> List[Trade]:
         """Get open trades, optionally filtered by mode"""
         trades = self.db.get_trades(limit=100)  # Adjust limit as needed
@@ -412,7 +439,7 @@ class AutomatedTrader:
             else:
                 pnl_pct = (entry_price - current_price) / entry_price * 100
             
-            # Exit conditions
+            # Exit conditions (TP 25%, SL 5%)
             should_exit = False
             exit_reason = ""
             
@@ -421,8 +448,8 @@ class AutomatedTrader:
                 should_exit = True
                 exit_reason = "Stop Loss"
             
-            # Take profit (10% gain)
-            elif pnl_pct >= 10:
+            # Take profit (25% gain)
+            elif pnl_pct >= 25:
                 should_exit = True
                 exit_reason = "Take Profit"
             

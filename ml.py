@@ -130,7 +130,7 @@ class MLFilter:
             if quality >= threshold:
                 new_score = min(100, score * (1 + quality))
                 if hasattr(sig, "score"):
-                    sig.score = new_score
+                    setattr(sig, "score", new_score)
                 elif isinstance(sig, dict):
                     sig["score"] = new_score
                 filtered_signals.append(sig)

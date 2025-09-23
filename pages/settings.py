@@ -196,18 +196,18 @@ def main():
                 st.markdown("### 🎯 Take Profit & Stop Loss")
                 tp_percent = st.number_input(
                     "Take Profit (%)",
-                    min_value=0.1,
-                    max_value=20.0,
-                    value=float(current_settings.get("TP_PERCENT", 2.0)),
-                    step=0.1,
+                    min_value=10.0,
+                    max_value=100.0,
+                    value=float(current_settings.get("TP_PERCENT", 25.0)),
+                    step=1.0,
                     help="Default take profit percentage"
                 )
                 sl_percent = st.number_input(
                     "Stop Loss (%)",
-                    min_value=0.1,
+                    min_value=1.0,
                     max_value=20.0,
-                    value=float(current_settings.get("SL_PERCENT", 1.5)),
-                    step=0.1,
+                    value=float(current_settings.get("SL_PERCENT", 5.0)),
+                    step=1.0,
                     help="Default stop loss percentage"
                 )
                 max_drawdown = st.number_input(
@@ -285,13 +285,13 @@ def main():
                 min_signal_score = st.number_input(
                     "Minimum Signal Score",
                     min_value=30.0,
-                    max_value=90.0,
-                    value=float(current_settings.get("MIN_SIGNAL_SCORE", 60)),
+                    max_value=100.0,
+                    value=float(current_settings.get("MIN_SIGNAL_SCORE", 50)),
                     help="Minimum score for signals to be considered"
                 )
 
             with col2:
-                st.markdown("### 📊 Technical Indicators")
+                st.markdown("### 📊 Indicators")
                 rsi_oversold = st.number_input(
                     "RSI Oversold Threshold",
                     min_value=10.0,
@@ -445,8 +445,8 @@ def main():
                 st.metric("API Key", api_key_status)
                 secret_status = "✅ Configured" if os.getenv("BYBIT_API_SECRET") else "❌ Not Set"
                 st.metric("API Secret", secret_status)
-                testnet_mode = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
-                mode_text = "🧪 Testnet" if testnet_mode else "🔴 Mainnet"
+                mainnet_mode = os.getenv("BYBIT_MAINNET", "false").lower() == "true"
+                mode_text = "🧪 Mainnet" if mainnet_mode else "🔴 Testnet"
                 st.metric("Trading Mode", mode_text)
 
             with col2:
@@ -487,7 +487,7 @@ def main():
                    ```
                    BYBIT_API_KEY=your_api_key_here
                    BYBIT_API_SECRET=your_api_secret_here
-                   BYBIT_TESTNET=false  # Use true for testnet
+                   BYBIT_mainnet=false  # Use true for mainnet
                    ```
 
                 3. **Required Permissions:**
@@ -498,7 +498,7 @@ def main():
                 4. **Security Notes:**
                    - Never share your API credentials
                    - Use IP whitelist if possible
-                   - Start with testnet for testing
+                   - Start with mainnet for testing
                 """)
 
         with tab5:

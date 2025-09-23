@@ -672,6 +672,8 @@ class BybitClient:
                     "timestamp": datetime.now(),
                     "virtual": False,
                     "leverage": leverage,
+                    "stopLoss": str(stop_loss),
+                    "takeProfit": str(take_profit),
                     "margin_mode": mode.upper()
                 }
             return {}
