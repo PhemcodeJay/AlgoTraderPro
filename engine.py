@@ -459,7 +459,7 @@ class TradingEngine:
                     logger.error(f"Reconnection failed: {e}", exc_info=True)
                     return False
 
-            # Fetch raw response to access top-level fields
+            # Fetch raw response
             result = self.client._make_request(
                 "GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"}
             )
@@ -470,20 +470,25 @@ class TradingEngine:
 
             wallet = result["list"][0]
 
-            # Use top-level fields for accurate balances (strings converted to float)
+            # Top-level balances
             total_equity = float(wallet.get("totalEquity", "0") or 0)
             total_available = float(wallet.get("totalAvailableBalance", "0") or 0)
+
+            # Coin-specific fallback for USDT
+            coins = wallet.get("coin", [])
+            usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
+            if usdt_coin:
+                usdt_available = float(usdt_coin.get("availableToWithdraw", "0") or 0)
+                if total_available == 0 and usdt_available > 0:
+                    logger.info(f"Using USDT availableToWithdraw={usdt_available} as fallback for available balance")
+                    total_available = usdt_available
+            else:
+                logger.warning("No USDT coin data found in Bybit response")
+
             used = total_equity - total_available
 
-            # Optional: Warning if balances are zero
             if total_available == 0:
-                logger.warning("Total available balance is 0. This may indicate no funds or an API issue.")
-
-            # Coin-specific check for USDT (for logging/validation only)
-            coins = wallet.get("coin", [])
-            usdt_coin = next((coin for coin in coins if coin.get("coin") == "USDT"), None)
-            if not usdt_coin:
-                logger.warning("No USDT coin data found in Bybit response. Using total balances.")
+                logger.warning("Available balance is still 0. Either funds not usable for margin, or collateral not enabled.")
 
             # Get existing start_balance from DB
             existing_balance: Optional[DBWalletBalance] = self.db.get_wallet_balance("real")
@@ -504,7 +509,10 @@ class TradingEngine:
             # Update database
             success = self.db.update_wallet_balance(wallet_balance)
             if success:
-                logger.info(f"✅ Real balance synced with Bybit: Capital=${total_equity:.2f}, Available=${total_available:.2f}, Used=${used:.2f}")
+                logger.info(
+                    f"✅ Real balance synced with Bybit: Capital=${total_equity:.2f}, "
+                    f"Available=${total_available:.2f}, Used=${used:.2f}"
+                )
                 return True
             else:
                 logger.error("Failed to update wallet balance in database")
@@ -513,6 +521,7 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"❌ Error syncing real balance: {e}", exc_info=True)
             return False
+
          
     def execute_virtual_trade(self, signal: Dict, trading_mode: str = "virtual") -> bool:
         """Execute a virtual trade based on a signal"""

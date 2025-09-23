@@ -16,6 +16,9 @@ from utils import calculate_portfolio_metrics
 from signal_generator import get_usdt_symbols
 from sqlalchemy import update
 
+# Initialize database
+db = db_manager
+
 # Configure logging
 # Logging using centralized system
 from logging_config import get_logger
@@ -388,13 +391,23 @@ def main():
             st.metric("Open Virtual", open_virtual)
             st.metric("Open Real", open_real)
             
-            # Load balance
-            with open("capital.json", "r") as f:
-                capital = json.load(f)
-            
-            balance = capital.get(current_mode, {}).get("available", 0)
-            st.metric("Available Balance", f"${balance:.2f}")
-            
+            # Load balance from DB
+            wallet_balance = db.get_wallet_balance(current_mode)
+
+            capital_val = wallet_balance.capital if wallet_balance else 0.0
+            available_val = wallet_balance.available if wallet_balance else 0.0
+            used_val = wallet_balance.used if wallet_balance else 0.0
+
+            if current_mode == "virtual":
+                st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
+                st.metric("💻 Virtual Available", f"${available_val:.2f}")
+                st.metric("💻 Virtual Used", f"${used_val:.2f}")
+            else:
+                st.metric("🏦 Real Capital", f"${capital_val:.2f}")
+                st.metric("🏦 Real Available", f"${available_val:.2f}")
+                st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
+
+                        
         except Exception as e:
             st.error(f"Error loading stats: {e}")
         

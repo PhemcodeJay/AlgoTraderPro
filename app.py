@@ -216,12 +216,17 @@ def main():
 
         # Display wallet balance
         balance_data = get_wallet_balance()
-        if st.session_state.trading_mode == "virtual":
-            st.metric(f"Virtual Balance", f"${balance_data['available']:.2f}")
+        mode = st.session_state.trading_mode
+
+        if mode == "virtual":
+            st.metric("💻 Virtual Capital", f"${balance_data['capital']:.2f}")
+            st.metric("💻 Virtual Available", f"${balance_data['available']:.2f}")
+            st.metric("💻 Virtual Used", f"${balance_data['used']:.2f}")
         else:
-            st.metric(f"Real Capital", f"${balance_data['capital']:.2f}")
-            st.metric(f"Real Available", f"${balance_data['available']:.2f}")
-            st.metric(f"Used Margin", f"${balance_data['used']:.2f}")
+            st.metric("🏦 Real Capital", f"${balance_data['capital']:.2f}")
+            st.metric("🏦 Real Available", f"${balance_data['available']:.2f}")
+            st.metric("🏦 Real Used Margin", f"${balance_data['used']:.2f}")
+
 
         # Optional: show last updated timestamp
         st.markdown(
