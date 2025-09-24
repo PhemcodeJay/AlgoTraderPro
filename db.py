@@ -70,7 +70,7 @@ class Trade:
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
     score: Optional[float] = None
-    strategy: str = "Manual"
+    strategy: str = "Auto"
     leverage: int = 10
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at: Optional[datetime] = None

@@ -89,7 +89,7 @@ def enhance_signal(analysis: Dict[str, Any], settings: Dict[str, Any]) -> Dict[s
     side = analysis.get("side", "BUY").upper()
     leverage = settings.get("LEVERAGE", 10)
     risk_pct = settings.get("RISK_PCT", 0.01)
-    virtual_balance = settings.get("VIRTUAL_BALANCE", 10000)
+    virtual_balance = settings.get("VIRTUAL_BALANCE", 100)
 
     # Use previous standalone logic for TP/SL and trailing stop
     entry = price
@@ -368,7 +368,7 @@ def analyze_single_symbol(symbol: str, interval: str = "60", settings: Optional[
             "RSI_OVERBOUGHT": 70,
             "LEVERAGE": 10,
             "RISK_PCT": 0.01,
-            "VIRTUAL_BALANCE": 10000,
+            "VIRTUAL_BALANCE": 100,
             "ENTRY_BUFFER_PCT": 0.002
         }
     

@@ -343,9 +343,9 @@ class BybitClient:
                 self._request_counter[key] = self._request_counter.get(key, 0) + 1
                 last_time = self._last_log_time.get(key, 0)
 
-                if now - last_time > 60:  # log every 60 seconds
+                if now - last_time > 300:  # log every 300 seconds
                     count = self._request_counter[key]
-                    logger.info(f"{count} successful {method} {endpoint} calls in last 60s")
+                    logger.info(f"{count} successful {method} {endpoint} calls in last 300s")
                     self._request_counter[key] = 0
                     self._last_log_time[key] = now
 
