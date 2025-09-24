@@ -2,10 +2,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import streamlit as st
+import asyncio
 from datetime import datetime
 from db import db_manager
 from logging_config import get_logger
 from bybit_client import BybitClient
+from engine import TradingEngine
+from utils import sync_real_wallet_balance
 
 # Logging using centralized system
 logger = get_logger(__name__)
@@ -33,7 +36,6 @@ if "engine" not in st.session_state:
 # --- Initialize trading engine ---
 def initialize_engine():
     try:
-        from engine import TradingEngine
         if not st.session_state.engine_initialized:
             st.session_state.engine = TradingEngine()
             st.session_state.engine_initialized = True
@@ -48,7 +50,7 @@ def initialize_engine():
 def initialize_bybit():
     if st.session_state.bybit_client is None:
         st.session_state.bybit_client = BybitClient()
-        if st.session_state.bybit_client._test_connection():
+        if st.session_state.bybit_client.is_connected():
             logger.info("Bybit client connected successfully")
         else:
             st.warning("Bybit client connection failed. Check API keys.")
@@ -73,8 +75,7 @@ def get_wallet_balance() -> dict:
     balance_data = default_virtual if mode == "virtual" else default_real
     try:
         if mode == "virtual":
-            wallet = st.session_state.engine.db.get_wallet_balance("virtual") \
-                if st.session_state.engine else None
+            wallet = db_manager.get_wallet_balance("virtual")
             if wallet:
                 balance_data = {
                     "capital": getattr(wallet, "capital", default_virtual["capital"]),
@@ -87,8 +88,8 @@ def get_wallet_balance() -> dict:
             client = st.session_state.bybit_client
             if client and client.is_connected():
                 # Sync real balance with Bybit
-                st.session_state.engine.sync_real_balance()
-                wallet = st.session_state.engine.db.get_wallet_balance("real")
+                sync_real_wallet_balance(client)
+                wallet = db_manager.get_wallet_balance("real")
                 if wallet:
                     balance_data = {
                         "capital": getattr(wallet, "capital", default_real["capital"]),
@@ -103,8 +104,7 @@ def get_wallet_balance() -> dict:
                     logger.warning("Failed to retrieve real balance after sync")
                     st.error("❌ Failed to retrieve real balance. Check Bybit account or API permissions.")
             else:
-                wallet = st.session_state.engine.db.get_wallet_balance("real") \
-                    if st.session_state.engine else None
+                wallet = db_manager.get_wallet_balance("real")
                 if wallet:
                     balance_data = {
                         "capital": getattr(wallet, "capital", default_real["capital"]),
@@ -157,7 +157,7 @@ def main():
 
     # Load saved trading mode from DB
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
-        saved_mode = st.session_state.engine.db.get_setting("trading_mode")
+        saved_mode = db_manager.get_setting("trading_mode")
         st.session_state.trading_mode = saved_mode if saved_mode in ["virtual", "real"] else "virtual"
         logger.info(f"Loaded trading mode from DB: {st.session_state.trading_mode}")
 
@@ -176,7 +176,7 @@ def main():
         # Update session state and persist to DB if changed
         if selected_mode.lower() != st.session_state.trading_mode:
             st.session_state.trading_mode = selected_mode.lower()
-            st.session_state.engine.db.save_setting("trading_mode", st.session_state.trading_mode)
+            db_manager.save_setting("trading_mode", st.session_state.trading_mode)
             st.session_state.wallet_cache.clear()
             logger.info(f"Switched to {st.session_state.trading_mode} mode, cleared cache")
 
@@ -184,7 +184,7 @@ def main():
             if st.session_state.trading_mode == "real":
                 initialize_bybit()
                 if st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
-                    st.session_state.engine.sync_real_balance()
+                    sync_real_wallet_balance(st.session_state.bybit_client)
                     logger.info("Real balance synced after mode switch")
             st.rerun()
 
@@ -217,45 +217,15 @@ def main():
         st.divider()
 
         # Wallet Balance
-        current_mode = st.session_state.trading_mode
-        if current_mode == "virtual":
-            wallet_balance = db_manager.get_wallet_balance("virtual")
-            capital_val = wallet_balance.capital if wallet_balance else 100.0
-            available_val = wallet_balance.available if wallet_balance else 100.0
+        balance_data = get_wallet_balance()
+        if st.session_state.trading_mode == "virtual":
+            st.metric("💻 Virtual Capital", f"${balance_data['capital']:.2f}")
+            st.metric("💻 Virtual Available", f"${balance_data['available']:.2f}")
+            st.metric("💻 Virtual Used", f"${balance_data['used']:.2f}")
         else:
-            try:
-                result = st.session_state.engine.client._make_request(
-                    "GET",
-                    "/v5/account/wallet-balance",
-                    {"accountType": "UNIFIED"}
-                )
-
-                if result and "list" in result and result["list"]:
-                    wallet = result["list"][0]
-                    capital_val = float(wallet.get("totalEquity", 0.0))
-                    coins = wallet.get("coin", [])
-                    usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
-                    available_val = float(usdt_coin.get("walletBalance", 0.0)) if usdt_coin else capital_val
-                else:
-                    capital_val = available_val = 0.0
-
-            except Exception as e:
-                logger.error(f"Failed to fetch real balance from Bybit: {e}")
-                capital_val = available_val = 0.0
-
-        available_val = max(available_val, 0.0)
-        used_val = capital_val - available_val
-        if abs(used_val) < 0.01:
-            used_val = 0.0
-
-        if current_mode == "virtual":
-            st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
-            st.metric("💻 Virtual Available", f"${available_val:.2f}")
-            st.metric("💻 Virtual Used", f"${used_val:.2f}")
-        else:
-            st.metric("🏦 Real Capital", f"${capital_val:.2f}")
-            st.metric("🏦 Real Available", f"${available_val:.2f}")
-            st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
+            st.metric("🏦 Real Capital", f"${balance_data['capital']:.2f}")
+            st.metric("🏦 Real Available", f"${balance_data['available']:.2f}")
+            st.metric("🏦 Real Used Margin", f"${balance_data['used']:.2f}")
 
         # Last updated
         st.markdown(
@@ -265,9 +235,18 @@ def main():
 
         # Emergency Stop
         if st.button("🛑 Emergency Stop"):
-            st.session_state.wallet_cache.clear()
-            st.success("All automated trading stopped and cache cleared")
-            logger.info("Emergency stop triggered, cache cleared")
+            if st.session_state.engine:
+                success = st.session_state.engine.emergency_stop("User-initiated emergency stop")
+                if success:
+                    st.session_state.wallet_cache.clear()
+                    st.success("All automated trading stopped and cache cleared")
+                    logger.info("Emergency stop triggered successfully, cache cleared")
+                else:
+                    st.error("Failed to execute emergency stop. Check logs for details.")
+                    logger.error("Emergency stop execution failed")
+            else:
+                st.error("Trading engine not initialized")
+                logger.error("Emergency stop attempted but engine not initialized")
 
     # --- Main dashboard ---
     try:
