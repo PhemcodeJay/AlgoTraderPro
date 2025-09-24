@@ -176,8 +176,9 @@ def main():
     """, unsafe_allow_html=True)
 
     # Initialize engine asynchronously
-    if not asyncio.get_event_loop().run_until_complete(initialize_engine()):
+    if not asyncio.run(initialize_engine()):
         st.stop()
+
 
     # Load saved trading mode from DB
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
