@@ -1,10 +1,10 @@
 import logging
 from typing import List, Dict, Any
 from datetime import datetime, timezone
-from indicators import scan_multiple_symbols, get_top_symbols
+from indicators import scan_multiple_symbols
 from ml import MLFilter
 from notification_pdf import send_all_notifications
-
+from bybit_client import BybitClient  # Import BybitClient for futures symbols
 from db import Signal, db_manager
 
 # Logging using centralized system
@@ -16,17 +16,26 @@ logger = get_logger(__name__)
 # -------------------------------
 
 def get_usdt_symbols(limit: int = 50) -> List[str]:
+    """Fetch tradable USDT perpetual futures symbols from Bybit API"""
     try:
-        symbols = get_top_symbols(limit)
+        client = BybitClient()  # Instantiate BybitClient
+        if not client.is_connected():
+            logger.error("BybitClient not connected, using fallback symbols")
+            return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"][:limit]
+        
+        symbols = client.get_available_symbols("linear")  # Fetch only linear (USDT perpetual futures) symbols
         if not symbols:
-            logger.warning("No symbols from API, using fallback list")
+            logger.warning("No symbols returned from Bybit API, using fallback list")
             symbols = ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
+        else:
+            logger.info(f"Fetched {len(symbols)} tradable USDT perpetual futures symbols from Bybit: {symbols[:5]}...")
         return symbols[:limit]
     except Exception as e:
-        logger.error(f"Error fetching USDT symbols: {e}")
-        return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
+        logger.error(f"Error fetching USDT perpetual futures symbols from Bybit: {e}")
+        return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"][:limit]  # Fallback on error
 
 def calculate_signal_score(analysis: Dict[str, Any]) -> float:
+    """Calculate a score for a signal based on technical indicators"""
     score = analysis.get("score", 0)
     indicators = analysis.get("indicators", {})
 
@@ -57,7 +66,8 @@ def calculate_signal_score(analysis: Dict[str, Any]) -> float:
 
     return min(100, max(0, score))
 
-def enhance_signal(analysis: Dict[str, Any]) -> Any:
+def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """Enhance signal with additional parameters like SL, TP, and market type"""
     indicators = analysis.get("indicators", {})
     price = indicators.get("price", 0)
     atr = indicators.get("atr", 0)
@@ -92,12 +102,12 @@ def enhance_signal(analysis: Dict[str, Any]) -> Any:
 
     enhanced = analysis.copy()
     enhanced.update({
-        "entry": round(price, 6),
-        "sl": round(sl, 6),
-        "tp": round(tp, 6),
-        "trail": round(trail, 6),
-        "liquidation": round(liq, 6),
-        "margin_usdt": round(margin_usdt, 6),
+        "entry": round(float(price), 6),
+        "sl": round(float(sl), 6),
+        "tp": round(float(tp), 6),
+        "trail": round(float(trail), 6),
+        "liquidation": round(float(liq), 6),
+        "margin_usdt": round(float(margin_usdt), 6),
         "bb_slope": bb_slope,
         "market": market_type,
         "leverage": leverage,
@@ -117,7 +127,8 @@ def generate_signals(
     top_n: int = 10,
     trading_mode: str = "virtual"
 ) -> List[Dict[str, Any]]:
-    logger.info(f"Generating signals for {len(symbols)} symbols in {trading_mode} mode")
+    """Generate trading signals for given symbols"""
+    logger.info(f"Generating signals for {len(symbols)} symbols in {trading_mode} mode: {symbols[:5]}...")
     raw_analyses = scan_multiple_symbols(symbols, interval, max_workers=5)
     if not raw_analyses:
         logger.warning("No analysis results")
@@ -148,13 +159,12 @@ def generate_signals(
     for s in filtered_signals[:top_n]:
         if isinstance(s, Signal):
             s_dict = {
-                "symbol": s.symbol,
-                "interval": s.interval,
-                "signal_type": s.signal_type,
-                "score": s.score,
-                "indicators": s.indicators,
-                "side": s.side,
-                # … add any other fields you need
+                "symbol": str(s.symbol),
+                "interval": str(s.interval),
+                "signal_type": str(s.signal_type),
+                "score": float(s.score),
+                "indicators": dict(s.indicators),
+                "side": str(s.side),
             }
             enhanced = enhance_signal(s_dict)
         else:
@@ -164,21 +174,21 @@ def generate_signals(
 
         # Save to DB
         signal_obj = Signal(
-            symbol=str(enhanced.get("symbol") or "UNKNOWN"),   # ensure str, fallback
-            interval=interval,
+            symbol=str(enhanced.get("symbol", "UNKNOWN")),
+            interval=str(interval),
             signal_type=str(enhanced.get("signal_type", "BUY")),
             score=float(enhanced.get("score", 0)),
-            indicators=enhanced.get("indicators", {}),
+            indicators=dict(enhanced.get("indicators", {})),
             side=str(enhanced.get("side", "BUY")),
-            sl=float(enhanced.get("sl") or 0),
-            tp=float(enhanced.get("tp") or 0),
-            trail=float(enhanced.get("trail") or 0),
-            liquidation=float(enhanced.get("liquidation") or 0),
+            sl=float(enhanced.get("sl", 0)),
+            tp=float(enhanced.get("tp", 0)),
+            trail=float(enhanced.get("trail", 0)),
+            liquidation=float(enhanced.get("liquidation", 0)),
             leverage=int(enhanced.get("leverage", 10)),
-            margin_usdt=float(enhanced.get("margin_usdt") or 0),
-            entry=float(enhanced.get("entry") or 0),
-            market=str(enhanced.get("market", "Unknown")),
-            created_at=enhanced.get("created_at") or datetime.now(timezone.utc)  # always datetime
+            margin_usdt=float(enhanced.get("margin_usdt", 0)),
+            entry=float(enhanced.get("entry", 0)),
+            market=str(enhanced.get("market", "futures")),
+            created_at=enhanced.get("created_at", datetime.now(timezone.utc))
         )
 
         try:
@@ -193,6 +203,7 @@ def generate_signals(
 # -------------------------------
 
 def get_signal_summary(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Generate a summary of trading signals"""
     if not signals:
         return {"total": 0, "avg_score": 0, "top_symbol": "None"}
 
@@ -218,9 +229,7 @@ def get_signal_summary(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
-    """
-    Analyze a single symbol and return the enhanced signal dictionary.
-    """
+    """Analyze a single symbol and return the enhanced signal dictionary"""
     raw_analyses = scan_multiple_symbols([symbol], interval, max_workers=1)
     if not raw_analyses:
         logger.warning(f"No analysis found for {symbol}")
@@ -232,22 +241,22 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
 
     # Save to DB
     signal_obj = Signal(
-    symbol=str(enhanced.get("symbol") or "UNKNOWN"),   # ensure str, fallback
-    interval=interval,
-    signal_type=str(enhanced.get("signal_type", "BUY")),
-    score=float(enhanced.get("score", 0)),
-    indicators=enhanced.get("indicators", {}),
-    side=str(enhanced.get("side", "BUY")),
-    sl=float(enhanced.get("sl") or 0),
-    tp=float(enhanced.get("tp") or 0),
-    trail=float(enhanced.get("trail") or 0),
-    liquidation=float(enhanced.get("liquidation") or 0),
-    leverage=int(enhanced.get("leverage", 10)),
-    margin_usdt=float(enhanced.get("margin_usdt") or 0),
-    entry=float(enhanced.get("entry") or 0),
-    market=str(enhanced.get("market", "Unknown")),
-    created_at=enhanced.get("created_at") or datetime.now(timezone.utc)  # always datetime
-)
+        symbol=str(enhanced.get("symbol", "UNKNOWN")),
+        interval=str(interval),
+        signal_type=str(enhanced.get("signal_type", "BUY")),
+        score=float(enhanced.get("score", 0)),
+        indicators=dict(enhanced.get("indicators", {})),
+        side=str(enhanced.get("side", "BUY")),
+        sl=float(enhanced.get("sl", 0)),
+        tp=float(enhanced.get("tp", 0)),
+        trail=float(enhanced.get("trail", 0)),
+        liquidation=float(enhanced.get("liquidation", 0)),
+        leverage=int(enhanced.get("leverage", 10)),
+        margin_usdt=float(enhanced.get("margin_usdt", 0)),
+        entry=float(enhanced.get("entry", 0)),
+        market=str(enhanced.get("market", "futures")),
+        created_at=enhanced.get("created_at", datetime.now(timezone.utc))
+    )
 
     try:
         db_manager.add_signal(signal_obj)
@@ -255,7 +264,6 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
         logger.error(f"Failed to save signal {enhanced.get('symbol')} to DB: {e}")
 
     return enhanced
-
 
 # -------------------------------
 # Run Standalone

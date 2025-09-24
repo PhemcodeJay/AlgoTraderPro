@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy import update
 from engine import TradingEngine
 from bybit_client import BybitClient
-from signal_generator import generate_signals, get_usdt_symbols
+from signal_generator import generate_signals
 from db import db_manager, Trade, Signal, TradeModel
 from logging_config import get_trading_logger
 
@@ -187,8 +187,9 @@ class AutomatedTrader:
                 logger.info(f"Max positions reached: {current_positions}/{self.max_positions}")
                 return
             
-            # Get symbols to scan
-            symbols = get_usdt_symbols()
+            # Get symbols to scan - only tradable USDT perpetual futures symbols
+            symbols = self.client.get_available_symbols("linear")
+            logger.info(f"Fetched {len(symbols)} tradable USDT perpetual futures symbols for scanning: {symbols[:5]}...")
             
             # Generate signals
             signals = generate_signals(
@@ -216,7 +217,7 @@ class AutomatedTrader:
             logger.error(f"Error in scan and trade: {e}", exc_info=True)
 
     async def _execute_signal(self, signal: Dict[str, Any], trading_mode: str):
-        """Execute a trading signal."""
+        """Execute a trading signal"""
         try:
             symbol = signal.get("symbol")
             if not symbol:
@@ -225,7 +226,7 @@ class AutomatedTrader:
 
             # Validate symbol exists and is tradable (USDT perpetual futures)
             ticker_info = self.client._make_request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol})
-            if not ticker_info or "result" not in ticker_info or not ticker_info["result"].get("list"):
+            if not ticker_info or "list" not in ticker_info or not ticker_info["list"]:
                 logger.warning(f"Symbol {symbol} not found or not tradable in futures")
                 return
 
@@ -254,8 +255,8 @@ class AutomatedTrader:
                         {"accountType": "UNIFIED"}
                     )
 
-                    if result and "result" in result and result["result"].get("list"):
-                        account_info = result["result"]["list"][0]
+                    if result and "list" in result and result["list"]:
+                        account_info = result["list"][0]
                         available_balance = float(account_info.get("totalAvailableBalance", 0.0))
                         logger.info(f"Fetched UNIFIED balance for {symbol}: Available={available_balance:.2f}")
                     else:
@@ -316,12 +317,12 @@ class AutomatedTrader:
                         {
                             "category": "linear",
                             "symbol": symbol,
-                            "tradeMode": 2,  # 2 = Isolated Margin
+                            "tradeMode": 1,  # 1 = Isolated Margin
                             "buyLeverage": str(self.leverage),
                             "sellLeverage": str(self.leverage)
                         }
                     )
-                    if switch_result.get("retCode") != 0:
+                    if switch_result.get("retCode", -1) != 0:
                         logger.error(f"Failed to set isolated margin for {symbol}: {switch_result.get('retMsg')}")
                         return
                     logger.info(f"Set isolated margin mode for {symbol} futures")
@@ -379,7 +380,6 @@ class AutomatedTrader:
                     signal_type=signal.get("signal_type", "Auto"),
                     score=score,
                     indicators=signal.get("indicators", {}),
-                    strategy=signal.get("strategy", "Auto"),
                     side=side,
                     sl=stop_loss,
                     tp=take_profit,

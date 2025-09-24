@@ -1,11 +1,11 @@
 import os
 import logging
 import pandas as pd
-import requests
 import streamlit as st
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union, Tuple
 from datetime import timezone, timedelta
 from dotenv import load_dotenv
+from bybit_client import BybitClient  # Import BybitClient for symbol and ticker fetching
 
 load_dotenv()
 
@@ -51,12 +51,17 @@ def format_currency_safe(value: Optional[float]) -> str:
     except (ValueError, TypeError, AttributeError):
         return "0.00"
 
-def display_trades_table(trades: List[Dict], container, client=None, max_trades: int = 10):
+def display_trades_table(trades: List[Dict], container, client: Optional[BybitClient] = None, max_trades: int = 10):
     try:
         if not trades:
             container.info("🌙 No trades to display")
             return
             
+        # Initialize BybitClient if none provided
+        if client is None:
+            client = BybitClient()
+            logger.info("Initialized new BybitClient for display_trades_table")
+
         trades_data = []
         for trade in trades[:max_trades]:
             symbol = trade.get("symbol", "N/A")
@@ -169,22 +174,47 @@ def get_signals_safe(db_instance, limit: int = 20) -> List[Dict]:
         logger.error(f"Error getting signals: {e}")
         return []
 
-def get_ticker_snapshot() -> List[Dict]:
-    """Fetch all USDT tickers with last price and 24h change from Bybit"""
+def get_ticker_snapshot(client: Optional[BybitClient] = None) -> List[Dict]:
+    """Fetch all tradable USDT perpetual futures tickers from Bybit"""
     try:
-        url = "https://api.bybit.com/v5/market/tickers?category=linear"
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        # Initialize BybitClient if none provided
+        if client is None:
+            client = BybitClient()
+            logger.info("Initialized new BybitClient for get_ticker_snapshot")
         
-        if data.get("retCode") == 0:
-            tickers = data["result"].get("list", [])
-            # Filter for USDT pairs only
-            usdt_tickers = [ticker for ticker in tickers if ticker.get("symbol", "").endswith("USDT")]
-            return usdt_tickers
+        if not client.is_connected():
+            logger.warning("BybitClient not connected for ticker snapshot, using fallback")
+            return []
+        
+        # Fetch tradable symbols
+        symbols = client.get_available_symbols("linear")
+        if not symbols:
+            logger.warning("No tradable symbols available for ticker snapshot")
+            return []
+
+        # Fetch tickers for tradable symbols
+        tickers = []
+        for symbol in symbols:
+            try:
+                result = client._make_request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol})
+                if result and "list" in result and result["list"]:
+                    ticker = result["list"][0]
+                    tickers.append({
+                        "symbol": ticker.get("symbol", ""),
+                        "lastPrice": float(ticker.get("lastPrice", 0)),
+                        "price24hPcnt": float(ticker.get("price24hPcnt", 0)) * 100,
+                        "volume24h": float(ticker.get("volume24h", 0)),
+                        "highPrice24h": float(ticker.get("highPrice24h", 0)),
+                        "lowPrice24h": float(ticker.get("lowPrice24h", 0))
+                    })
+            except Exception as e:
+                logger.error(f"Error fetching ticker for {symbol}: {e}")
+        
+        logger.info(f"Fetched ticker snapshot for {len(tickers)} tradable USDT perpetual futures symbols")
+        return tickers
     except Exception as e:
         logger.error(f"Error fetching ticker snapshot: {e}")
-    return []
+        return []
 
 def calculate_portfolio_metrics(trades: List[Dict]) -> Dict[str, Any]:
     """Calculate portfolio performance metrics"""
@@ -215,7 +245,7 @@ def calculate_portfolio_metrics(trades: List[Dict]) -> Dict[str, Any]:
         logger.error(f"Error calculating portfolio metrics: {e}")
         return {"total_pnl": 0, "win_rate": 0, "total_trades": 0, "avg_pnl": 0}
 
-def sync_real_wallet_balance(client, update_file: bool = True) -> Dict[str, Any]:
+def sync_real_wallet_balance(client: BybitClient, update_file: bool = True) -> Dict[str, Any]:
     """Sync real wallet balance with Bybit and optionally update capital.json"""
     try:
         if not client or not client.is_connected():
@@ -223,12 +253,15 @@ def sync_real_wallet_balance(client, update_file: bool = True) -> Dict[str, Any]
             return {}
         
         balances = client.get_account_balance()
-        usdt_balance = balances.get("USDT", {})
+        usdt_balance = balances.get("USDT", None)
+        if usdt_balance is None:
+            logger.warning("No USDT balance found")
+            return {}
         
         balance_data = {
-            "capital": usdt_balance.get("total", 0),
-            "available": usdt_balance.get("available", 0),
-            "used": usdt_balance.get("used", 0),
+            "capital": usdt_balance.capital,
+            "available": usdt_balance.available,
+            "used": usdt_balance.used,
             "currency": "USDT"
         }
         
@@ -265,19 +298,30 @@ def format_percentage(value: float) -> str:
     except:
         return "0.0%"
 
-def get_market_overview_data(symbols: Optional[List[str]] = None) -> List[Dict]:
-    """Get market overview data for specified symbols"""
+def get_market_overview_data(
+    client: Optional[BybitClient] = None,
+    symbols: Optional[List[str]] = None
+) -> List[Dict]:
+    """Get market overview data for specified or default tradable futures symbols"""
     try:
-        if not symbols:
-            symbols = ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
+        # Initialize BybitClient if none provided
+        if client is None:
+            client = BybitClient()
+            logger.info("Initialized new BybitClient for get_market_overview_data")
         
-        tickers = get_ticker_snapshot()
+        if not client.is_connected():
+            logger.warning("BybitClient not connected for market overview, using fallback symbols")
+            symbols = ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
+        elif not symbols:
+            symbols = client.get_available_symbols("linear")[:5]  # Limit to top 5 tradable futures symbols
+        
+        tickers = get_ticker_snapshot(client)
         overview_data = []
         
         for ticker in tickers:
             symbol = ticker.get("symbol", "")
             if symbol in symbols:
-                price_change = float(ticker.get("price24hPcnt", 0)) * 100
+                price_change = float(ticker.get("price24hPcnt", 0))
                 overview_data.append({
                     "symbol": symbol,
                     "price": float(ticker.get("lastPrice", 0)),
@@ -287,6 +331,7 @@ def get_market_overview_data(symbols: Optional[List[str]] = None) -> List[Dict]:
                     "low_24h": float(ticker.get("lowPrice24h", 0))
                 })
         
+        logger.info(f"Generated market overview for {len(overview_data)} symbols")
         return overview_data
     except Exception as e:
         logger.error(f"Error getting market overview: {e}")

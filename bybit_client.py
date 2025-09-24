@@ -29,7 +29,6 @@ class RateLimitInfo:
     minute_start: float = 0
     minute_count: int = 0
 
-
 class BybitClient:
     def __init__(self):
         self.api_key: str = os.getenv("BYBIT_API_KEY", "")
@@ -71,6 +70,10 @@ class BybitClient:
         self.successful_requests = 0
         self.failed_requests = 0
         
+        # Symbol cache for performance
+        self._symbol_cache = {"linear": {"symbols": [], "last_updated": 0}}
+        self._symbol_cache_ttl = 3600  # 1 hour TTL for symbol cache
+        
         # Initialize connection
         self._initialize_session()
         self._test_connection()  # Test connection during initialization
@@ -95,9 +98,6 @@ class BybitClient:
             self.session.mount('https://', adapter)
             self.session.mount('http://', adapter)
             
-            # Configure session defaults (timeouts are passed to individual requests)
-            # Note: Session objects don't have a timeout attribute; timeouts are per-request
-            
             logger.info("HTTP session initialized with connection pooling")
             
         except Exception as e:
@@ -115,7 +115,6 @@ class BybitClient:
     def _start_background_loop(self):
         """Start background event loop for async operations"""
         try:
-            import threading
             def run_loop():
                 self.loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self.loop)
@@ -460,7 +459,6 @@ class BybitClient:
                     'account_type': self.account_type
                 }
             )
-
             return False
             
         except APIRateLimitException as e:
@@ -520,6 +518,31 @@ class BybitClient:
             health_info['status'] = 'healthy'
             
         return health_info
+
+    def get_available_symbols(self, category: str = "linear") -> List[str]:
+        """Get list of available symbols for a category with caching"""
+        try:
+            # Check cache first
+            cache = self._symbol_cache.get(category, {})
+            if cache.get("last_updated", 0) > time.time() - self._symbol_cache_ttl:
+                logger.info(f"Returning cached symbols for category {category}, count: {len(cache['symbols'])}")
+                return cache["symbols"]
+
+            # Fetch from API
+            result = self._make_request("GET", "/v5/market/instruments-info", {"category": category})
+            symbols = []
+            if result and "list" in result:
+                for instr in result["list"]:
+                    if instr.get("status") == "Trading" and instr.get("symbol", "").endswith("USDT"):
+                        symbols.append(instr["symbol"])
+            
+            # Update cache
+            self._symbol_cache[category] = {"symbols": symbols, "last_updated": time.time()}
+            logger.info(f"Fetched {len(symbols)} tradable USDT symbols for category {category}: {symbols[:5]}...")
+            return symbols
+        except Exception as e:
+            logger.error(f"Error getting available symbols for {category}: {e}")
+            return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]  # Fallback to known futures symbols
 
     from typing import TYPE_CHECKING, Dict
     if TYPE_CHECKING:
@@ -799,6 +822,8 @@ class BybitClient:
         try:
             if self.ws_connection and self.loop:
                 asyncio.run_coroutine_threadsafe(self.ws_connection.close(), self.loop)
+            if self.session:
+                self.session.close()
             if self.loop:
                 self.loop.call_soon_threadsafe(self.loop.stop)
             logger.info("Bybit client closed")
