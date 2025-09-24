@@ -5,11 +5,12 @@ import sys
 import os
 from datetime import datetime, timezone
 import json
+from typing import Optional
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from trading_engine import TradingEngine
+from engine import create_engine  # Use create_engine from engine.py
 from db import db_manager, TradeModel
 from automated_trader import AutomatedTrader
 from utils import calculate_portfolio_metrics
@@ -20,10 +21,8 @@ from sqlalchemy import update
 db = db_manager
 
 # Configure logging
-# Logging using centralized system
 from logging_config import get_logger
 logger = get_logger(__name__)
-
 
 st.set_page_config(
     page_title="Trades - AlgoTrader Pro",
@@ -35,15 +34,20 @@ st.set_page_config(
 # Initialize components
 @st.cache_resource
 def get_engine():
-    return TradingEngine()
+    return create_engine()  # Use create_engine to ensure proper initialization
 
-@st.cache_resource  
+@st.cache_resource
 def get_automated_trader():
     engine = get_engine()
     return AutomatedTrader(engine, engine.client)
 
-def close_trade_safely(trade_id: str):
+def close_trade_safely(trade_id: Optional[str]) -> bool:
     """Close a trade with proper error handling"""
+    if not trade_id:
+        st.error("Invalid trade ID provided")
+        logger.error("Trade ID is None or empty")
+        return False
+
     try:
         engine = get_engine()
         
@@ -53,10 +57,15 @@ def close_trade_safely(trade_id: str):
         
         if not trade:
             st.error(f"Trade {trade_id} not found")
+            logger.error(f"Trade {trade_id} not found in open trades")
             return False
         
         # Get current price for PnL calculation
         current_price = engine.client.get_current_price(trade.symbol)
+        if current_price <= 0:
+            st.error(f"Invalid current price for {trade.symbol}")
+            logger.error(f"Invalid current price for {trade.symbol}: {current_price}")
+            return False
         
         # Calculate PnL
         trade_dict = trade.to_dict()
@@ -74,11 +83,13 @@ def close_trade_safely(trade_id: str):
             )
             if not close_order:
                 st.error(f"Failed to close position on Bybit for {trade.symbol}")
+                logger.error(f"Failed to close Bybit position for {trade.symbol}, order_id: {trade.order_id}")
                 return False
         
         # Update trade in database
         if not db_manager.session:
             logger.error("Database session not initialized")
+            st.error("Database session not initialized")
             return False
         
         try:
@@ -97,17 +108,19 @@ def close_trade_safely(trade_id: str):
         except Exception as e:
             db_manager.session.rollback()
             logger.error(f"Database error updating trade {trade.order_id}: {e}", exc_info=True)
-            success = False
+            st.error("Failed to close trade in database")
+            return False
         
         if success:
             if trade.virtual:
                 # Update virtual balance
-                engine.update_virtual_balances(pnl, "virtual")
+                engine.update_virtual_balances(pnl, mode="virtual")
             else:
                 # Sync real balance
                 engine.sync_real_balance()
             
             st.success(f"✅ Trade closed successfully! PnL: ${pnl:.2f}")
+            logger.info(f"Trade closed: {trade.symbol}, PnL: ${pnl:.2f}, Mode: {'virtual' if trade.virtual else 'real'}")
             return True
         else:
             st.error("❌ Failed to close trade in database")
@@ -179,11 +192,19 @@ def display_manual_trading():
     
     if st.button("Execute Trade"):
         trading_mode = "real" if real_mode else "virtual"
-        success = engine.execute_trade(symbol, side, qty, current_price, trading_mode)
+        signal = {
+            "symbol": symbol,
+            "side": side,
+            "entry": current_price,
+            "qty": qty,
+            "leverage": engine.settings.get("LEVERAGE", 10)
+        }
+        success = engine.execute_virtual_trade(signal, trading_mode)
         if success:
             st.success(f"✅ Trade executed successfully in {trading_mode} mode!")
         else:
             st.error("❌ Failed to execute trade")
+            logger.error(f"Failed to execute {trading_mode} trade for {symbol}")
 
 def display_automation_tab():
     """Display automation control tab"""
@@ -242,7 +263,8 @@ def main():
     with tab2:
         st.subheader("📜 Trading History")
         
-        closed_trades = db_manager.get_trades(limit=500, status="closed")
+        all_trades = db_manager.get_trades(limit=500)
+        closed_trades = [t for t in all_trades if t.status == "closed"]
         
         if closed_trades:
             history_data = []
@@ -284,10 +306,11 @@ def main():
         
         # Calculate comprehensive stats
         engine = get_engine()
-        all_trades = db_manager.get_trades(limit=1000, status="closed")
+        all_trades = db_manager.get_trades(limit=1000)
+        closed_trades = [t for t in all_trades if t.status == "closed"]
         
-        if all_trades:
-            metrics = calculate_portfolio_metrics([t.to_dict() for t in all_trades])
+        if closed_trades:
+            metrics = calculate_portfolio_metrics([t.to_dict() for t in closed_trades])
             
             # Main metrics
             metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
@@ -322,7 +345,7 @@ def main():
             st.markdown("### 📈 Performance by Symbol")
             
             symbol_performance = {}
-            for trade in all_trades:
+            for trade in closed_trades:
                 symbol = trade.symbol
                 pnl = trade.pnl or 0
                 
