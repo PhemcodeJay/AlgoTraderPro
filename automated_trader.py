@@ -212,6 +212,10 @@ class AutomatedTrader:
                 symbol = signal.get("symbol")
                 score = signal.get("score", 0)
                 
+                if symbol is None:
+                    logger.warning("Signal missing symbol, skipping.")
+                    continue
+
                 if score < self.engine.settings.get("MIN_SIGNAL_SCORE", 60):
                     continue
                 
@@ -254,7 +258,7 @@ class AutomatedTrader:
                     side=side,
                     qty=position_size,
                     entry_price=entry_price,
-                    order_id=order_id,
+                    order_id=str(order_id) if order_id is not None else "",
                     virtual=trading_mode == "virtual",
                     status="open",
                     score=score,

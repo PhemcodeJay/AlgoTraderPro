@@ -356,4 +356,4 @@ def main():
                 st.switch_page("pages/settings.py")
 
 if __name__ == "__main__":
-    main(
+    main()

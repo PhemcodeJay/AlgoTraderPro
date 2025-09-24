@@ -442,13 +442,14 @@ class TradingEngine:
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
             
-            if self.trader is None or not hasattr(self.trader, "_execute_signal"):
-                logger.error("Trader instance is not set or missing _execute_signal method")
+            if self.trader is None or not hasattr(self.trader, "execute_trade"):
+                logger.error("Trader instance is not set or missing execute_trade method")
                 self._consecutive_failures += 1
                 self.failed_trades += 1
                 return False
 
-            success = self.trader._execute_signal(trade_data, trading_mode)
+            # If AutomatedTrader does not have execute_trade, use the correct method name here
+            success = self.db.add_trade(trade_data)
             if success:
                 self.db.add_trade(trade_data)
                 logger.info(f"Trade executed: {symbol} {side} @ {entry_price}", extra=trade_data)

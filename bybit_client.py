@@ -686,7 +686,7 @@ class BybitClient:
                 "timeInForce": "IOC",  # Immediate or Cancel for market orders
             }
             if reduce_only:
-                params["reduceOnly"] = reduce_only
+                params["reduceOnly"] = str(reduce_only).lower()
             if stop_loss is not None:
                 params["stopLoss"] = str(stop_loss)
             if take_profit is not None:
