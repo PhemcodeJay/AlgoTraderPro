@@ -236,7 +236,7 @@ def main():
             # Equity curve
             equity_fig = create_equity_curve(closed_trades)
             if equity_fig:
-                st.plotly_chart(equity_fig, use_container_width=True)
+                st.plotly_chart(equity_fig)
             else:
                 st.info("No trade data available for equity curve")
         
@@ -245,7 +245,7 @@ def main():
             
             drawdown_fig = create_drawdown_chart(closed_trades)
             if drawdown_fig:
-                st.plotly_chart(drawdown_fig, use_container_width=True)
+                st.plotly_chart(drawdown_fig)
             else:
                 st.info("No data available for drawdown analysis")
             
@@ -270,7 +270,7 @@ def main():
             
             dist_fig = create_performance_distribution(closed_trades)
             if dist_fig:
-                st.plotly_chart(dist_fig, use_container_width=True)
+                st.plotly_chart(dist_fig)
             else:
                 st.info("No data available for distribution analysis")
             

@@ -240,7 +240,7 @@ def main():
             if not df.empty:
                 st.dataframe(
                     df[['symbol', 'score', 'side', 'entry', 'tp', 'sl', 'market', 'created_at']],
-                    use_container_width=True
+            
                 )
         
         st.subheader("Recent Trades")
@@ -249,7 +249,7 @@ def main():
             trade_df = pd.DataFrame([t.to_dict() for t in recent_trades])
             st.dataframe(
                 trade_df[['symbol', 'side', 'entry_price', 'exit_price', 'pnl', 'status', 'timestamp']],
-                use_container_width=True
+        
             )
         else:
             st.info("No recent trades")
@@ -297,7 +297,7 @@ def main():
                     display_signal_details(signal)
                     chart = create_signal_chart(signal)
                     if chart:
-                        st.plotly_chart(chart, use_container_width=True)
+                        st.plotly_chart(chart)
 
     with tab3:
         st.subheader("🔍 Single Symbol Analysis")
@@ -321,7 +321,7 @@ def main():
             
             chart = create_signal_chart(signal)
             if chart:
-                st.plotly_chart(chart, use_container_width=True)
+                st.plotly_chart(chart)
             
             st.subheader("Detailed Indicators")
             st.json(signal.get('indicators', {}))

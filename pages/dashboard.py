@@ -195,7 +195,7 @@ def main():
                 
                 st.dataframe(
                     signals_df.sort_values('Score', ascending=False),
-                    use_container_width=True
+            
                 )
             else:
                 st.info("No signals available")
@@ -204,7 +204,7 @@ def main():
             st.subheader("Market Overview")
             market_fig = create_market_overview_chart()
             if market_fig:
-                st.plotly_chart(market_fig, use_container_width=True)
+                st.plotly_chart(market_fig)
             else:
                 st.info("No market data available")
             
@@ -221,7 +221,7 @@ def main():
                 
                 st.dataframe(
                     trades_df.sort_values('Status', ascending=False),
-                    use_container_width=True
+            
                 )
             else:
                 st.info("No trades available")
@@ -237,7 +237,7 @@ def main():
             
             portfolio_fig = create_portfolio_chart(engine)
             if portfolio_fig:
-                st.plotly_chart(portfolio_fig, use_container_width=True)
+                st.plotly_chart(portfolio_fig)
             else:
                 st.info("No portfolio data available")
             
