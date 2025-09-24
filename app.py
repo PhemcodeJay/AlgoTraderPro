@@ -7,7 +7,7 @@ from datetime import datetime
 from db import db_manager
 from logging_config import get_logger
 from bybit_client import BybitClient
-from engine import TradingEngine
+from trading_engine import TradingEngine
 from utils import sync_real_wallet_balance
 from engine import create_engine
 

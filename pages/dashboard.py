@@ -12,7 +12,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bybit_client import BybitClient
-from engine import TradingEngine
+from trading_engine import TradingEngine
 from db import db_manager, WalletBalance
 from utils import (
     get_signals_safe, format_currency_safe, get_trades_safe, 

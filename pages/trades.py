@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine import TradingEngine
+from trading_engine import TradingEngine
 from db import db_manager, Trade
 from automated_trader import AutomatedTrader
 from utils import calculate_portfolio_metrics

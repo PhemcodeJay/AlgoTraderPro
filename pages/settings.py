@@ -8,7 +8,7 @@ from notifications import send_discord, send_telegram
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine import TradingEngine
+from trading_engine import TradingEngine
 from bybit_client import BybitClient
 from settings import load_settings, save_settings, validate_env
 

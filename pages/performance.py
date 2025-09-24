@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine import TradingEngine
+from trading_engine import TradingEngine
 from db import db_manager, WalletBalance
 from utils import calculate_portfolio_metrics
 from settings import load_settings
