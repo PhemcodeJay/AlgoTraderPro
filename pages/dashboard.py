@@ -197,7 +197,9 @@ def load_capital_data(bybit_client: Optional[BybitClient] = None) -> dict:
                         "updated_at": datetime.now(timezone.utc),  # required
                         "id": None  # optional
                     }
-                    db_manager.update_wallet_balance(WalletBalance(**real_data, trading_mode="real"))
+                    # Ensure all keys in real_data are strings for unpacking
+                    real_data_str_keys = {str(k): v for k, v in real_data.items()}
+                    db_manager.update_wallet_balance(WalletBalance(**real_data_str_keys, trading_mode="real"))
                     logger.info(f"Real balance synced and updated in DB: {real_data}")
             except Exception as e:
                 logger.error(f"Failed to sync real balance: {e}", exc_info=True)
