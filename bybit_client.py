@@ -309,18 +309,25 @@ class BybitClient:
                 self.last_successful_request = datetime.now()
                 self.consecutive_errors = 0
                 
-                # Log successful request
-                logger.info(
-                    f"API request successful: {method} {endpoint}",
-                    extra={
-                        'endpoint': endpoint,
-                        'method': method,
-                        'response_time_ms': round(response_time, 2),
-                        'status_code': response.status_code,
-                        'attempt': attempt + 1
-                    }
-                )
-                
+                # Log successful request (batched every 60s)
+                key = (method, endpoint)
+                now = time.time()
+
+                if not hasattr(self, "_request_counter"):
+                    self._request_counter = {}
+                if not hasattr(self, "_last_log_time"):
+                    self._last_log_time = {}
+
+                self._request_counter[key] = self._request_counter.get(key, 0) + 1
+                last_time = self._last_log_time.get(key, 0)
+
+                if now - last_time > 60:  # log every 60 seconds
+                    count = self._request_counter[key]
+                    logger.info(f"{count} successful {method} {endpoint} calls in last 60s")
+                    self._request_counter[key] = 0
+                    self._last_log_time[key] = now
+
+                                
                 return data.get("result", {})
                 
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
