@@ -4,20 +4,26 @@ import asyncio
 import sys
 import os
 from datetime import datetime, timezone
+import json
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from trading_engine import TradingEngine
-from db import db_manager, Trade
+from db import db_manager, TradeModel
 from automated_trader import AutomatedTrader
 from utils import calculate_portfolio_metrics
-from signal_generator import get_usdt_symbols, generate_signals
-from settings import load_settings, save_settings
+from signal_generator import get_usdt_symbols
+from sqlalchemy import update
+
+# Initialize database
+db = db_manager
 
 # Configure logging
+# Logging using centralized system
 from logging_config import get_logger
 logger = get_logger(__name__)
+
 
 st.set_page_config(
     page_title="Trades - AlgoTrader Pro",
@@ -26,23 +32,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Initialize components
+@st.cache_resource
+def get_engine():
+    return TradingEngine()
+
+@st.cache_resource  
+def get_automated_trader():
+    engine = get_engine()
+    return AutomatedTrader(engine, engine.client)
+
 def close_trade_safely(trade_id: str, virtual: bool = True):
     """Close a trade with proper error handling"""
     try:
-        engine = st.session_state.get("engine")
-        if not engine:
-            st.error("Trading engine not initialized")
-            logger.error("Trading engine not initialized")
-            return False
-        
-        # Ensure database session is initialized
-        if not db_manager.session:
-            try:
-                db_manager.init_session()
-            except Exception as e:
-                st.error("Failed to initialize database session")
-                logger.error(f"Failed to initialize database session: {e}", exc_info=True)
-                return False
+        engine = get_engine()
         
         # Get trade from database
         open_trades = [t for t in db_manager.get_trades(limit=1000) if t.status == "open"]
@@ -50,50 +53,46 @@ def close_trade_safely(trade_id: str, virtual: bool = True):
         
         if not trade:
             st.error(f"Trade {trade_id} not found")
-            logger.error(f"Trade {trade_id} not found")
             return False
         
         # Get current price for PnL calculation
         current_price = engine.client.get_current_price(trade.symbol)
-        if not current_price:
-            st.error(f"Failed to fetch current price for {trade.symbol}")
-            logger.error(f"Failed to fetch current price for {trade.symbol}")
-            return False
         
         # Calculate PnL
-        trade_dict = trade.to_dict()
-        trade_dict["exit_price"] = current_price
-        trade_dict["closed_at"] = datetime.now(timezone.utc)
-        pnl = engine.calculate_pnl(trade_dict)
+        pnl = engine.calculate_virtual_pnl(trade.to_dict())
         
         # Update trade in database
+        if not db_manager.session:
+            logger.error("Database session not initialized")
+            return False
+        
         try:
-            trade.status = "closed"
-            trade.exit_price = current_price
-            trade.pnl = pnl
-            trade.closed_at = datetime.now(timezone.utc)
-            db_manager.session.add(trade)
+            db_manager.session.execute(
+                update(TradeModel)
+                .where(TradeModel.order_id == trade.order_id)
+                .values(
+                    status="closed",
+                    exit_price=current_price,
+                    pnl=pnl,
+                    closed_at=datetime.now(timezone.utc)
+                )
+            )
             db_manager.session.commit()
             success = True
         except Exception as e:
             db_manager.session.rollback()
-            st.error(f"Database error updating trade {trade.order_id}: {e}")
             logger.error(f"Database error updating trade {trade.order_id}: {e}", exc_info=True)
-            return False
+            success = False
         
         if success:
             # Update virtual balance if it's a virtual trade
             if virtual:
-                engine.update_virtual_balances(pnl, mode="virtual")
+                engine.update_virtual_balances(pnl)
             
-            # Update wallet cache
-            st.session_state.wallet_cache.clear()
             st.success(f"✅ Trade closed successfully! PnL: ${pnl:.2f}")
-            logger.info(f"Trade {trade.order_id} closed successfully, PnL: ${pnl:.2f}")
             return True
         else:
             st.error("❌ Failed to close trade in database")
-            logger.error(f"Failed to close trade {trade.order_id} in database")
             return False
             
     except Exception as e:
@@ -101,305 +100,488 @@ def close_trade_safely(trade_id: str, virtual: bool = True):
         logger.error(f"Error closing trade {trade_id}: {e}", exc_info=True)
         return False
 
-def display_manual_trading():
-    """Display manual trading controls"""
-    st.subheader("📤 Manual Trading")
-    symbols = get_usdt_symbols()
-    symbol = st.selectbox("Select Symbol", symbols)
-    side = st.selectbox("Side", ["BUY", "SELL"])
-    qty = st.number_input("Quantity", min_value=0.0, step=0.01)
-    entry_price = st.number_input("Entry Price", min_value=0.0, step=0.01)
-    take_profit = st.number_input("Take Profit", min_value=0.0, step=0.01)
-    stop_loss = st.number_input("Stop Loss", min_value=0.0, step=0.01)
+def display_trade_management():
+    """Display trade management interface"""
+    engine = get_engine()
     
-    if st.button("Execute Manual Trade"):
+    # Trading mode switch
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("🎮 Virtual Trades")
+        virtual_trades = engine.get_open_virtual_trades()
+        
+        if virtual_trades:
+            for i, trade in enumerate(virtual_trades):
+                with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
+                    col_a, col_b, col_c = st.columns([2, 2, 1])
+                    
+                    with col_a:
+                        st.write(f"**Quantity:** {trade.qty}")
+                        st.write(f"**Score:** {trade.score or 0:.1f}%")
+                    
+                    with col_b:
+                        current_pnl = engine.calculate_virtual_pnl(trade.to_dict())
+                        pnl_color = "🟢" if current_pnl > 0 else "🔴" if current_pnl < 0 else "🟡"
+                        st.write(f"**Current PnL:** {pnl_color} ${current_pnl:.2f}")
+                        st.write(f"**Status:** {trade.status.title()}")
+                    
+                    with col_c:
+                        if st.button("❌ Close", key=f"close_virtual_{trade.id}"):
+                            if close_trade_safely(str(trade.id), virtual=True):
+                                st.rerun()
+        else:
+            st.info("No open virtual trades")
+    
+    with col2:
+        st.subheader("💰 Real Trades")
+        real_trades = engine.get_open_real_trades()
+        
+        if real_trades:
+            for i, trade in enumerate(real_trades):
+                with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
+                    col_a, col_b, col_c = st.columns([2, 2, 1])
+                    
+                    with col_a:
+                        st.write(f"**Quantity:** {trade.qty}")
+                        st.write(f"**Score:** {trade.score or 0:.1f}%")
+                    
+                    with col_b:
+                        # For real trades, PnL calculation might be different
+                        current_pnl = trade.pnl or 0
+                        pnl_color = "🟢" if current_pnl > 0 else "🔴" if current_pnl < 0 else "🟡"
+                        st.write(f"**Current PnL:** {pnl_color} ${current_pnl:.2f}")
+                        st.write(f"**Status:** {trade.status.title()}")
+                    
+                    with col_c:
+                        if st.button("❌ Close", key=f"close_real_{trade.id}"):
+                            if close_trade_safely(str(trade.id), virtual=False):
+                                st.rerun()
+        else:
+            st.info("No open real trades")
+
+def display_manual_trading():
+    """Display manual trading interface"""
+    st.subheader("📝 Manual Trade Entry")
+    
+    engine = get_engine()
+    symbols = get_usdt_symbols(50)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        symbol = st.selectbox("Symbol", symbols, key="manual_symbol")
+        side = st.selectbox("Side", ["Buy", "Sell"], key="manual_side")
+        qty = st.number_input("Quantity", min_value=0.001, value=0.01, key="manual_qty")
+        
+    with col2:
+        order_type = st.selectbox("Order Type", ["Market", "Limit"], key="manual_order_type")
+        price = st.number_input("Price (for Limit orders)", min_value=0.0, key="manual_price") if order_type == "Limit" else None
+        leverage = st.number_input("Leverage", min_value=1, max_value=100, value=10, key="manual_leverage")
+    
+    # Advanced options
+    with st.expander("🔧 Advanced Options"):
+        stop_loss = st.number_input("Stop Loss Price", min_value=0.0, key="manual_sl")
+        take_profit = st.number_input("Take Profit Price", min_value=0.0, key="manual_tp")
+        
+        trading_mode = st.selectbox("Execution Mode", ["virtual", "real"], key="manual_mode")
+    
+    if st.button("🚀 Place Order", type="primary"):
+        if qty <= 0:
+            st.error("Invalid quantity")
+            return
+        
         try:
-            engine = st.session_state.get("engine")
-            if not engine:
-                st.error("Trading engine not initialized")
-                logger.error("Trading engine not initialized")
+            # Get current price if market order or no price specified
+            current_price = engine.client.get_current_price(symbol)
+            entry_price = price if order_type == "Limit" and price else current_price
+            
+            if entry_price <= 0:
+                st.error("Invalid entry price")
                 return
             
-            # Ensure database session
-            if not db_manager.session:
-                db_manager.init_session()
-            
+            # Create trade data
             trade_data = {
                 "symbol": symbol,
                 "side": side,
                 "qty": qty,
                 "entry_price": entry_price,
-                "take_profit": take_profit,
-                "stop_loss": stop_loss,
-                "virtual": st.session_state.get("trading_mode") == "virtual",
-                "timestamp": datetime.now(timezone.utc),
+                "order_id": f"manual_{symbol}_{int(datetime.now().timestamp())}",
+                "virtual": trading_mode == "virtual",
                 "status": "open",
-                "order_id": str(uuid.uuid4()),
                 "strategy": "Manual",
-                "leverage": engine.settings.get("LEVERAGE", 10)
+                "leverage": leverage
             }
-            trade = Trade(**trade_data)
-            db_manager.session.add(trade)
-            db_manager.session.commit()
-            st.success(f"✅ Manual trade placed for {symbol} ({side})")
-            logger.info(f"Manual trade placed: {trade_data}")
-            st.rerun()
+            
+            # Add to database
+            success = db_manager.add_trade(trade_data)
+            
+            if success:
+                st.success(f"✅ {trading_mode.title()} order placed: {symbol} {side} @ ${entry_price:.4f}")
+                
+                # Update balance for virtual trades
+                if trading_mode == "virtual":
+                    margin_used = (entry_price * qty) / leverage
+                    engine.update_virtual_balances(-margin_used, "virtual")  # Reserve margin
+                
+                st.rerun()
+            else:
+                st.error("❌ Failed to place order")
+                
         except Exception as e:
-            st.error(f"Failed to execute manual trade: {e}")
-            logger.error(f"Failed to execute manual trade: {e}", exc_info=True)
+            st.error(f"Order placement error: {e}")
+            logger.error(f"Manual order error: {e}")
 
 def display_automation_tab():
     """Display automation controls"""
-    st.subheader("🤖 Automation Controls")
-    settings = load_settings()
-    auto_trading_enabled = settings.get("AUTO_TRADING_ENABLED", True)
+    st.subheader("🤖 Automated Trading")
     
-    if st.checkbox("Enable Auto Trading", value=auto_trading_enabled):
-        if not auto_trading_enabled:
-            new_settings = settings.copy()
-            new_settings["AUTO_TRADING_ENABLED"] = True
-            if save_settings(new_settings):
-                st.success("✅ Auto trading enabled")
-                logger.info("Auto trading enabled")
-                st.rerun()
-            else:
-                st.error("❌ Failed to save auto trading setting")
-                logger.error("Failed to save auto trading setting")
-    else:
-        if auto_trading_enabled:
-            new_settings = settings.copy()
-            new_settings["AUTO_TRADING_ENABLED"] = False
-            if save_settings(new_settings):
-                st.success("✅ Auto trading disabled")
-                logger.info("Auto trading disabled")
-                st.rerun()
-            else:
-                st.error("❌ Failed to save auto trading setting")
-                logger.error("Failed to save auto trading setting")
+    automated_trader = get_automated_trader()
     
-    if st.button("Run Signal Scan"):
-        try:
-            engine = st.session_state.get("engine")
-            if not engine:
-                st.error("Trading engine not initialized")
-                logger.error("Trading engine not initialized")
-                return
-            trader = AutomatedTrader(engine, engine.client)
-            # Simulate single scan by generating and processing signals
-            signals = generate_signals()
-            for signal in signals:
-                trade_data = {
-                    "symbol": signal.symbol,
-                    "side": signal.side,
-                    "qty": signal.margin_usdt / signal.entry if signal.entry and signal.margin_usdt else 0.01,
-                    "entry_price": signal.entry,
-                    "take_profit": signal.tp,
-                    "stop_loss": signal.sl,
-                    "virtual": st.session_state.get("trading_mode") == "virtual",
-                    "timestamp": datetime.now(timezone.utc),
-                    "status": "open",
-                    "order_id": str(uuid.uuid4()),
-                    "strategy": signal.strategy,
-                    "leverage": signal.leverage,
-                    "score": signal.score
-                }
-                if trade_data["qty"] > 0:
-                    trade = Trade(**trade_data)
-                    db_manager.session.add(trade)
-                    db_manager.session.commit()
-                    logger.info(f"Auto trade placed: {trade_data}")
-            st.success(f"✅ Signal scan completed, processed {len(signals)} signals")
-            logger.info(f"Signal scan completed, processed {len(signals)} signals")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Error running signal scan: {e}")
-            logger.error(f"Error running signal scan: {e}", exc_info=True)
-
-def main():
+    # Get current status
     try:
-        # Initialize session state defaults
-        if "engine" not in st.session_state:
-            st.session_state.engine = TradingEngine()
-        if "trading_mode" not in st.session_state:
-            st.session_state.trading_mode = "virtual"
-        if "wallet_cache" not in st.session_state:
-            st.session_state.wallet_cache = {"virtual": {"capital": 0.0, "available": 0.0, "used": 0.0}}
-
-        engine = st.session_state.engine
-        if not engine:
-            st.error("Trading engine not initialized")
-            logger.error("Trading engine not initialized")
-            return
-
-        # --- Sidebar ---
-        with st.sidebar:
-            st.markdown("### 🎛️ Navigation")
-            pages = {
-                "📊 Dashboard": "pages/dashboard.py",
-                "🎯 Signals": "pages/signals.py",
-                "📈 Trades": "pages/trades.py",
-                "📊 Performance": "pages/performance.py",
-                "⚙️ Settings": "pages/settings.py"
-            }
-            for name, path in pages.items():
-                if st.button(name):
-                    st.switch_page(path)
-            
-            st.divider()
-            
-            # Wallet Balance
-            balance_data = st.session_state.get("wallet_cache", {}).get(st.session_state.trading_mode, {"capital": 0.0, "available": 0.0, "used": 0.0})
-            if st.session_state.trading_mode == "virtual":
-                st.metric("💻 Virtual Capital", f"${balance_data['capital']:.2f}")
-                st.metric("💻 Virtual Available", f"${balance_data['available']:.2f}")
-                st.metric("💻 Virtual Used", f"${balance_data['used']:.2f}")
-            else:
-                st.metric("🏦 Real Capital", f"${balance_data['capital']:.2f}")
-                st.metric("🏦 Real Available", f"${balance_data['available']:.2f}")
-                st.metric("🏦 Real Used Margin", f"${balance_data['used']:.2f}")
-            
-            st.markdown(
-                f"<small style='color:#888;'>Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}</small>",
-                unsafe_allow_html=True
-            )
-
-        st.markdown("### 💼 Trade Management")
-        
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "🔄 Open Trades",
-            "📜 Trade History",
-            "📤 Manual Trading",
-            "🤖 Automation",
-            "📊 Statistics"
-        ])
-        
-        with tab1:
-            st.subheader("🔄 Open Trades")
-            open_trades = [t for t in db_manager.get_trades(limit=1000) if t.status == "open"]
-            if open_trades:
-                trade_data = []
-                for trade in open_trades:
-                    trade_data.append({
-                        "Trade ID": trade.order_id,
-                        "Symbol": trade.symbol or "N/A",
-                        "Side": trade.side or "N/A",
-                        "Entry Price": f"${trade.entry_price:.4f}" if trade.entry_price else "$0.0000",
-                        "Quantity": f"{trade.qty:.4f}" if trade.qty else "0.0000",
-                        "Status": trade.status.title() if trade.status else "N/A",
-                        "Timestamp": trade.timestamp.strftime("%Y-%m-%d %H:%M:%S") if trade.timestamp else "N/A"
-                    })
-                df = pd.DataFrame(trade_data)
-                st.dataframe(df)
-                
-                trade_id = st.selectbox("Select Trade to Close", [t["Trade ID"] for t in trade_data])
-                if st.button("Close Selected Trade"):
-                    if trade_id:
-                        close_trade_safely(trade_id, virtual=(st.session_state.trading_mode == "virtual"))
+        status = asyncio.run(automated_trader.get_status())
+        is_running = status.get("is_running", False)
+    except Exception as e:
+        logger.error(f"Error getting automation status: {e}")
+        is_running = False
+        status = {}
+    
+    # Status display
+    status_col1, status_col2, status_col3 = st.columns(3)
+    
+    with status_col1:
+        status_text = "🟢 Running" if is_running else "🔴 Stopped"
+        st.metric("Automation Status", status_text)
+    
+    with status_col2:
+        current_positions = status.get("current_positions", 0)
+        max_positions = status.get("max_positions", 5)
+        st.metric("Positions", f"{current_positions}/{max_positions}")
+    
+    with status_col3:
+        scan_interval = status.get("scan_interval", 300) / 60
+        st.metric("Scan Interval", f"{scan_interval:.0f}min")
+    
+    # Settings
+    st.markdown("### ⚙️ Automation Settings")
+    
+    settings_col1, settings_col2 = st.columns(2)
+    
+    with settings_col1:
+        new_max_positions = st.number_input("Max Positions", 1, 10, max_positions, key="auto_max_pos")
+        new_risk_per_trade = st.number_input("Risk per Trade (%)", 0.5, 5.0, 
+                                           status.get("risk_per_trade", 0.02) * 100, 
+                                           step=0.1, key="auto_risk")
+    
+    with settings_col2:
+        new_scan_interval = st.number_input("Scan Interval (minutes)", 1, 60, int(scan_interval), key="auto_interval")
+        min_signal_score = st.number_input("Min Signal Score", 50, 90, 65, key="auto_min_score")
+    
+    # Control buttons
+    control_col1, control_col2, control_col3 = st.columns(3)
+    
+    with control_col1:
+        if st.button("🚀 Start Automation", disabled=is_running):
+            with st.spinner("Starting automation..."):
+                try:
+                    # Update settings
+                    automated_trader.max_positions = new_max_positions
+                    automated_trader.risk_per_trade = new_risk_per_trade / 100
+                    automated_trader.scan_interval = new_scan_interval * 60
+                    
+                    success = asyncio.run(automated_trader.start())
+                    if success:
+                        st.success("✅ Automation started!")
                         st.rerun()
                     else:
-                        st.warning("Please select a trade to close")
-                        logger.warning("No trade selected for closing")
-            else:
-                st.info("No open trades")
-        
-        with tab2:
-            st.subheader("📜 Trade History")
-            closed_trades = [t for t in db_manager.get_trades(limit=1000) if t.status == "closed"]
-            if closed_trades:
-                trade_data = []
-                for trade in closed_trades:
-                    trade_data.append({
-                        "Trade ID": trade.order_id,
-                        "Symbol": trade.symbol or "N/A",
-                        "Side": trade.side or "N/A",
-                        "Entry Price": f"${trade.entry_price:.4f}" if trade.entry_price else "$0.0000",
-                        "Exit Price": f"${trade.exit_price:.4f}" if trade.exit_price else "$0.0000",
-                        "PnL": f"${trade.pnl:.2f}" if trade.pnl is not None else "N/A",
-                        "Status": trade.status.title() if trade.status else "N/A",
-                        "Closed At": trade.closed_at.strftime("%Y-%m-%d %H:%M:%S") if trade.closed_at else "N/A"
-                    })
-                df = pd.DataFrame(trade_data)
-                st.dataframe(df)
-                
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    "📥 Download Trade History",
-                    csv,
-                    "trade_history.csv",
-                    "text/csv"
-                )
-            else:
-                st.info("No trade history available. Start trading to see your history here!")
-        
-        with tab3:
-            display_manual_trading()
-        
-        with tab4:
-            display_automation_tab()
-        
-        with tab5:
-            st.subheader("📊 Trading Statistics")
-            
-            all_trades = db_manager.get_trades(limit=1000)
-            if all_trades:
-                trade_dicts = [t.to_dict() for t in all_trades]
-                metrics = calculate_portfolio_metrics(trade_dicts)
-                
-                metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-                with metric_col1:
-                    st.metric("Total Trades", metrics['total_trades'])
-                with metric_col2:
-                    st.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
-                with metric_col3:
-                    st.metric("Total P&L", f"${metrics['total_pnl']:.2f}")
-                with metric_col4:
-                    st.metric("Avg P&L/Trade", f"${metrics['avg_pnl']:.2f}")
-                
-                st.markdown("### 🎯 Detailed Statistics")
-                detail_col1, detail_col2 = st.columns(2)
-                with detail_col1:
-                    st.metric("Profitable Trades", metrics['profitable_trades'])
-                    st.metric("Best Trade", f"${metrics['best_trade']:.2f}")
-                with detail_col2:
-                    losing_trades = metrics['total_trades'] - metrics['profitable_trades']
-                    st.metric("Losing Trades", losing_trades)
-                    st.metric("Worst Trade", f"${metrics['worst_trade']:.2f}")
-                
-                st.markdown("### 📈 Performance by Symbol")
-                symbol_performance = {}
-                for trade in trade_dicts:
-                    symbol = trade.get("symbol", "N/A")
-                    pnl = trade.get("pnl", 0) or 0
-                    if symbol not in symbol_performance:
-                        symbol_performance[symbol] = {'trades': 0, 'total_pnl': 0}
-                    symbol_performance[symbol]['trades'] += 1
-                    symbol_performance[symbol]['total_pnl'] += pnl
-                
-                if symbol_performance:
-                    symbol_data = []
-                    for symbol, data in symbol_performance.items():
-                        symbol_data.append({
-                            "Symbol": symbol,
-                            "Trades": data['trades'],
-                            "Total PnL": f"${data['total_pnl']:.2f}",
-                            "Avg PnL": f"${data['total_pnl'] / data['trades']:.2f}"
-                        })
-                    st.dataframe(pd.DataFrame(symbol_data))
-            else:
-                st.info("No trading statistics available. Complete some trades to see detailed analytics!")
-
-    except Exception as e:
-        st.error(f"Error loading trades page: {e}")
-        logger.error(f"Trades page error: {e}", exc_info=True)
-        
-        st.markdown("### 🔧 Error Recovery")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 Retry Loading"):
+                        st.error("❌ Failed to start automation")
+                except Exception as e:
+                    st.error(f"Start error: {e}")
+    
+    with control_col2:
+        if st.button("⏹️ Stop Automation", disabled=not is_running):
+            with st.spinner("Stopping automation..."):
+                try:
+                    success = asyncio.run(automated_trader.stop())
+                    if success:
+                        st.success("✅ Automation stopped!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to stop automation")
+                except Exception as e:
+                    st.error(f"Stop error: {e}")
+    
+    with control_col3:
+        if st.button("🔄 Reset Stats"):
+            try:
+                asyncio.run(automated_trader.reset_stats())
+                st.success("✅ Statistics reset!")
                 st.rerun()
-        with col2:
-            if st.button("📊 Go to Dashboard"):
-                st.switch_page("pages/dashboard.py")
+            except Exception as e:
+                st.error(f"Reset error: {e}")
+    
+    # Performance summary
+    if is_running or status.get("stats", {}).get("total_trades", 0) > 0:
+        st.markdown("### 📊 Performance Summary")
+        
+        performance = automated_trader.get_performance_summary()
+        
+        perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
+        
+        with perf_col1:
+            st.metric("Total Trades", performance.get("total_trades", 0))
+        
+        with perf_col2:
+            win_rate = performance.get("win_rate", 0)
+            st.metric("Win Rate", f"{win_rate}%")
+        
+        with perf_col3:
+            total_pnl = performance.get("total_pnl", 0)
+            delta_color = "normal" if total_pnl == 0 else ("inverse" if total_pnl > 0 else "off")
+            st.metric("Total PnL", f"${total_pnl:.2f}")
+        
+        with perf_col4:
+            runtime = performance.get("runtime", "N/A")
+            st.metric("Runtime", runtime)
+        
+        # Recent activity
+        if is_running:
+            st.markdown("### 🕐 Recent Activity")
+            recent_trades = db_manager.get_trades(limit=5)
+            
+            if recent_trades:
+                activity_data = []
+                for trade in recent_trades:
+                    activity_data.append({
+                        "Time": trade.timestamp.strftime("%H:%M:%S") if trade.timestamp else "N/A",
+                        "Symbol": trade.symbol,
+                        "Side": trade.side,
+                        "Entry": f"${trade.entry_price:.4f}",
+                        "Status": trade.status.title(),
+                        "Type": "Virtual" if trade.virtual else "Real"
+                    })
+                
+                st.dataframe(pd.DataFrame(activity_data), height=200)
+            else:
+                st.info("No recent activity")
+
+def main():
+    st.markdown("""
+    <div style="text-align: center; padding: 1rem 0; border-bottom: 2px solid #00ff88; margin-bottom: 2rem;">
+        <h1 style="color: #00ff88; margin: 0;">💼 Trading Center</h1>
+        <p style="color: #888; margin: 0;">Complete Trade Management & Automation</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("💼 Trading Controls")
+        
+        # Current trading mode display
+        current_mode = st.session_state.get('trading_mode', 'virtual')
+        st.metric("Current Mode", current_mode.title())
+        
+        # Quick stats
+        try:
+            engine = get_engine()
+            open_virtual = len(engine.get_open_virtual_trades())
+            open_real = len(engine.get_open_real_trades())
+            
+            st.metric("Open Virtual", open_virtual)
+            st.metric("Open Real", open_real)
+            
+            # Load balance from DB
+            if current_mode == "virtual":
+                # Fetch virtual balance from DB
+                wallet_balance = db.get_wallet_balance("virtual")
+                capital_val = wallet_balance.capital if wallet_balance else 100.0
+                available_val = wallet_balance.available if wallet_balance else 100.0
+
+            else:
+                # Fetch real-time balance from Bybit
+                try:
+                    result = engine.client._make_request(
+                        "GET",
+                        "/v5/account/wallet-balance",
+                        {"accountType": "UNIFIED"}
+                    )
+
+                    if result and "list" in result and result["list"]:
+                        wallet = result["list"][0]
+                        capital_val = float(wallet.get("totalEquity", 0.0))
+
+                        # Look for USDT balance
+                        coins = wallet.get("coin", [])
+                        usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
+                        available_val = float(usdt_coin.get("walletBalance", 0.0)) if usdt_coin else capital_val
+                    else:
+                        capital_val = available_val = 0.0
+
+                except Exception as e:
+                    logger.error(f"Failed to fetch real balance from Bybit: {e}")
+                    capital_val = available_val = 0.0
+
+            # Ensure available is not negative
+            available_val = max(available_val, 0.0)
+
+            # Recalculate used as the difference
+            used_val = capital_val - available_val
+            if abs(used_val) < 0.01:
+                used_val = 0.0
+
+            # Display metrics
+            if current_mode == "virtual":
+                st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
+                st.metric("💻 Virtual Available", f"${available_val:.2f}")
+                st.metric("💻 Virtual Used", f"${used_val:.2f}")
+            else:
+                st.metric("🏦 Real Capital", f"${capital_val:.2f}")
+                st.metric("🏦 Real Available", f"${available_val:.2f}")
+                st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
+
+
+
+
+                        
+        except Exception as e:
+            st.error(f"Error loading stats: {e}")
+        
+        st.divider()
+        
+        # Navigation
+        if st.button("📊 Dashboard"):
+            st.switch_page("app.py")
+        
+        if st.button("🎯 Generate Signals"):
+            st.switch_page("pages/signals.py")
+        
+        if st.button("📈 Performance"):
+            st.switch_page("pages/performance.py")
+    
+    # Main content tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "🔄 Open Positions", 
+        "📜 Trade History", 
+        "📝 Manual Trading", 
+        "🤖 Automation", 
+        "📊 Statistics"
+    ])
+    
+    with tab1:
+        display_trade_management()
+    
+    with tab2:
+        st.subheader("📜 Trading History")
+        
+        # Get all closed trades
+        engine = get_engine()
+        closed_trades = engine.get_closed_virtual_trades() + engine.get_closed_real_trades()
+        
+        if closed_trades:
+            # Convert to displayable format
+            history_data = []
+            for trade in sorted(closed_trades, key=lambda x: x.timestamp or datetime.min, reverse=True):
+                pnl = trade.pnl or 0
+                history_data.append({
+                    "Date": trade.timestamp.strftime("%Y-%m-%d %H:%M") if trade.timestamp else "N/A",
+                    "Symbol": trade.symbol,
+                    "Side": trade.side,
+                    "Entry": f"${trade.entry_price:.4f}",
+                    "Exit": f"${trade.exit_price:.4f}" if trade.exit_price else "N/A",
+                    "Qty": f"{trade.qty:.6f}",
+                    "PnL": f"${pnl:.2f}",
+                    "Mode": "Virtual" if trade.virtual else "Real",
+                    "Strategy": trade.strategy or "Manual",
+                    "Status": "✅" if pnl > 0 else "❌" if pnl < 0 else "➖"
+                })
+            
+            df = pd.DataFrame(history_data)
+            st.dataframe(df, height=500)
+            
+            # Export option
+            csv = df.to_csv(index=False)
+            st.download_button(
+                "📥 Export Trading History",
+                csv,
+                "trading_history.csv",
+                "text/csv"
+            )
+        else:
+            st.info("No trading history available. Start trading to see your history here!")
+    
+    with tab3:
+        display_manual_trading()
+    
+    with tab4:
+        display_automation_tab()
+    
+    with tab5:
+        st.subheader("📊 Trading Statistics")
+        
+        # Calculate comprehensive stats
+        engine = get_engine()
+        all_trades = engine.get_closed_virtual_trades() + engine.get_closed_real_trades()
+        
+        if all_trades:
+            metrics = calculate_portfolio_metrics([t.to_dict() for t in all_trades])
+            
+            # Main metrics
+            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+            
+            with metric_col1:
+                st.metric("Total Trades", metrics['total_trades'])
+            
+            with metric_col2:
+                st.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
+            
+            with metric_col3:
+                st.metric("Total P&L", f"${metrics['total_pnl']:.2f}")
+            
+            with metric_col4:
+                st.metric("Avg P&L/Trade", f"${metrics['avg_pnl']:.2f}")
+            
+            # Additional metrics
+            st.markdown("### 🎯 Detailed Statistics")
+            
+            detail_col1, detail_col2 = st.columns(2)
+            
+            with detail_col1:
+                st.metric("Profitable Trades", metrics['profitable_trades'])
+                st.metric("Best Trade", f"${metrics['best_trade']:.2f}")
+            
+            with detail_col2:
+                losing_trades = metrics['total_trades'] - metrics['profitable_trades']
+                st.metric("Losing Trades", losing_trades)
+                st.metric("Worst Trade", f"${metrics['worst_trade']:.2f}")
+            
+            # Performance by symbol
+            st.markdown("### 📈 Performance by Symbol")
+            
+            symbol_performance = {}
+            for trade in all_trades:
+                symbol = trade.symbol
+                pnl = trade.pnl or 0
+                
+                if symbol not in symbol_performance:
+                    symbol_performance[symbol] = {'trades': 0, 'total_pnl': 0}
+                
+                symbol_performance[symbol]['trades'] += 1
+                symbol_performance[symbol]['total_pnl'] += pnl
+            
+            if symbol_performance:
+                symbol_data = []
+                for symbol, data in symbol_performance.items():
+                    symbol_data.append({
+                        "Symbol": symbol,
+                        "Trades": data['trades'],
+                        "Total PnL": f"${data['total_pnl']:.2f}",
+                        "Avg PnL": f"${data['total_pnl'] / data['trades']:.2f}"
+                    })
+                
+                st.dataframe(pd.DataFrame(symbol_data))
+        else:
+            st.info("No trading statistics available. Complete some trades to see detailed analytics!")
 
 if __name__ == "__main__":
     main()

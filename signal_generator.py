@@ -1,11 +1,16 @@
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
-from indicators import scan_multiple_symbols
+import requests
+import json
+from concurrent.futures import ThreadPoolExecutor
+import pytz
+import indicators  # Use standalone functions from indicators.py
 from ml import MLFilter
 from notifications import send_all_notifications
-from bybit_client import BybitClient  # Import BybitClient for futures symbols
+from bybit_client import BybitClient
 from db import Signal, db_manager
+from utils import normalize_signal
 
 # Logging using centralized system
 from logging_config import get_logger
@@ -16,26 +21,26 @@ logger = get_logger(__name__)
 # -------------------------------
 
 def get_usdt_symbols(limit: int = 50) -> List[str]:
-    """Fetch tradable USDT perpetual futures symbols from Bybit API"""
+    """Fetch tradable USDT perpetual futures symbols from Bybit API."""
     try:
-        client = BybitClient()  # Instantiate BybitClient
+        client = BybitClient()
         if not client.is_connected():
             logger.error("BybitClient not connected, using fallback symbols")
             return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"][:limit]
         
-        symbols = client.get_available_symbols("linear")  # Fetch only linear (USDT perpetual futures) symbols
-        if not symbols:
-            logger.warning("No symbols returned from Bybit API, using fallback list")
-            symbols = ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
-        else:
-            logger.info(f"Fetched {len(symbols)} tradable USDT perpetual futures symbols from Bybit: {symbols[:5]}...")
-        return symbols[:limit]
+        # Use requests since get_available_symbols is not defined
+        data = requests.get("https://api.bybit.com/v5/market/tickers?category=linear").json()
+        tickers = [i for i in data['result']['list'] if i['symbol'].endswith("USDT")]
+        tickers.sort(key=lambda x: float(x['turnover24h']), reverse=True)
+        symbols = [t['symbol'] for t in tickers[:limit]]
+        logger.info(f"Fetched {len(symbols)} tradable USDT perpetual futures symbols from Bybit: {symbols[:5]}...")
+        return symbols
     except Exception as e:
-        logger.error(f"Error fetching USDT perpetual futures symbols from Bybit: {e}")
-        return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"][:limit]  # Fallback on error
+        logger.error(f"Error fetching symbols: {e}")
+        return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"][:limit]
 
 def calculate_signal_score(analysis: Dict[str, Any]) -> float:
-    """Calculate a score for a signal based on technical indicators"""
+    """Calculate a score for a signal based on technical indicators."""
     score = analysis.get("score", 0)
     indicators = analysis.get("indicators", {})
 
@@ -66,27 +71,44 @@ def calculate_signal_score(analysis: Dict[str, Any]) -> float:
 
     return min(100, max(0, score))
 
-def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
-    """Enhance signal with additional parameters like SL, TP, and market type"""
+def classify_trend(ema9: float, ema21: float, sma20: float) -> str:
+    """Classify trend based on EMA9, EMA21, and SMA20 alignment."""
+    if ema9 is None or ema21 is None or sma20 is None:
+        return "Scalp"
+    if ema9 > ema21 > sma20:
+        return "Trend"
+    if ema9 > ema21:
+        return "Swing"
+    return "Scalp"
+
+def enhance_signal(analysis: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Enhance signal with additional parameters like SL, TP, and market type."""
     indicators = analysis.get("indicators", {})
     price = indicators.get("price", 0)
     atr = indicators.get("atr", 0)
-    side = analysis.get("side", "BUY")
-    leverage = 10
-    atr_multiplier = 2
-    risk_reward = 2
+    side = analysis.get("side", "BUY").upper()
+    leverage = settings.get("LEVERAGE", 10)
+    risk_pct = settings.get("RISK_PCT", 0.01)
+    virtual_balance = settings.get("VIRTUAL_BALANCE", 10000)
 
-    if side.lower() == "buy":
-        sl = price - atr * atr_multiplier
-        tp = price + atr * atr_multiplier * risk_reward
-        liq = price * (1 - 0.9 / leverage)
+    # Use previous standalone logic for TP/SL and trailing stop
+    entry = price
+    if side == "LONG":
+        tp = round(entry * 1.015, 6)
+        sl = round(entry * 0.985, 6)
+        trail = round(entry * (1 - settings.get("ENTRY_BUFFER_PCT", 0.002)), 6)
+        liq = round(entry * (1 - 1/leverage), 6)
     else:
-        sl = price + atr * atr_multiplier
-        tp = price - atr * atr_multiplier * risk_reward
-        liq = price * (1 + 0.9 / leverage)
+        tp = round(entry * 0.985, 6)
+        sl = round(entry * 1.015, 6)
+        trail = round(entry * (1 + settings.get("ENTRY_BUFFER_PCT", 0.002)), 6)
+        liq = round(entry * (1 + 1/leverage), 6)
 
-    trail = atr
-    margin_usdt = 5.0
+    try:
+        sl_diff = abs(entry - sl)
+        margin = round((virtual_balance * risk_pct / sl_diff) * entry / leverage, 6)
+    except ZeroDivisionError:
+        margin = 5.0
 
     bb_upper = indicators.get("bb_upper", 0)
     bb_lower = indicators.get("bb_lower", 0)
@@ -102,17 +124,30 @@ def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
 
     enhanced = analysis.copy()
     enhanced.update({
-        "entry": round(float(price), 6),
+        "Symbol": enhanced.get("symbol", "UNKNOWN"),  # For notifications.py
+        "Type": classify_trend(
+            indicators.get("ema9"),
+            indicators.get("ema21"),
+            indicators.get("sma20")
+        ),  # For notifications.py
+        "Side": side,  # For notifications.py
+        "Score": round(float(enhanced.get("score", 0)), 1),  # For notifications.py
+        "Entry": round(float(entry), 6),  # For notifications.py
+        "TP": round(float(tp), 6),  # For notifications.py
+        "SL": round(float(sl), 6),  # For notifications.py
+        "Trail": round(float(trail), 6),  # For notifications.py
+        "Margin": round(float(margin), 6),  # For notifications.py
+        "Market": market_type,  # For notifications.py
+        "Liquidation": round(float(liq), 6),  # For notifications.py
+        "entry": round(float(entry), 6),
         "sl": round(float(sl), 6),
         "tp": round(float(tp), 6),
         "trail": round(float(trail), 6),
         "liquidation": round(float(liq), 6),
-        "margin_usdt": round(float(margin_usdt), 6),
+        "margin_usdt": round(float(margin), 6),
         "bb_slope": bb_slope,
         "market": market_type,
         "leverage": leverage,
-        "risk_reward": risk_reward,
-        "atr_multiplier": atr_multiplier,
         "created_at": datetime.now(timezone.utc)
     })
     return enhanced
@@ -125,15 +160,109 @@ def generate_signals(
     symbols: List[str],
     interval: str = "60",
     top_n: int = 10,
-    trading_mode: str = "virtual"
+    trading_mode: str = "virtual",
+    settings: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
-    """Generate trading signals for given symbols"""
+    """Generate trading signals for given symbols with multi-timeframe analysis."""
+    if settings is None:
+        settings = {
+            "INTERVALS": ["15", "60", "240"],
+            "MIN_VOLUME": 1000000,
+            "MIN_ATR_PCT": 0.005,
+            "RSI_OVERSOLD": 30,
+            "RSI_OVERBOUGHT": 70,
+            "LEVERAGE": 10,
+            "RISK_PCT": 0.01,
+            "VIRTUAL_BALANCE": 10000,
+            "ENTRY_BUFFER_PCT": 0.002,
+            "TOP_N_SIGNALS": top_n,
+            "ML_THRESHOLD": 0.4
+        }
+    
     logger.info(f"Generating signals for {len(symbols)} symbols in {trading_mode} mode: {symbols[:5]}...")
-    raw_analyses = scan_multiple_symbols(symbols, interval, max_workers=5)
+    
+    # Perform multi-timeframe analysis
+    client = BybitClient()
+    raw_analyses = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_symbol = {
+            executor.submit(indicators.scan_multiple_symbols, [symbol], interval): symbol
+            for symbol in symbols
+        }
+        for future in future_to_symbol:
+            symbol = future_to_symbol[future]
+            try:
+                analysis = future.result()
+                if analysis:
+                    # Add multi-timeframe indicators
+                    data = {}
+                    for tf in settings["INTERVALS"]:
+                        try:
+                            candles = client.get_klines(symbol=symbol, interval=tf, limit=200)
+                        except Exception as e:
+                            logger.warning(f"BybitClient.get_klines failed for {symbol} on {tf}m: {e}, using requests")
+                            url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={tf}&limit=200"
+                            data_response = requests.get(url).json()
+                            candles = data_response.get('result', {}).get('list', [])
+                        
+                        if len(candles) < 30:
+                            logger.warning(f"Insufficient candles for {symbol} on {tf}m")
+                            continue
+                        
+                        closes = [float(c["close"]) for c in candles]
+                        highs = [float(c["high"]) for c in candles]
+                        lows = [float(c["low"]) for c in candles]
+                        volumes = [float(c["volume"]) for c in candles]
+                        
+                        data[tf] = {
+                            "close": closes[-1],
+                            "ema9": indicators.ema(closes, 9)[-1] if indicators.ema(closes, 9) else None,
+                            "ema21": indicators.ema(closes, 21)[-1] if indicators.ema(closes, 21) else None,
+                            "sma20": indicators.sma(closes, 20)[-1] if indicators.sma(closes, 20) else None,
+                            "volume": volumes[-1]
+                        }
+                    
+                    if data.get("60"):
+                        analysis[0]["indicators"].update({
+                            "ema9": data["60"].get("ema9"),
+                            "ema21": data["60"].get("ema21"),
+                            "sma20": data["60"].get("sma20")
+                        })
+                        # Multi-timeframe filtering
+                        tf60 = data["60"]
+                        if (tf60["volume"] < settings["MIN_VOLUME"] or 
+                            (analysis[0]["indicators"].get("volatility", 0) < settings["MIN_ATR_PCT"]) or
+                            not (settings["RSI_OVERSOLD"] < analysis[0]["indicators"].get("rsi", 50) < settings["RSI_OVERBOUGHT"])):
+                            continue
+                        
+                        # Check timeframe alignment
+                        sides = []
+                        for tf in settings["INTERVALS"]:
+                            d = data.get(tf, {})
+                            if not d:
+                                continue
+                            if d["close"] > (analysis[0]["indicators"].get("bb_upper", float('inf'))):
+                                sides.append("LONG")
+                            elif d["close"] < (analysis[0]["indicators"].get("bb_lower", 0)):
+                                sides.append("SHORT")
+                            elif d["close"] > (d["ema21"] or float('inf')):
+                                sides.append("LONG")
+                            elif d["close"] < (d["ema21"] or 0):
+                                sides.append("SHORT")
+                            else:
+                                sides.append("NEUTRAL")
+                        
+                        if len(set(s for s in sides if s != "NEUTRAL")) == 1 and not all(s == "NEUTRAL" for s in sides):
+                            analysis[0]["side"] = sides[0] if sides[0] != "NEUTRAL" else next(s for s in sides if s != "NEUTRAL")
+                            raw_analyses.append(analysis[0])
+            except Exception as e:
+                logger.error(f"Error analyzing {symbol}: {e}")
+
     if not raw_analyses:
         logger.warning("No analysis results")
         return []
 
+    # Score and filter signals
     scored_signals = []
     for analysis in raw_analyses:
         score = calculate_signal_score(analysis)
@@ -149,7 +278,7 @@ def generate_signals(
     # ML filtering
     ml_filter = MLFilter()
     try:
-        filtered_signals = ml_filter.filter_signals(scored_signals)
+        filtered_signals = ml_filter.filter_signals(scored_signals, threshold=settings.get("ML_THRESHOLD", 0.4))
     except Exception as e:
         logger.warning(f"ML filter failed: {e}")
         filtered_signals = scored_signals
@@ -158,18 +287,11 @@ def generate_signals(
     final_signals = []
     for s in filtered_signals[:top_n]:
         if isinstance(s, Signal):
-            s_dict = {
-                "symbol": str(s.symbol),
-                "interval": str(s.interval),
-                "signal_type": str(s.signal_type),
-                "score": float(s.score),
-                "indicators": dict(s.indicators),
-                "side": str(s.side),
-            }
-            enhanced = enhance_signal(s_dict)
+            s_dict = normalize_signal(s)
+            enhanced = enhance_signal(s_dict, settings)
         else:
-            enhanced = enhance_signal(s)
-
+            enhanced = enhance_signal(s, settings)
+        
         final_signals.append(enhanced)
 
         # Save to DB
@@ -179,6 +301,7 @@ def generate_signals(
             signal_type=str(enhanced.get("signal_type", "BUY")),
             score=float(enhanced.get("score", 0)),
             indicators=dict(enhanced.get("indicators", {})),
+            strategy="Auto",
             side=str(enhanced.get("side", "BUY")),
             sl=float(enhanced.get("sl", 0)),
             tp=float(enhanced.get("tp", 0)),
@@ -196,6 +319,12 @@ def generate_signals(
         except Exception as e:
             logger.error(f"Failed to save signal {enhanced.get('symbol')} to DB: {e}")
 
+    if final_signals and settings.get("NOTIFICATION_ENABLED", True):
+        try:
+            send_all_notifications(final_signals)
+        except Exception as e:
+            logger.error(f"Error sending notifications: {e}")
+
     return final_signals
 
 # -------------------------------
@@ -203,7 +332,7 @@ def generate_signals(
 # -------------------------------
 
 def get_signal_summary(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Generate a summary of trading signals"""
+    """Generate a summary of trading signals."""
     if not signals:
         return {"total": 0, "avg_score": 0, "top_symbol": "None"}
 
@@ -228,16 +357,94 @@ def get_signal_summary(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
         "market_distribution": market_types
     }
 
-def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
-    """Analyze a single symbol and return the enhanced signal dictionary"""
-    raw_analyses = scan_multiple_symbols([symbol], interval, max_workers=1)
+def analyze_single_symbol(symbol: str, interval: str = "60", settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Analyze a single symbol and return the enhanced signal dictionary."""
+    if settings is None:
+        settings = {
+            "INTERVALS": ["15", "60", "240"],
+            "MIN_VOLUME": 1000000,
+            "MIN_ATR_PCT": 0.005,
+            "RSI_OVERSOLD": 30,
+            "RSI_OVERBOUGHT": 70,
+            "LEVERAGE": 10,
+            "RISK_PCT": 0.01,
+            "VIRTUAL_BALANCE": 10000,
+            "ENTRY_BUFFER_PCT": 0.002
+        }
+    
+    raw_analyses = indicators.scan_multiple_symbols([symbol], interval, max_workers=1)
     if not raw_analyses:
         logger.warning(f"No analysis found for {symbol}")
         return {}
 
     analysis = raw_analyses[0]
     analysis["score"] = calculate_signal_score(analysis)
-    enhanced = enhance_signal(analysis)
+    
+    # Add multi-timeframe indicators
+    client = BybitClient()
+    data = {}
+    for tf in settings["INTERVALS"]:
+        try:
+            candles = client.get_klines(symbol=symbol, interval=tf, limit=200)
+        except Exception as e:
+            logger.warning(f"BybitClient.get_klines failed for {symbol} on {tf}m: {e}, using requests")
+            url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={tf}&limit=200"
+            data_response = requests.get(url).json()
+            candles = data_response.get('result', {}).get('list', [])
+        
+        if len(candles) < 30:
+            logger.warning(f"Insufficient candles for {symbol} on {tf}m")
+            continue
+        
+        closes = [float(c["close"]) for c in candles]
+        highs = [float(c["high"]) for c in candles]
+        lows = [float(c["low"]) for c in candles]
+        volumes = [float(c["volume"]) for c in candles]
+        
+        data[tf] = {
+            "close": closes[-1],
+            "ema9": indicators.ema(closes, 9)[-1] if indicators.ema(closes, 9) else None,
+            "ema21": indicators.ema(closes, 21)[-1] if indicators.ema(closes, 21) else None,
+            "sma20": indicators.sma(closes, 20)[-1] if indicators.sma(closes, 20) else None,
+            "volume": volumes[-1]
+        }
+    
+    if data.get("60"):
+        analysis["indicators"].update({
+            "ema9": data["60"].get("ema9"),
+            "ema21": data["60"].get("ema21"),
+            "sma20": data["60"].get("sma20")
+        })
+        # Multi-timeframe filtering
+        tf60 = data["60"]
+        if (tf60["volume"] < settings["MIN_VOLUME"] or 
+            (analysis["indicators"].get("volatility", 0) < settings["MIN_ATR_PCT"]) or
+            not (settings["RSI_OVERSOLD"] < analysis["indicators"].get("rsi", 50) < settings["RSI_OVERBOUGHT"])):
+            return {}
+        
+        # Check timeframe alignment
+        sides = []
+        for tf in settings["INTERVALS"]:
+            d = data.get(tf, {})
+            if not d:
+                continue
+            if d["close"] > (analysis["indicators"].get("bb_upper", float('inf'))):
+                sides.append("LONG")
+            elif d["close"] < (analysis["indicators"].get("bb_lower", 0)):
+                sides.append("SHORT")
+            elif d["close"] > (d["ema21"] or float('inf')):
+                sides.append("LONG")
+            elif d["close"] < (d["ema21"] or 0):
+                sides.append("SHORT")
+            else:
+                sides.append("NEUTRAL")
+        
+        if len(set(s for s in sides if s != "NEUTRAL")) != 1 or all(s == "NEUTRAL" for s in sides):
+            return {}
+        
+        analysis["side"] = sides[0] if sides[0] != "NEUTRAL" else next(s for s in sides if s != "NEUTRAL")
+
+    enhanced = enhance_signal(analysis, settings)
 
     # Save to DB
     signal_obj = Signal(
@@ -246,6 +453,7 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
         signal_type=str(enhanced.get("signal_type", "BUY")),
         score=float(enhanced.get("score", 0)),
         indicators=dict(enhanced.get("indicators", {})),
+        strategy="Auto",
         side=str(enhanced.get("side", "BUY")),
         sl=float(enhanced.get("sl", 0)),
         tp=float(enhanced.get("tp", 0)),
@@ -270,11 +478,7 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
 # -------------------------------
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-
     symbols = get_usdt_symbols(limit=20)
     signals = generate_signals(symbols, interval="60", top_n=5)
     summary = get_signal_summary(signals)
     logger.info(f"Signal Summary: {summary}")
-
-    if signals:
-        send_all_notifications(signals)

@@ -117,7 +117,7 @@ class SignalModel(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
     interval: Mapped[str] = mapped_column(String(10), nullable=False)
-    signal_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    type: Mapped[str] = mapped_column(String(20), nullable=False)  # Changed from signal_type to type
     score: Mapped[float] = mapped_column(Float, nullable=False)
     indicators: Mapped[str] = mapped_column(Text, nullable=False)  # JSON string
     strategy: Mapped[str] = mapped_column(String(20), default="Auto")
@@ -130,14 +130,16 @@ class SignalModel(Base):
     margin_usdt: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     market: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    bb_slope: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # Added for Bollinger Band direction
+    time: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # Added for timestamp
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    def to_signal(self) -> Signal:
+    def to_signal(self) -> 'Signal':
         return Signal(
-            id=str(self.id) if self.id is not None else None,  # ✅ Cast int → str
+            id=str(self.id) if self.id is not None else None,
             symbol=self.symbol,
             interval=self.interval,
-            signal_type=self.signal_type,
+            signal_type=self.type,
             score=self.score,
             indicators=json.loads(self.indicators),
             strategy=self.strategy,
