@@ -3,7 +3,7 @@ import streamlit as st
 import os
 import sys
 from db import db_manager, WalletBalance
-from utils import send_discord, send_telegram
+from notifications import send_discord, send_telegram
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
