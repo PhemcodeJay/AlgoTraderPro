@@ -534,6 +534,21 @@ class DatabaseManager:
             logger.error(f"Error getting trades: {e}")
             return []
 
+    def get_open_trades(self) -> List[Trade]:
+        """Retrieve all open trades from the database."""
+        try:
+            def _get_open_trades():
+                if not self.session:
+                    raise DatabaseConnectionException("Database session not initialized")
+                trades = self.session.query(TradeModel).filter(
+                    TradeModel.status == "open"
+                ).order_by(TradeModel.timestamp.desc()).all()
+                return [t.to_trade() for t in trades]
+            return self._execute_with_retry(_get_open_trades, "get_open_trades")
+        except Exception as e:
+            logger.error(f"Error getting open trades: {e}")
+            return []
+
     def get_wallet_balance(self, trading_mode: str) -> Optional[WalletBalance]:
         try:
             def _get_wallet_balance():

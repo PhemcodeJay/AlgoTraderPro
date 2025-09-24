@@ -1,11 +1,12 @@
 import json
+import asyncio
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 import numpy as np
 from bybit_client import BybitClient
 from db import db_manager, WalletBalance, Trade
 from logging_config import get_trading_logger
-from utils import sync_real_wallet_balance, calculate_portfolio_metrics
+from utils import sync_real_wallet_balance, calculate_portfolio_metrics, normalize_signal
 from indicators import scan_multiple_symbols
 from signal_generator import generate_signals
 from automated_trader import AutomatedTrader
@@ -41,7 +42,7 @@ class TradingEngine:
             self.failed_trades = 0
             
             # Initialize AutomatedTrader
-            self.trader = AutomatedTrader(self.client, self.db)
+            self.trader = AutomatedTrader(self, self.client)
             
             logger.info(
                 "Trading engine initialized successfully",
@@ -169,16 +170,31 @@ class TradingEngine:
         try:
             self._emergency_stop = True
             self._trading_enabled = False
-            
+
             logger.critical(
                 f"EMERGENCY STOP ACTIVATED: {reason}",
                 extra={'reason': reason, 'timestamp': datetime.now(timezone.utc).isoformat()}
             )
-            
-            self.trader.close_all_positions()
-            
+
+            # Close all open positions
+            open_trades = self.db.get_open_trades()
+            if open_trades:
+                async def _close_all():
+                    coroutines = [
+                        self.trader._close_trade(
+                            trade,
+                            self.client.get_current_price(trade.symbol),
+                            reason,
+                            "real" if not trade.virtual else "virtual"
+                        )
+                        for trade in open_trades
+                    ]
+                    return await asyncio.gather(*coroutines, return_exceptions=True)
+
+                asyncio.run(_close_all())
+
             return True
-            
+
         except Exception as e:
             logger.critical(f"Failed to activate emergency stop: {str(e)}")
             return False
@@ -293,11 +309,12 @@ class TradingEngine:
             logger.error(f"Error calculating position size for {symbol}: {e}")
             return 0.0
     
-    def get_closed_real_trades(self) -> List[Trade]:
+    def get_closed_real_trades(self) -> List[Dict]:
         """Get closed real trades"""
         try:
             all_trades = self.db.get_trades()
-            return [trade for trade in all_trades if not trade.virtual and trade.status == "closed"]
+            closed_real_trades = [trade.to_dict() for trade in all_trades if not trade.virtual and trade.status == "closed"]
+            return closed_real_trades
         except Exception as e:
             logger.error(f"Error getting closed real trades: {e}")
             return []
@@ -306,12 +323,12 @@ class TradingEngine:
         """Calculate comprehensive trading statistics"""
         try:
             all_trades = self.db.get_trades()
-            virtual_trades = [t for t in all_trades if t.virtual]
-            real_trades = [t for t in all_trades if not t.virtual]
+            virtual_trades = [t.to_dict() for t in all_trades if t.virtual]
+            real_trades = [t.to_dict() for t in all_trades if not t.virtual]
             
             virtual_stats = calculate_portfolio_metrics(virtual_trades)
             real_stats = calculate_portfolio_metrics(real_trades)
-            overall_stats = calculate_portfolio_metrics(all_trades)
+            overall_stats = calculate_portfolio_metrics([t.to_dict() for t in all_trades])
             
             return {
                 **overall_stats,
@@ -387,7 +404,6 @@ class TradingEngine:
     def execute_virtual_trade(self, signal: Dict, trading_mode: str = "virtual") -> bool:
         """Execute a virtual trade based on a signal"""
         try:
-            from utils import normalize_signal
             signal = normalize_signal(signal)
             symbol = signal.get("symbol")
             if not symbol:
@@ -420,22 +436,26 @@ class TradingEngine:
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
             
-            success = self.trader.execute_trade(trade_data)
+            success = self.trader._execute_signal(trade_data, trading_mode)
             if success:
                 self.db.add_trade(trade_data)
                 logger.info(f"Trade executed: {symbol} {side} @ {entry_price}", extra=trade_data)
                 if trading_mode == "virtual":
                     margin_used = (entry_price * position_size) / trade_data["leverage"]
                     self.update_virtual_balances(-margin_used, trading_mode)
+                self.trade_count += 1
+                self.successful_trades += 1
                 return True
             else:
                 logger.warning(f"Trade execution failed for {symbol}")
                 self._consecutive_failures += 1
+                self.failed_trades += 1
                 return False
             
         except Exception as e:
             logger.error(f"Error executing trade for {symbol}: {e}")
             self._consecutive_failures += 1
+            self.failed_trades += 1
             return False
 
     def run_trading_cycle(self) -> None:
@@ -473,7 +493,7 @@ class TradingEngine:
                 else:
                     self.failed_trades += 1
 
-            trades = self.db.get_trades(limit=100)
+            trades = [trade.to_dict() for trade in self.db.get_trades(limit=100)]
             metrics = calculate_portfolio_metrics(trades)
             self._daily_pnl = metrics["total_pnl"]
             logger.info("Portfolio metrics updated", extra=metrics)
