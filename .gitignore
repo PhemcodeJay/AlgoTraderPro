@@ -3,3 +3,4 @@ logs
 __pycache__
 pages/__pycache__
 migrate.py
+migrations
