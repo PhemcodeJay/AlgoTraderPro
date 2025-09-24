@@ -9,6 +9,7 @@ from logging_config import get_logger
 from bybit_client import BybitClient
 from engine import TradingEngine
 from utils import sync_real_wallet_balance
+from engine import create_engine
 
 # Logging using centralized system
 logger = get_logger(__name__)
@@ -265,4 +266,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    engine = create_engine()
+    engine.run_trading_cycle()

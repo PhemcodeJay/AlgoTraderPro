@@ -2,9 +2,9 @@ import asyncio
 from dataclasses import asdict
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy import update
-from engine import TradingEngine
+from trading_engine import TradingEngine
 from bybit_client import BybitClient
 from signal_generator import generate_signals
 from db import db_manager, Trade, Signal, TradeModel
@@ -25,9 +25,8 @@ class AutomatedTrader:
         self.client.base_url = "https://api.bybit.com"
         
         # Trading parameters
-        self.scan_interval, self.top_n_signals = self.engine.get_settings()
+        self.scan_interval, self.top_n_signals, self.risk_per_trade = self.engine.get_settings()
         self.max_positions = self.engine.max_open_positions
-        self.risk_per_trade = self.engine.max_risk_per_trade
         self.leverage = self.engine.settings.get("LEVERAGE", 10)
         
         # Statistics
@@ -478,7 +477,8 @@ class AutomatedTrader:
                 return
             
             trade_dict = asdict(trade)
-            pnl = self.engine.calculate_virtual_pnl(trade_dict)
+            # Calculate PnL using the engine's calculate_pnl method
+            pnl = self.engine.calculate_pnl(trade_dict)
             
             if trading_mode == "real":
                 # Cancel order on Bybit if still open
