@@ -37,6 +37,8 @@ class Signal:
     margin_usdt: Optional[float] = None
     entry: Optional[float] = None
     market: Optional[str] = None
+    bb_slope: Optional[str] = None         # ✅ added
+    time: Optional[str] = None             # ✅ added
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     id: Union[str, None] = None
 
@@ -55,7 +57,6 @@ class Signal:
         if self.created_at:
             data["created_at"] = self.created_at.isoformat()
         return data
-
 
 @dataclass
 class Trade:
@@ -117,7 +118,7 @@ class SignalModel(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
     interval: Mapped[str] = mapped_column(String(10), nullable=False)
-    type: Mapped[str] = mapped_column(String(20), nullable=False)  # Changed from signal_type to type
+    signal_type: Mapped[str] = mapped_column(String(20), nullable=False)
     score: Mapped[float] = mapped_column(Float, nullable=False)
     indicators: Mapped[str] = mapped_column(Text, nullable=False)  # JSON string
     strategy: Mapped[str] = mapped_column(String(20), default="Auto")
@@ -130,8 +131,8 @@ class SignalModel(Base):
     margin_usdt: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     market: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    bb_slope: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # Added for Bollinger Band direction
-    time: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # Added for timestamp
+    bb_slope: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)   # ✅ Bollinger Band slope
+    time: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)       # ✅ signal timestamp
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_signal(self) -> 'Signal':
@@ -139,7 +140,7 @@ class SignalModel(Base):
             id=str(self.id) if self.id is not None else None,
             symbol=self.symbol,
             interval=self.interval,
-            signal_type=self.type,
+            signal_type=self.signal_type,
             score=self.score,
             indicators=json.loads(self.indicators),
             strategy=self.strategy,
@@ -152,6 +153,8 @@ class SignalModel(Base):
             margin_usdt=self.margin_usdt,
             entry=self.entry,
             market=self.market,
+            bb_slope=self.bb_slope,    # ✅ now included
+            time=self.time,            # ✅ now included
             created_at=self.created_at,
         )
 

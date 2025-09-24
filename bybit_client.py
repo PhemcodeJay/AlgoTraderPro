@@ -10,6 +10,7 @@ import requests.adapters
 from datetime import datetime
 import requests
 import threading
+import logging
 from dataclasses import dataclass
 from logging_config import get_trading_logger
 from exceptions import (
@@ -17,7 +18,8 @@ from exceptions import (
     APIAuthenticationException, APITimeoutException, APIDataException,
     APIErrorRecoveryStrategy, create_error_context
 )
-
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 logger = get_trading_logger('api_client')
 
 @dataclass
@@ -83,34 +85,54 @@ class BybitClient:
         
         logger.info(f"BybitClient initialized - Environment: mainnet - Account Type: {self.account_type}")
     
+
     def _initialize_session(self):
         """Initialize HTTP session with proper configuration"""
         try:
+            # Close existing session if reinitializing
+            if hasattr(self, "session") and self.session is not None:
+                try:
+                    self.session.close()
+                except Exception:
+                    pass
+
             self.session = requests.Session()
-            
-            # Configure adapters for connection pooling and retries  
-            adapter = requests.adapters.HTTPAdapter(
-                pool_connections=10,
-                pool_maxsize=10,
-                max_retries=0  # We handle retries manually
+
+            # Configure retry strategy (we still control retry policy here)
+            retry_strategy = Retry(
+                total=0,  # set to >0 if you want auto retries, else leave 0
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE"],
+                backoff_factor=0.5,  # exponential backoff
+                raise_on_status=False
             )
-            
-            self.session.mount('https://', adapter)
-            self.session.mount('http://', adapter)
-            
-            logger.info("HTTP session initialized with connection pooling")
-            
+
+            adapter = HTTPAdapter(
+                pool_connections=10,
+                pool_maxsize=20,  # allow more concurrent connections
+                max_retries=retry_strategy
+            )
+
+            self.session.mount("https://", adapter)
+            self.session.mount("http://", adapter)
+
+            # Optional: set default headers or timeout
+            self.session.headers.update({"User-Agent": "AlgoTraderPro/1.0"})
+
+            logger.info("HTTP session initialized with connection pooling and retries")
+
         except Exception as e:
             error_context = create_error_context(
                 module=__name__,
-                function='_initialize_session'
+                function="_initialize_session"
             )
             raise APIConnectionException(
-                f"Failed to initialize HTTP session: {str(e)}",
-                endpoint='session_init',
+                f"Failed to initialize HTTP session: {e}",
+                endpoint="session_init",
                 context=error_context,
                 original_exception=e
             )
+
 
     def _start_background_loop(self):
         """Start background event loop for async operations"""
