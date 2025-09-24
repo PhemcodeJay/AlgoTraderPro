@@ -1,3 +1,4 @@
+import time
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -15,8 +16,8 @@ from db import db_manager, Trade, Signal
 from indicators import get_candles
 from signal_generator import generate_signals, get_usdt_symbols, analyze_single_symbol
 from notifications import send_all_notifications
-from engine import TradingEngine
-from root_folder_settings import load_settings, save_settings
+from trading_engine import TradingEngine
+from settings import load_settings, save_settings
 
 # Configure logging
 from logging_config import get_logger
@@ -115,7 +116,7 @@ def main():
         # Ensure database session
         if not db_manager.session:
             try:
-                db_manager.init_session()
+                db_manager.create_session()
             except Exception as e:
                 st.error("Failed to initialize database session")
                 logger.error(f"Failed to initialize database session: {e}", exc_info=True)
@@ -224,7 +225,7 @@ def main():
                 
                 if st.button("Send Notifications"):
                     try:
-                        send_all_notifications(signals)
+                        send_all_notifications([s.to_dict() for s in signals])
                         st.success("✅ Notifications sent")
                         logger.info("Notifications sent for signals")
                     except Exception as e:
