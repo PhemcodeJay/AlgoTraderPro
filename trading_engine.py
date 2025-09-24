@@ -470,15 +470,16 @@ class TradingEngine:
             self.failed_trades += 1
             return False
 
+    # trading_engine.py (updated calculate_pnl method only; replace the existing def)
     def calculate_pnl(self, trade_dict: dict) -> float:
-        # Example: (exit_price - entry_price) * quantity
+        # Example: (exit_price - entry_price) * qty
         entry_price = trade_dict.get("entry_price", 0)
         exit_price = trade_dict.get("exit_price", 0)
-        qty = trade_dict.get("quantity", 0)
+        qty = trade_dict.get("qty", 0)
         side = trade_dict.get("side", "buy")
 
         pnl = (exit_price - entry_price) * qty
-        if side.lower() == "sell":
+        if side.lower() in ["sell", "short"]:
             pnl = -pnl
         return pnl
 

@@ -5,12 +5,11 @@ import plotly.express as px
 import numpy as np
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine import TradingEngine
 from utils import calculate_portfolio_metrics
 
 # Configure logging
@@ -18,6 +17,7 @@ from utils import calculate_portfolio_metrics
 from logging_config import get_logger
 logger = get_logger(__name__)
 
+from db import db_manager
 
 st.set_page_config(
     page_title="Performance - AlgoTrader Pro",
@@ -33,17 +33,18 @@ def create_equity_curve(trades):
             return None
             
         # Sort trades by timestamp
-        sorted_trades = sorted(trades, key=lambda x: x.timestamp or datetime.min)
+        sorted_trades = sorted(trades, key=lambda x: getattr(x, 'timestamp', datetime.min.replace(tzinfo=timezone.utc)))
         
         # Calculate cumulative performance
         equity_data = []
         cumulative_pnl = 100.0  # Starting balance
         
         for trade in sorted_trades:
-            pnl = trade.pnl or 0
+            pnl = getattr(trade, 'pnl', 0) or 0
             cumulative_pnl += pnl
+            timestamp = getattr(trade, 'timestamp', datetime.now(timezone.utc))
             equity_data.append({
-                'date': trade.timestamp,
+                'date': timestamp,
                 'pnl': pnl,
                 'equity': cumulative_pnl,
                 'trade_number': len(equity_data) + 1
@@ -105,28 +106,27 @@ def create_drawdown_chart(trades):
         if not trades:
             return None
         
-        sorted_trades = sorted(trades, key=lambda x: x.timestamp or datetime.min)
+        sorted_trades = sorted(trades, key=lambda x: getattr(x, 'timestamp', datetime.min.replace(tzinfo=timezone.utc)))
         
         drawdown_data = []
-        cumulative_pnl = 1000.0
-        peak_value = 1000.0
+        current_peak = 100.0  # Starting balance
+        running_equity = 100.0
+        max_drawdown = 0
+        drawdowns = []
         
         for trade in sorted_trades:
-            pnl = trade.pnl or 0
-            cumulative_pnl += pnl
+            pnl = getattr(trade, 'pnl', 0) or 0
+            running_equity += pnl
+            current_peak = max(current_peak, running_equity)
+            drawdown = ((running_equity - current_peak) / current_peak) * 100 if current_peak > 0 else 0
+            drawdowns.append(drawdown)
+            max_drawdown = min(max_drawdown, drawdown)
             
-            # Update peak
-            if cumulative_pnl > peak_value:
-                peak_value = cumulative_pnl
-            
-            # Calculate drawdown
-            drawdown = (cumulative_pnl - peak_value) / peak_value * 100
-            
+            timestamp = getattr(trade, 'timestamp', datetime.now(timezone.utc))
             drawdown_data.append({
-                'date': trade.timestamp,
-                'equity': cumulative_pnl,
-                'peak': peak_value,
-                'drawdown': drawdown
+                'date': timestamp,
+                'drawdown': drawdown,
+                'equity': running_equity
             })
         
         if not drawdown_data:
@@ -141,18 +141,18 @@ def create_drawdown_chart(trades):
             x=df['date'],
             y=df['drawdown'],
             mode='lines',
-            name='Drawdown (%)',
-            line=dict(color='red', width=2),
+            name='Drawdown %',
             fill='tozeroy',
-            fillcolor='rgba(255, 0, 0, 0.2)'
+            fillcolor='rgba(255, 0, 0, 0.1)',
+            line=dict(color='red', width=2)
         ))
         
         fig.update_layout(
-            title="Drawdown Analysis",
+            title=f"Portfolio Drawdown (Max: {abs(max_drawdown):.2f}%)",
             xaxis_title="Date",
-            yaxis_title="Drawdown (%)",
-            height=300,
-            yaxis=dict(ticksuffix="%")
+            yaxis_title="Drawdown %",
+            height=400,
+            showlegend=True
         )
         
         return fig
@@ -161,334 +161,123 @@ def create_drawdown_chart(trades):
         logger.error(f"Error creating drawdown chart: {e}")
         return None
 
-def create_returns_distribution(trades):
-    """Create returns distribution histogram"""
+def create_performance_distribution(trades):
+    """Create distribution of trade performance"""
     try:
         if not trades:
             return None
         
-        returns = [trade.pnl or 0 for trade in trades]
-        
-        if not returns:
+        pnls = [getattr(trade, 'pnl', 0) or 0 for trade in trades]
+        if not pnls:
             return None
         
         fig = px.histogram(
-            x=returns,
-            nbins=20,
-            title="Trade Returns Distribution",
-            labels={'x': 'PnL (USDT)', 'y': 'Frequency'},
+            pnls,
+            nbins=50,
+            title="Trade P&L Distribution",
+            labels={'value': 'P&L (USDT)'},
             color_discrete_sequence=['#00ff88']
         )
         
-        # Add vertical lines for mean and median
-        mean_return = np.mean(returns)
-        median_return = np.median(returns)
-        
-        fig.add_vline(x=mean_return, line_dash="dash", line_color="orange", 
-                     annotation_text=f"Mean: ${mean_return:.2f}")
-        fig.add_vline(x=median_return, line_dash="dot", line_color="blue",
-                     annotation_text=f"Median: ${median_return:.2f}")
-        
-        fig.update_layout(height=400)
+        fig.update_layout(
+            height=400,
+            showlegend=False
+        )
         
         return fig
         
     except Exception as e:
-        logger.error(f"Error creating returns distribution: {e}")
+        logger.error(f"Error creating performance distribution: {e}")
         return None
 
-def create_performance_metrics_table(trades):
-    """Create a comprehensive performance metrics table"""
-    try:
-        if not trades:
-            return pd.DataFrame()
-        
-        trade_dicts = [trade.to_dict() for trade in trades]
-        metrics = calculate_portfolio_metrics(trade_dicts)
-        
-        returns = [trade.pnl or 0 for trade in trades]
-        
-        # Calculate additional metrics
-        if len(returns) > 1:
-            volatility = np.std(returns)
-            sharpe_ratio = np.mean(returns) / volatility if volatility > 0 else 0
-            
-            # Calculate max drawdown
-            cumulative = np.cumsum([1000] + returns)  # Starting with 1000
-            running_max = np.maximum.accumulate(cumulative)
-            drawdown = (cumulative - running_max) / running_max * 100
-            max_drawdown = np.min(drawdown)
-        else:
-            volatility = 0
-            sharpe_ratio = 0
-            max_drawdown = 0
-        
-        # Calculate consecutive wins/losses
-        consecutive_wins = 0
-        consecutive_losses = 0
-        max_consecutive_wins = 0
-        max_consecutive_losses = 0
-        
-        for pnl in returns:
-            if pnl > 0:
-                consecutive_wins += 1
-                consecutive_losses = 0
-                max_consecutive_wins = max(max_consecutive_wins, consecutive_wins)
-            elif pnl < 0:
-                consecutive_losses += 1
-                consecutive_wins = 0
-                max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
-            else:
-                consecutive_wins = 0
-                consecutive_losses = 0
-        
-        # Create metrics table
-        performance_data = {
-            "Metric": [
-                "Total Trades",
-                "Profitable Trades", 
-                "Losing Trades",
-                "Win Rate (%)",
-                "Total P&L (USDT)",
-                "Average P&L per Trade",
-                "Best Trade",
-                "Worst Trade",
-                "Volatility",
-                "Sharpe Ratio",
-                "Maximum Drawdown (%)",
-                "Max Consecutive Wins",
-                "Max Consecutive Losses",
-                "Profit Factor"
-            ],
-            "Value": [
-                metrics['total_trades'],
-                metrics['profitable_trades'],
-                metrics['total_trades'] - metrics['profitable_trades'],
-                f"{metrics['win_rate']:.1f}%",
-                f"${metrics['total_pnl']:.2f}",
-                f"${metrics['avg_pnl']:.2f}",
-                f"${metrics['best_trade']:.2f}",
-                f"${metrics['worst_trade']:.2f}",
-                f"{volatility:.2f}",
-                f"{sharpe_ratio:.2f}",
-                f"{max_drawdown:.1f}%",
-                max_consecutive_wins,
-                max_consecutive_losses,
-                f"{abs(sum([r for r in returns if r > 0]) / sum([r for r in returns if r < 0])):.2f}" if any(r < 0 for r in returns) else "N/A"
-            ]
-        }
-        
-        return pd.DataFrame(performance_data)
-        
-    except Exception as e:
-        logger.error(f"Error creating performance metrics: {e}")
-        return pd.DataFrame()
-
 def main():
-    st.markdown("""
-    <div style="text-align: center; padding: 1rem 0; border-bottom: 2px solid #00ff88; margin-bottom: 2rem;">
-        <h1 style="color: #00ff88; margin: 0;">📈 Performance Analytics</h1>
-        <p style="color: #888; margin: 0;">Comprehensive Trading Performance Analysis</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
     try:
-        engine = TradingEngine()
+        # Get engine from session state
+        engine = st.session_state.get('engine')
         
-        # Sidebar controls
-        with st.sidebar:
-            st.header("📈 Performance Controls")
-            
-            # Time period filter
-            time_period = st.selectbox(
-                "Analysis Period", 
-                ["All Time", "Last 7 Days", "Last 30 Days", "Last 90 Days"]
-            )
-            
-            # Account type filter
-            account_filter = st.selectbox(
-                "Account Type", 
-                ["All Accounts", "Virtual Only", "Real Only"]
-            )
-            
-            # Display options
-            st.subheader("📊 Display Options")
-            show_equity_curve = st.checkbox("Equity Curve", value=True)
-            show_drawdown = st.checkbox("Drawdown Analysis", value=True)
-            show_distribution = st.checkbox("Returns Distribution", value=True)
-            show_metrics = st.checkbox("Detailed Metrics", value=True)
-            
-            st.divider()
-            
-            # Export options
-            st.subheader("📤 Export Options")
-            if st.button("📊 Generate Report"):
-                st.info("📊 Report generation feature coming soon!")
-            
-            if st.button("📥 Export Data"):
-                st.info("📥 Data export feature coming soon!")
-            
-            st.divider()
-            
-            if st.button("📊 Back to Dashboard"):
-                st.switch_page("app.py")
-        
-        # Get trades based on filters
-        if account_filter == "Virtual Only":
-            all_trades = engine.get_closed_virtual_trades()
-        elif account_filter == "Real Only":
-            all_trades = engine.get_closed_real_trades()
-        else:
-            all_trades = engine.get_closed_virtual_trades() + engine.get_closed_real_trades()
-        
-        # Apply time filter
-        if time_period != "All Time" and all_trades:
-            now = datetime.now()
-            if time_period == "Last 7 Days":
-                cutoff = now - timedelta(days=7)
-            elif time_period == "Last 30 Days":
-                cutoff = now - timedelta(days=30)
-            elif time_period == "Last 90 Days":
-                cutoff = now - timedelta(days=90)
-            else:
-                cutoff = datetime.min
-            
-            all_trades = [t for t in all_trades if t.timestamp and t.timestamp >= cutoff]
-        
-        if not all_trades:
-            st.info("📊 No trading data available for the selected filters. Start trading to see performance analytics!")
+        if not engine:
+            st.warning("Trading engine not initialized. Please check settings.")
             return
         
-        # Calculate overall metrics
-        trade_dicts = [trade.to_dict() for trade in all_trades]
-        overall_metrics = calculate_portfolio_metrics(trade_dicts)
+        # Get all trades
+        all_trades = db_manager.get_trades(limit=1000)
         
-        # Key performance indicators
-        st.subheader("🎯 Key Performance Indicators")
+        # Filter closed trades
+        closed_trades = [t for t in all_trades if t.status == "closed"]
         
-        kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5 = st.columns(5)
+        # Separate virtual and real
+        virtual_trades = [t for t in closed_trades if t.virtual]
+        real_trades = [t for t in closed_trades if not t.virtual]
         
-        with kpi_col1:
-            st.metric("Total Trades", overall_metrics['total_trades'])
+        # Calculate metrics
+        metrics = calculate_portfolio_metrics([t.to_dict() for t in closed_trades])
         
-        with kpi_col2:
-            win_rate = overall_metrics['win_rate']
-            st.metric("Win Rate", f"{win_rate:.1f}%")
+        # Header
+        st.title("📊 Performance Analysis")
         
-        with kpi_col3:
-            total_pnl = overall_metrics['total_pnl']
-            pnl_delta = f"{total_pnl:+.2f}" if total_pnl != 0 else None
-            st.metric("Total P&L", f"${total_pnl:.2f}", delta=pnl_delta)
-        
-        with kpi_col4:
-            avg_pnl = overall_metrics['avg_pnl']
-            st.metric("Avg P&L/Trade", f"${avg_pnl:.2f}")
-        
-        with kpi_col5:
-            roi = (total_pnl / 1000) * 100  # Assuming 1000 starting balance
-            st.metric("ROI", f"{roi:.1f}%")
-        
-        # Performance analysis tabs
+        # Create tabs
         tab1, tab2, tab3, tab4 = st.tabs([
-            "📈 Charts", "📊 Detailed Metrics", "🎯 Trade Analysis", "📅 Time Analysis"
+            "📈 Overview",
+            "📉 Drawdown",
+            "📊 Distribution",
+            "📅 Time Analysis"
         ])
         
         with tab1:
-            if show_equity_curve:
-                st.subheader("📈 Portfolio Equity Curve")
-                equity_chart = create_equity_curve(all_trades)
-                if equity_chart:
-                    st.plotly_chart(equity_chart)
-                else:
-                    st.info("Unable to generate equity curve")
+            st.subheader("Performance Summary")
             
-            if show_drawdown:
-                st.subheader("📉 Drawdown Analysis")
-                drawdown_chart = create_drawdown_chart(all_trades)
-                if drawdown_chart:
-                    st.plotly_chart(drawdown_chart)
-                else:
-                    st.info("Unable to generate drawdown chart")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("Total Trades", metrics.get('total_trades', 0))
+            col2.metric("Profitable Trades", metrics.get('profitable_trades', 0))
+            col3.metric("Win Rate", f"{metrics.get('win_rate', 0)}%")
+            col4.metric("Total P&L", f"${metrics.get('total_pnl', 0):.2f}")
+            col5.metric("Avg P&L/Trade", f"${metrics.get('avg_pnl', 0):.2f}")
             
-            if show_distribution:
-                st.subheader("📊 Returns Distribution")
-                dist_chart = create_returns_distribution(all_trades)
-                if dist_chart:
-                    st.plotly_chart(dist_chart)
-                else:
-                    st.info("Unable to generate distribution chart")
+            # Equity curve
+            equity_fig = create_equity_curve(closed_trades)
+            if equity_fig:
+                st.plotly_chart(equity_fig, use_container_width=True)
+            else:
+                st.info("No trade data available for equity curve")
         
         with tab2:
-            if show_metrics:
-                st.subheader("📊 Comprehensive Performance Metrics")
-                metrics_df = create_performance_metrics_table(all_trades)
-                
-                if not metrics_df.empty:
-                    st.dataframe(metrics_df, height=500)
-                else:
-                    st.info("Unable to calculate detailed metrics")
-        
+            st.subheader("Drawdown Analysis")
+            
+            drawdown_fig = create_drawdown_chart(closed_trades)
+            if drawdown_fig:
+                st.plotly_chart(drawdown_fig, use_container_width=True)
+            else:
+                st.info("No data available for drawdown analysis")
+            
+            # Additional drawdown metrics
+            if closed_trades:
+                pnls = [getattr(t, 'pnl', 0) or 0 for t in closed_trades]
+                if pnls:
+                    st.markdown("### 📉 Risk Metrics")
+                    col1, col2, col3 = st.columns(3)
+
+                    col1.metric("Largest Loss", f"${min(pnls):.2f}")
+                    col2.metric("Largest Win", f"${max(pnls):.2f}")
+
+                    if any(p < 0 for p in pnls):
+                        profit_factor = abs(sum(p for p in pnls if p > 0) / sum(abs(p) for p in pnls if p < 0))
+                        col3.metric("Profit Factor", f"{profit_factor:.2f}")
+                    else:
+                        col3.metric("Profit Factor", "∞")
+
         with tab3:
-            st.subheader("🎯 Individual Trade Analysis")
+            st.subheader("Trade Distribution")
             
-            # Trade performance by symbol
-            symbol_performance = {}
-            for trade in all_trades:
-                symbol = trade.symbol
-                pnl = trade.pnl or 0
-                
-                if symbol not in symbol_performance:
-                    symbol_performance[symbol] = {
-                        'trades': 0, 'total_pnl': 0, 'wins': 0
-                    }
-                
-                symbol_performance[symbol]['trades'] += 1
-                symbol_performance[symbol]['total_pnl'] += pnl
-                if pnl > 0:
-                    symbol_performance[symbol]['wins'] += 1
+            dist_fig = create_performance_distribution(closed_trades)
+            if dist_fig:
+                st.plotly_chart(dist_fig, use_container_width=True)
+            else:
+                st.info("No data available for distribution analysis")
             
-            if symbol_performance:
-                st.markdown("### 📈 Performance by Symbol")
-                
-                symbol_data = []
-                for symbol, data in symbol_performance.items():
-                    win_rate = (data['wins'] / data['trades']) * 100
-                    symbol_data.append({
-                        "Symbol": symbol,
-                        "Trades": data['trades'],
-                        "Win Rate": f"{win_rate:.1f}%",
-                        "Total P&L": f"${data['total_pnl']:.2f}",
-                        "Avg P&L": f"${data['total_pnl'] / data['trades']:.2f}"
-                    })
-                
-                symbol_df = pd.DataFrame(symbol_data)
-                symbol_df = symbol_df.sort_values('Total P&L', ascending=False)
-                st.dataframe(symbol_df)
-            
-            # Recent trades table
-            st.markdown("### 📜 Recent Trades")
-            recent_trades = sorted(all_trades, key=lambda x: x.timestamp or datetime.min, reverse=True)[:20]
-            
-            recent_data = []
-            for trade in recent_trades:
-                pnl = trade.pnl or 0
-                recent_data.append({
-                    "Date": trade.timestamp.strftime("%Y-%m-%d %H:%M") if trade.timestamp else "N/A",
-                    "Symbol": trade.symbol,
-                    "Side": trade.side,
-                    "Entry": f"${trade.entry_price:.4f}",
-                    "Exit": f"${trade.exit_price:.4f}" if trade.exit_price else "N/A",
-                    "P&L": f"${pnl:.2f}",
-                    "Type": "Virtual" if trade.virtual else "Real",
-                    "Result": "✅" if pnl > 0 else "❌" if pnl < 0 else "➖"
-                })
-            
-            if recent_data:
-                recent_df = pd.DataFrame(recent_data)
-                st.dataframe(recent_df, height=400)
-                
-                # Export option
-                csv = recent_df.to_csv(index=False)
+            # Download data
+            if closed_trades:
+                trades_data = [t.to_dict() for t in closed_trades]
+                csv = pd.DataFrame(trades_data).to_csv(index=False)
                 st.download_button(
                     "📥 Download Recent Trades",
                     csv,
@@ -500,12 +289,12 @@ def main():
             st.subheader("📅 Time-Based Analysis")
             
             # Performance by day of week
-            if all_trades:
+            if closed_trades:
                 day_performance = {}
-                for trade in all_trades:
-                    if trade.timestamp:
+                for trade in closed_trades:
+                    if getattr(trade, 'timestamp', None):
                         day_name = trade.timestamp.strftime("%A")
-                        pnl = trade.pnl or 0
+                        pnl = getattr(trade, 'pnl', 0) or 0
                         
                         if day_name not in day_performance:
                             day_performance[day_name] = []
@@ -529,10 +318,10 @@ def main():
             
             # Monthly performance
             monthly_performance = {}
-            for trade in all_trades:
-                if trade.timestamp:
+            for trade in closed_trades:
+                if getattr(trade, 'timestamp', None):
                     month_key = trade.timestamp.strftime("%Y-%m")
-                    pnl = trade.pnl or 0
+                    pnl = getattr(trade, 'pnl', 0) or 0
                     
                     if month_key not in monthly_performance:
                         monthly_performance[month_key] = []

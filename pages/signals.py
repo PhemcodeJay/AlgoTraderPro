@@ -14,7 +14,11 @@ from db import db_manager
 from indicators import get_candles
 from signal_generator import generate_signals, get_usdt_symbols, analyze_single_symbol
 from notifications import send_all_notifications
-from engine import TradingEngine
+from engine import create_engine
+from bybit_client import BybitClient
+
+# Initialize the client with your API credentials
+client = BybitClient()
 
 # Configure logging
 # Logging using centralized system
@@ -35,9 +39,9 @@ def create_signal_chart(signal_data):
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid price values for {symbol}: {e}")
             return None
-
-        # Get candlestick data
-        candles = get_candles(symbol, "60", limit=50)
+        
+        # Now you can call get_candles
+        candles = get_candles(client=client, symbol=symbol, interval="60", limit=50)
         if not candles or not isinstance(candles, list) or len(candles) == 0:
             logger.warning(f"No candlestick data for {symbol}")
             return None
@@ -192,356 +196,166 @@ def main():
     with st.sidebar:
         st.header("🎛️ Signal Controls")
         
-        # Trading mode selection
+        # Trading mode selector
         trading_mode = st.selectbox(
-            "Trading Mode", 
-            ["virtual", "real"], 
-            index=0 if st.session_state.get('trading_mode', 'virtual') == 'virtual' else 1,
-            key="signals_trading_mode"
+            "Trading Mode",
+            ["virtual", "real"],
+            index=0 if db_manager.get_setting("trading_mode") != "real" else 1,
+            help="Virtual mode uses simulated balances. Real mode trades with actual funds on Bybit."
         )
-        st.session_state.trading_mode = trading_mode
+        if st.button("Save Mode"):
+            db_manager.save_setting("trading_mode", trading_mode)
+            st.success(f"Trading mode set to {trading_mode}")
         
-        st.divider()
+        st.markdown("---")
         
-        # Signal generation settings
-        st.subheader("📊 Generation Settings")
-        top_n_signals = st.slider("Number of Signals", 1, 20, 10)
-        min_score = st.slider("Minimum Score", 30, 90, 50)
+        # Signal generation parameters
+        st.subheader("Generation Settings")
+        num_symbols = st.number_input("Number of Symbols to Scan", min_value=5, max_value=100, value=20)
+        top_n = st.number_input("Top Signals to Keep", min_value=1, max_value=20, value=5)
+        interval = st.selectbox("Time Interval", ["60", "15", "240", "D"])
         
-        # Symbol selection
-        available_symbols = get_usdt_symbols(100)
-        selected_symbols = st.multiselect(
-            "Select Symbols (leave empty for auto-selection)",
-            available_symbols,
-            default=[]
-        )
+        st.markdown("---")
         
-        st.divider()
-        
-        # Generation controls
-        if st.button("🎯 Generate New Signals", 
-                    disabled=st.session_state.signal_generation_in_progress,
-            ):
-            st.session_state.signal_generation_in_progress = True
-        
-        if st.button("📤 Send Notifications", 
-                    disabled=len(st.session_state.generated_signals) == 0,
-            ):
-            if st.session_state.generated_signals:
-                try:
-                    send_all_notifications(st.session_state.generated_signals)
-                    st.success("Notifications sent!")
-                except Exception as e:
-                    st.error(f"Notification error: {e}")
-        
-        st.divider()
-        
-        # Filters for database signals
-        st.subheader("🔍 Database Filters")
-        symbol_filter = st.text_input("Symbol Filter", placeholder="BTC, ETH, etc.")
-        side_filter = st.selectbox("Side Filter", ["All", "Buy", "Sell"])
-        
-        if st.button("📊 Back to Dashboard"):
-            st.switch_page("app.py")
-    
-    # Handle signal generation
-    if st.session_state.signal_generation_in_progress:
-        with st.spinner("🔄 Generating signals... This may take a few minutes."):
-            try:
-                symbols_to_scan = selected_symbols if selected_symbols else get_usdt_symbols(50)
-                signals = generate_signals(
-                    symbols_to_scan, 
-                    interval="60", 
-                    top_n=top_n_signals,
-                    trading_mode=trading_mode
-                )
-                filtered_signals = [s for s in signals if float(str(s.get('Score', '0%')).replace('%', '')) >= min_score]
-                st.session_state.generated_signals = filtered_signals
-                st.success(f"✅ Generated {len(filtered_signals)} signals, saved {len(filtered_signals)} to database")
-            except Exception as e:
-                st.error(f"Error generating signals: {e}")
-                logger.error(f"Signal generation error: {e}")
-            finally:
-                st.session_state.signal_generation_in_progress = False
-    
-    # Main content tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["🆕 Generated Signals", "💾 Database Signals", "🔍 Single Symbol Analysis", "🤖 ML Signal Filter"])
-    
+        # Notification settings
+        st.subheader("Notifications")
+        notify_telegram = st.checkbox("Telegram", value=True)
+        notify_discord = st.checkbox("Discord", value=False)
+        notify_email = st.checkbox("Email", value=False)
+
+    # Create engine and trader
+    engine = create_engine()
+    trader = engine.trader
+
+    # Main tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "⚡ Generate Signals", "🔍 Analyze Symbol", "🤖 ML Filtering", "🚀 Automated Trading"])
+
     with tab1:
-        signals = st.session_state.generated_signals    
-        def format_signal_label(idx):
-            sig = signals[idx]
-            # Normalize score
-            score_val = sig.get("Score") or sig.get("score") or 0
-            try:
-                score_float = float(str(score_val).replace("%", ""))
-                score_str = f"{score_float:.1f}%"
-            except Exception:
-                score_str = "0.0%"
-            return f"{sig.get('Symbol', sig.get('symbol', 'N/A'))} - {score_str}"
-        st.subheader("🆕 Recently Generated Signals")
-        logger.debug(f"Rendering Tab 1 with {len(st.session_state.generated_signals)} signals")
-        signals = st.session_state.generated_signals
-
-        if signals:
-            signals_data = []
-            for s in signals:
-                try:
-                    entry_val = float(s.get("Entry", s.get("entry", 0)) or 0)
-                    tp_val = float(s.get("TP", s.get("tp", 0)) or 0)
-                    sl_val = float(s.get("SL", s.get("sl", 0)) or 0)
-
-                    # Normalize score (accepts both 'Score' with "%" or 'score' numeric)
-                    raw_score = s.get("Score") or s.get("score") or 0
-                    score_val = float(str(raw_score).replace("%", "") or 0)
-
-                    signals_data.append({
-                        "Symbol": s.get("Symbol", s.get("symbol", "N/A")),
-                        "Side": s.get("Side", s.get("side", "N/A")),
-                        "Score": f"{score_val:.2f}%",
-                        "Entry": f"${entry_val:.4f}",
-                        "Take Profit": f"${tp_val:.4f}",
-                        "Stop Loss": f"${sl_val:.4f}",
-                        "Market": s.get("Market", s.get("market", "N/A")),
-                        "Time": s.get("Time", s.get("created_at", 'N/A'))
-                    })
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Skipping invalid signal: {s}, error: {e}")
-                    continue
-
-            if signals_data:
-                signals_df = pd.DataFrame(signals_data)
-                st.dataframe(signals_df, height=400)
-
-                # Helper for dropdown label formatting
-                def format_signal_label(idx):
-                    sig = signals[idx]
-                    raw_score = sig.get("Score") or sig.get("score") or 0
-                    try:
-                        score_float = float(str(raw_score).replace("%", "") or 0)
-                        score_str = f"{score_float:.1f}%"
-                    except Exception:
-                        score_str = "0.0%"
-                    return f"{sig.get('Symbol', sig.get('symbol', 'N/A'))} - {score_str}"
-
-                selected_idx = st.selectbox(
-                    "Select signal for detailed analysis:",
-                    range(len(signals)),
-                    format_func=format_signal_label
-                )
-
-                if selected_idx is not None:
-                    selected_signal = signals[selected_idx]
-                    display_signal_details(selected_signal)
-                    chart = create_signal_chart(selected_signal)
-                    if chart:
-                        st.plotly_chart(chart)
-                    else:
-                        st.error("Failed to generate chart for selected signal.")
-
-                    engine = TradingEngine()
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("📈 Execute Virtual Trade"):
-                            try:
-                                success = engine.execute_virtual_trade(selected_signal, trading_mode="virtual")
-                                if success:
-                                    st.success("✅ Virtual trade executed!")
-                                else:
-                                    st.error("❌ Failed to execute virtual trade")
-                            except Exception as e:
-                                st.error(f"Error executing virtual trade: {e}")
-                    with col2:
-                        real_disabled = st.session_state.get("trading_mode", "virtual") != "real"
-                        if st.button("💰 Execute Real Trade", disabled=real_disabled, key="execute_real_trade_tab1"):
-                            if real_disabled:
-                                st.info("Switch to real mode to execute real trades")
-                            else:
-                                try:
-                                    if not engine.is_trading_enabled():
-                                        st.error("Trading disabled or emergency stop active")
-                                    else:
-                                        success = asyncio.run(execute_real_trade(engine, selected_signal))
-                                        if success:
-                                            st.success(f"✅ Real trade executed for {selected_signal.get('symbol', 'N/A')}")
-                                        else:
-                                            st.error("❌ Failed to execute real trade")
-                                except Exception as e:
-                                    st.error(f"Error executing real trade: {e}")
-            else:
-                st.warning("No valid signals available to display.")
+        st.subheader("📊 Signals Dashboard")
+        
+        if not st.session_state.generated_signals:
+            st.info("No signals generated yet. Use the 'Generate Signals' tab to create some.")
         else:
-            st.info("🎯 Click 'Generate New Signals' to start analyzing the markets!")
+            df = pd.DataFrame(st.session_state.generated_signals)
+            if not df.empty:
+                st.dataframe(
+                    df[['symbol', 'score', 'side', 'entry', 'tp', 'sl', 'market', 'created_at']],
+                    use_container_width=True
+                )
+        
+        st.subheader("Recent Trades")
+        recent_trades = db_manager.get_trades(limit=20)
+        if recent_trades:
+            trade_df = pd.DataFrame([t.to_dict() for t in recent_trades])
+            st.dataframe(
+                trade_df[['symbol', 'side', 'entry_price', 'exit_price', 'pnl', 'status', 'timestamp']],
+                use_container_width=True
+            )
+        else:
+            st.info("No recent trades")
 
     with tab2:
-        st.subheader("💾 Historical Signals from Database")
-        try:
-            db_signals = db_manager.get_signals(limit=50)
-            if db_signals:
-                filtered_db_signals = []
-                for signal in db_signals:
-                    signal_dict = signal.to_dict()
-                    if symbol_filter and symbol_filter.upper() not in signal_dict.get('symbol', '').upper():
-                        continue
-                    if side_filter != "All" and signal_dict.get('side', '').lower() != side_filter.lower():
-                        continue
-                    if signal_dict.get('score', 0) < min_score:
-                        continue
-                    filtered_db_signals.append(signal_dict)
-                
-                if filtered_db_signals:
-                    db_data = []
-                    for s in filtered_db_signals[:30]:
-                        score_val = s.get('score', 0)
-                        entry_val = s.get('entry', 0)
-                        created_val = s.get("created_at", None)
-                        score_str = f"{float(score_val or 0):.1f}%" if score_val is not None else "0.0%"
-                        entry_str = f"${float(entry_val or 0):.4f}" if entry_val is not None else "$0.0000"
-                        created_str = str(created_val)[:19] if created_val is not None else "N/A"
-                        db_data.append({
-                            "Symbol": s.get("symbol", "N/A"),
-                            "Side": s.get("side", "N/A"),
-                            "Score": score_str,
-                            "Entry": entry_str,
-                            "Strategy": s.get("strategy", "N/A"),
-                            "Interval": s.get("interval", "N/A"),
-                            "Created": created_str
-                        })
-                    
-                    db_df = pd.DataFrame(db_data)
-                    st.dataframe(db_df, height=400)
-                    
-                    csv = db_df.to_csv(index=False)
-                    st.download_button(
-                        "📥 Download Signals CSV",
-                        csv,
-                        "trading_signals.csv",
-                        "text/csv",
-                        key="download_signals"
+        st.subheader("⚡ Generate Trading Signals")
+        
+        if st.button("Generate Signals", disabled=st.session_state.signal_generation_in_progress):
+            st.session_state.signal_generation_in_progress = True
+            with st.spinner("Generating signals..."):
+                try:
+                    symbols = get_usdt_symbols(limit=int(num_symbols))
+                    signals = generate_signals(
+                        symbols,
+                        interval=interval,
+                        top_n=int(top_n),
+                        trading_mode=trading_mode
                     )
-                else:
-                    st.info("No signals match the current filters")
-            else:
-                st.info("No signals in database. Generate some signals first!")
-        except Exception as e:
-            st.error(f"Error loading database signals: {e}")
-            logger.error(f"Database signals error: {e}")
-    
+                    if signals:
+                        st.session_state.generated_signals = signals
+                        st.success(f"Generated {len(signals)} signals")
+                        
+                        # Send notifications if enabled
+                        notifications = []
+                        if notify_telegram:
+                            notifications.append("telegram")
+                        if notify_discord:
+                            notifications.append("discord")
+                        if notify_email:
+                            notifications.append("email")
+                            
+                        if notifications:
+                            send_all_notifications(signals)
+                    else:
+                        st.warning("No signals generated")
+                except Exception as e:
+                    st.error(f"Error generating signals: {e}")
+                    logger.error(f"Signal generation error: {e}")
+            st.session_state.signal_generation_in_progress = False
+        
+        if st.session_state.generated_signals:
+            st.subheader("Generated Signals")
+            for signal in st.session_state.generated_signals:
+                with st.expander(f"{signal.get('symbol')} - Score: {signal.get('score')}"):
+                    display_signal_details(signal)
+                    chart = create_signal_chart(signal)
+                    if chart:
+                        st.plotly_chart(chart, use_container_width=True)
+
     with tab3:
         st.subheader("🔍 Single Symbol Analysis")
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            analysis_symbol = st.selectbox(
-                "Select Symbol for Analysis:",
-                get_usdt_symbols(50),
-                key="analysis_symbol"
-            )
-            analysis_interval = st.selectbox(
-                "Time Interval:",
-                ["15", "30", "60", "240", "D"],
-                index=2,
-                key="analysis_interval"
-            )
-            if st.button("🔍 Analyze Symbol"):
-                with st.spinner(f"Analyzing {analysis_symbol}..."):
-                    try:
-                        analysis_result = analyze_single_symbol(analysis_symbol, analysis_interval)
-                        if analysis_result:
-                            st.session_state['single_analysis'] = analysis_result
-                            st.success(f"✅ Analysis complete for {analysis_symbol}")
-                        else:
-                            st.warning(f"No significant signal found for {analysis_symbol}")
-                    except Exception as e:
-                        st.error(f"Analysis error: {e}")
-        with col2:
-            if 'single_analysis' in st.session_state:
-                analysis = st.session_state['single_analysis']
-                metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
-                with metrics_col1:
-                    st.metric("Signal Score", f"{analysis.get('score', 0):.1f}%")
-                    st.metric("Signal Type", analysis.get('signal_type', 'N/A').title())
-                with metrics_col2:
-                    indicators = analysis.get('indicators', {})
-                    st.metric("RSI", f"{indicators.get('rsi', 0):.1f}")
-                    st.metric("Price", f"${indicators.get('price', 0):.4f}")
-                with metrics_col3:
-                    st.metric("Side", analysis.get('side', 'N/A'))
-                    st.metric("Volatility", f"{indicators.get('volatility', 0):.2f}%")
-                chart = create_signal_chart(analysis)
-                if chart:
-                    st.plotly_chart(chart)
-            else:
-                st.info("Select a symbol and click 'Analyze Symbol' to see detailed analysis")
         
-        trade_col1, trade_col2 = st.columns(2)
-        engine = TradingEngine()
-        with trade_col1:
-            virtual_disabled = 'single_analysis' not in st.session_state
-            if st.button("💻 Execute Virtual Trade", disabled=virtual_disabled):
+        analysis_symbol = st.text_input("Enter Symbol (e.g., BTCUSDT)").upper()
+        if st.button("Analyze Symbol"):
+            with st.spinner("Analyzing..."):
                 try:
-                    success = engine.execute_virtual_trade(
-                        st.session_state['single_analysis'], trading_mode="virtual"
-                    )
-                    if success:
-                        st.success(f"✅ Virtual trade executed for {analysis_symbol}")
+                    analysis = analyze_single_symbol(analysis_symbol, interval)
+                    if analysis:
+                        st.session_state['single_analysis'] = analysis
+                        st.success("Analysis complete")
                     else:
-                        st.error("❌ Failed to execute virtual trade")
+                        st.warning("No analysis data returned")
                 except Exception as e:
-                    st.error(f"Virtual trade error: {e}")
-        with trade_col2:
-            real_disabled = 'single_analysis' not in st.session_state or trading_mode != "real"
-            if st.button("💰 Execute Real Trade", disabled=real_disabled, key="execute_real_trade_tab3"):
-                try:
-                    if not engine.is_trading_enabled():
-                        st.error("Trading is disabled or emergency stop is active. Cannot execute trade.")
-                    else:
-                        signal = st.session_state['single_analysis']
-                        symbol = signal.get("symbol")
-                        if not isinstance(symbol, str):
-                            st.error("Invalid symbol. Cannot execute trade.")
+                    st.error(f"Analysis error: {e}")
+        
+        if 'single_analysis' in st.session_state:
+            signal = st.session_state['single_analysis']
+            display_signal_details(signal)
+            
+            chart = create_signal_chart(signal)
+            if chart:
+                st.plotly_chart(chart, use_container_width=True)
+            
+            st.subheader("Detailed Indicators")
+            st.json(signal.get('indicators', {}))
+            
+            trade_col1, trade_col2 = st.columns(2)
+            with trade_col1:
+                virtual_disabled = 'single_analysis' not in st.session_state
+                if st.button("💻 Execute Virtual Trade", disabled=virtual_disabled):
+                    try:
+                        success = engine.execute_virtual_trade(
+                            st.session_state['single_analysis'], trading_mode="virtual"
+                        )
+                        if success:
+                            st.success(f"✅ Virtual trade executed for {analysis_symbol}")
                         else:
-                            side = signal.get("side", "Buy")
-                            entry_price = signal.get("entry")
-                            if not entry_price:
-                                # If get_current_price is sync
-                                entry_price = engine.client.get_current_price(symbol)
-                                # If it's async, then use:
-                                # entry_price = asyncio.run(engine.client.get_current_price(symbol))
-
-                            if not entry_price or entry_price <= 0:
-                                st.error("Invalid entry price. Cannot execute trade.")
+                            st.error("❌ Failed to execute virtual trade")
+                    except Exception as e:
+                        st.error(f"Virtual trade error: {e}")
+            with trade_col2:
+                real_disabled = 'single_analysis' not in st.session_state or trading_mode != "real"
+                if st.button("💰 Execute Real Trade", disabled=real_disabled, key="execute_real_trade_tab3"):
+                    try:
+                        if not engine.is_trading_enabled():
+                            st.error("Trading is disabled or emergency stop is active. Cannot execute trade.")
+                        else:
+                            success = engine.execute_virtual_trade(
+                                st.session_state['single_analysis'], trading_mode="real"
+                            )
+                            if success:
+                                st.success(f"✅ Real trade executed for {analysis_symbol}")
                             else:
-                                position_size = engine.calculate_position_size(symbol, entry_price)
-                                trade_data = {
-                                    "symbol": symbol,
-                                    "side": side,
-                                    "qty": position_size,
-                                    "entry_price": entry_price,
-                                    "order_id": f"real_{symbol}_{int(datetime.now().timestamp())}",
-                                    "virtual": False,
-                                    "status": "open",
-                                    "score": signal.get("score"),
-                                    "strategy": signal.get("strategy", "Auto"),
-                                    "leverage": signal.get("leverage", 10)
-                                }
-                                order_result = asyncio.run(engine.client.place_order(
-                                    symbol=symbol,
-                                    side=side,
-                                    qty=trade_data["qty"],
-                                    stop_loss=float(trade_data["sl"]),
-                                    take_profit=float(trade_data["tp"]),
-                                    leverage=trade_data.get("leverage", 10),
-                                    mode="ISOLATED"
-                                ))
-
-                                if order_result.get("success"):
-                                    engine.db.add_trade(trade_data)
-                                    engine.sync_real_balance()
-                                    st.success(f"✅ Real trade executed for {symbol}")
-                                else:
-                                    st.error(f"❌ Real trade failed: {order_result.get('error', 'Unknown error')}")
-                except Exception as e:
-                    st.error(f"Real trade error: {e}")
+                                st.error("❌ Failed to execute real trade")
+                    except Exception as e:
+                        st.error(f"Real trade error: {e}")
 
     with tab4:
         st.subheader("🤖 ML-Powered Signal Filtering")
@@ -623,6 +437,37 @@ def main():
         5. **Live Scoring**:  
         - Input current market indicators to get instant ML probability scores for new signals.
         """)
+
+    with tab5:
+        st.subheader("🚀 Automated Trading Control")
+        
+        status_container = st.container()
+        
+        if st.button("Refresh Status"):
+            status = asyncio.run(trader.get_status())
+            st.json(status)
+        
+        if st.button("Start Automated Trading"):
+            success = asyncio.run(trader.start(status_container))
+            if success:
+                st.success("Automated trading started")
+            else:
+                st.error("Failed to start automated trading")
+        
+        if st.button("Stop Automated Trading"):
+            success = asyncio.run(trader.stop())
+            if success:
+                st.success("Automated trading stopped")
+            else:
+                st.error("Failed to stop automated trading")
+        
+        if st.button("Reset Statistics"):
+            asyncio.run(trader.reset_stats())
+            st.success("Statistics reset")
+        
+        st.subheader("Performance Summary")
+        perf = trader.get_performance_summary()
+        st.json(perf)
 
 if __name__ == "__main__":
     main()

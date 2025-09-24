@@ -653,12 +653,13 @@ class BybitClient:
         symbol: str,
         side: str,
         qty: float,
-        stop_loss: float,
-        take_profit: float,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
         leverage: Optional[int] = 10,
-        mode: str = "ISOLATED"
+        mode: str = "ISOLATED",
+        reduce_only: bool = False
     ) -> Dict:
-        """Place a market trading order with leverage, isolated margin mode, required TP and SL"""
+        """Place a market trading order with leverage, isolated margin mode, optional TP and SL"""
         try:
             # Default leverage = 10
             leverage = leverage or 10
@@ -675,7 +676,7 @@ class BybitClient:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
-            # Step 2: Build order params (always market order, with TP/SL required)
+            # Step 2: Build order params (always market order, with optional TP/SL)
             params = {
                 "category": "linear",
                 "symbol": symbol,
@@ -683,9 +684,13 @@ class BybitClient:
                 "orderType": "Market",
                 "qty": str(qty),
                 "timeInForce": "IOC",  # Immediate or Cancel for market orders
-                "stopLoss": str(stop_loss),
-                "takeProfit": str(take_profit)
             }
+            if reduce_only:
+                params["reduceOnly"] = reduce_only
+            if stop_loss is not None:
+                params["stopLoss"] = str(stop_loss)
+            if take_profit is not None:
+                params["takeProfit"] = str(take_profit)
 
             # Step 3: Place order (sync call via executor)
             result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
@@ -702,8 +707,8 @@ class BybitClient:
                     "timestamp": datetime.now(),
                     "virtual": False,
                     "leverage": leverage,
-                    "stopLoss": str(stop_loss),
-                    "takeProfit": str(take_profit),
+                    "stopLoss": str(stop_loss) if stop_loss is not None else None,
+                    "takeProfit": str(take_profit) if take_profit is not None else None,
                     "margin_mode": mode.upper()
                 }
             return {}

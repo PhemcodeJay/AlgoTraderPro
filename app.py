@@ -3,7 +3,7 @@ load_dotenv()
 
 import streamlit as st
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from db import db_manager
 from logging_config import get_logger
 from bybit_client import BybitClient
@@ -23,23 +23,27 @@ st.set_page_config(
 )
 
 # --- Session State Initialization ---
-if "trading_mode" not in st.session_state:
-    st.session_state.trading_mode = "virtual"
-if "engine_initialized" not in st.session_state:
-    st.session_state.engine_initialized = False
-if "wallet_cache" not in st.session_state:
-    st.session_state.wallet_cache = {}  # Store balances per mode
-if "bybit_client" not in st.session_state:
-    st.session_state.bybit_client = None
-if "engine" not in st.session_state:
-    st.session_state.engine = None
+def initialize_session_state():
+    defaults = {
+        "trading_mode": "virtual",
+        "engine_initialized": False,
+        "wallet_cache": {},
+        "bybit_client": None,
+        "engine": None,
+        "trading_task": None,
+        "trader_status": None
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 # --- Initialize trading engine ---
-def initialize_engine():
+async def initialize_engine():
     try:
         if not st.session_state.engine_initialized:
-            st.session_state.engine = TradingEngine()
+            st.session_state.engine = create_engine()
             st.session_state.engine_initialized = True
+            st.session_state.trader_status = await st.session_state.engine.trader.get_status()
             logger.info("Trading engine initialized successfully")
         return True
     except Exception as e:
@@ -49,13 +53,17 @@ def initialize_engine():
 
 # --- Initialize Bybit client ---
 def initialize_bybit():
-    if st.session_state.bybit_client is None:
-        st.session_state.bybit_client = BybitClient()
-        if st.session_state.bybit_client.is_connected():
-            logger.info("Bybit client connected successfully")
-        else:
-            st.warning("Bybit client connection failed. Check API keys.")
-            logger.error("Bybit client connection test failed")
+    try:
+        if st.session_state.bybit_client is None:
+            st.session_state.bybit_client = BybitClient()
+            if st.session_state.bybit_client.is_connected():
+                logger.info("Bybit client connected successfully")
+            else:
+                st.warning("Bybit client connection failed. Check API keys.")
+                logger.error("Bybit client connection test failed")
+    except Exception as e:
+        st.warning(f"Failed to initialize Bybit client: {e}")
+        logger.error(f"Bybit client initialization failed: {e}", exc_info=True)
 
 # --- Fetch wallet balance ---
 def get_wallet_balance() -> dict:
@@ -131,8 +139,22 @@ def get_wallet_balance() -> dict:
 
     return balance_data
 
+# --- Async trading cycle ---
+async def run_trading_cycle():
+    try:
+        while st.session_state.engine_initialized:
+            await asyncio.sleep(5)  # Adjust based on settings
+            if st.session_state.engine:
+                st.session_state.engine.run_trading_cycle()
+                # Update trader status
+                st.session_state.trader_status = await st.session_state.engine.trader.get_status()
+    except Exception as e:
+        logger.error(f"Error in trading cycle: {e}", exc_info=True)
+
 # --- Main App ---
 def main():
+    initialize_session_state()
+
     # Custom CSS
     st.markdown("""
     <style>
@@ -153,7 +175,8 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    if not initialize_engine():
+    # Initialize engine asynchronously
+    if not asyncio.get_event_loop().run_until_complete(initialize_engine()):
         st.stop()
 
     # Load saved trading mode from DB
@@ -200,6 +223,14 @@ def main():
         api_status = "✅ Connected" if st.session_state.bybit_client and st.session_state.bybit_client.is_connected() else "❌ Disconnected"
         st.markdown(f"**API Status:** {api_status}")
 
+        # Trader Status
+        trader_status = st.session_state.trader_status
+        if trader_status:
+            status_icon = "🟢" if trader_status.get("is_running", False) else "🔴"
+            st.markdown(f"**Trader Status:** {status_icon} {'Running' if trader_status.get('is_running', False) else 'Stopped'}")
+            st.markdown(f"**Open Positions:** {trader_status.get('current_positions', 0)}/{trader_status.get('max_positions', 0)}")
+            st.markdown(f"**Total PnL:** ${trader_status.get('stats', {}).get('total_pnl', 0):.2f}")
+
         st.divider()
 
         # Pages
@@ -230,24 +261,64 @@ def main():
 
         # Last updated
         st.markdown(
-            f"<small style='color:#888;'>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small>",
+            f"<small style='color:#888;'>Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</small>",
             unsafe_allow_html=True
         )
 
-        # Emergency Stop
-        if st.button("🛑 Emergency Stop"):
+        # Trading Controls
+        async def handle_start_trading():
+            if st.session_state.engine and st.session_state.engine.trader:
+                success = await st.session_state.engine.trader.start(st)
+                if success:
+                    st.success("Automated trading started")
+                    logger.info("Automated trading started via UI")
+                    st.session_state.trader_status = await st.session_state.engine.trader.get_status()
+                else:
+                    st.error("Failed to start trading. Check logs for details.")
+                    logger.error("Failed to start automated trading")
+            else:
+                st.error("Trading engine or trader not initialized")
+                logger.error("Start trading attempted but engine/trader not initialized")
+
+        async def handle_stop_trading():
+            if st.session_state.engine and st.session_state.engine.trader:
+                success = await st.session_state.engine.trader.stop()
+                if success:
+                    st.success("Automated trading stopped")
+                    logger.info("Automated trading stopped via UI")
+                    st.session_state.trader_status = await st.session_state.engine.trader.get_status()
+                else:
+                    st.error("Failed to stop trading. Check logs for details.")
+                    logger.error("Failed to stop automated trading")
+            else:
+                st.error("Trading engine or trader not initialized")
+                logger.error("Stop trading attempted but engine/trader not initialized")
+
+        async def handle_emergency_stop():
             if st.session_state.engine:
-                success = st.session_state.engine.emergency_stop("User-initiated emergency stop")
+                success = await st.session_state.engine.emergency_stop("User-initiated emergency stop")
                 if success:
                     st.session_state.wallet_cache.clear()
                     st.success("All automated trading stopped and cache cleared")
                     logger.info("Emergency stop triggered successfully, cache cleared")
+                    st.session_state.trader_status = await st.session_state.engine.trader.get_status()
                 else:
                     st.error("Failed to execute emergency stop. Check logs for details.")
                     logger.error("Emergency stop execution failed")
             else:
                 st.error("Trading engine not initialized")
                 logger.error("Emergency stop attempted but engine not initialized")
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("▶️ Start Trading"):
+                asyncio.run(handle_start_trading())
+        with col2:
+            if st.button("⏸️ Stop Trading"):
+                asyncio.run(handle_stop_trading())
+        if st.button("🛑 Emergency Stop"):
+            asyncio.run(handle_emergency_stop())
 
     # --- Main dashboard ---
     try:
@@ -260,11 +331,9 @@ def main():
     # Footer
     st.markdown("---")
     st.markdown(
-        f"<div style='text-align:center;color:#888;'>AlgoTrader Pro v1.0 | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>",
+        f"<div style='text-align:center;color:#888;'>AlgoTrader Pro v1.0 | Last Updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</div>",
         unsafe_allow_html=True
     )
 
-
 if __name__ == "__main__":
-    engine = create_engine()
-    engine.run_trading_cycle()
+    main()

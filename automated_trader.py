@@ -1,3 +1,4 @@
+# automated_trader.py (fixed version)
 import asyncio
 from dataclasses import asdict
 import time
@@ -198,201 +199,97 @@ class AutomatedTrader:
                 trading_mode=trading_mode
             )
             self.stats["signals_generated"] += len(signals)
-            logger.info(f"Generated {len(signals)} signals, processing up to {self.top_n_signals}")
             
-            if not signals:
-                logger.info("No signals generated")
-                return
+            # Sort signals by score descending
+            signals.sort(key=lambda x: x.get("score", 0), reverse=True)
             
-            # Execute top signals
-            available_slots = self.max_positions - current_positions
-            for signal in signals[:min(self.top_n_signals, available_slots)]:
-                try:
-                    await self._execute_signal(signal, trading_mode)
-                except Exception as e:
-                    logger.error(f"Error executing signal for {signal.get('symbol')}: {e}", exc_info=True)
+            # Execute top signals if positions available
+            executed = 0
+            for signal in signals:
+                if current_positions + executed >= self.max_positions:
+                    break
+                
+                symbol = signal.get("symbol")
+                score = signal.get("score", 0)
+                
+                if score < self.engine.settings.get("MIN_SIGNAL_SCORE", 60):
+                    continue
+                
+                side = signal.get("side", "BUY").upper()
+                entry_price = self.client.get_current_price(symbol)
+                
+                if entry_price <= 0:
+                    logger.warning(f"Invalid price for {symbol}: {entry_price}")
+                    continue
+                
+                position_size = self.engine.calculate_position_size(symbol, entry_price)
+                if position_size <= 0:
+                    logger.warning(f"Invalid position size for {symbol}")
+                    continue
+                
+                stop_loss = signal.get("sl")
+                take_profit = signal.get("tp")
+                
+                if trading_mode == "real":
+                    order = await self.client.place_order(
+                        symbol,
+                        side,
+                        position_size,
+                        stop_loss,
+                        take_profit,
+                        self.leverage
+                    )
+                    if not order:
+                        logger.error(f"Failed to place real order for {symbol}")
+                        continue
                     
-        except Exception as e:
-            logger.error(f"Error in scan and trade: {e}", exc_info=True)
-
-    async def _execute_signal(self, signal: Dict[str, Any], trading_mode: str):
-        """Execute a trading signal"""
-        try:
-            symbol = signal.get("symbol")
-            if not symbol:
-                logger.warning("Signal missing symbol")
-                return
-
-            # Validate symbol exists and is tradable (USDT perpetual futures)
-            ticker_info = self.client._make_request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol})
-            if not ticker_info or "list" not in ticker_info or not ticker_info["list"]:
-                logger.warning(f"Symbol {symbol} not found or not tradable in futures")
-                return
-
-            side = signal.get("side", "Buy")
-            score = signal.get("score", 0)
-            entry_price = signal.get("entry") or self.client.get_current_price(symbol)
-
-            if entry_price <= 0:
-                logger.warning(f"Invalid entry price for {symbol}: {entry_price}")
-                return
-
-            # Stop loss / take profit defaults (TP 25%, SL 5% for 5:1 reward:risk ratio)
-            sl_multiplier = 0.95 if side.lower() == "buy" else 1.05
-            tp_multiplier = 1.25 if side.lower() == "buy" else 0.75
-            stop_loss = float(signal.get("sl", entry_price * sl_multiplier))
-            take_profit = float(signal.get("tp", entry_price * tp_multiplier))
-
-            # Get available balance for UNIFIED account
-            if trading_mode == "real":
-                available_balance = 0.0
-                try:
-                    # Fetch unified wallet balance (covers futures)
-                    result = self.client._make_request(
-                        "GET",
-                        "/v5/account/wallet-balance",
-                        {"accountType": "UNIFIED"}
-                    )
-
-                    if result and "list" in result and result["list"]:
-                        account_info = result["list"][0]
-                        available_balance = float(account_info.get("totalAvailableBalance", 0.0))
-                        logger.info(f"Fetched UNIFIED balance for {symbol}: Available={available_balance:.2f}")
-                    else:
-                        logger.warning(f"No UNIFIED wallet data returned")
-
-                except Exception as e:
-                    logger.error(f"Failed to fetch UNIFIED wallet balance for {symbol}: {e}")
-                    available_balance = 0.0
-
-            else:
-                wallet_balance = self.db.get_wallet_balance("virtual")
-                available_balance = getattr(wallet_balance, "available", 0.0) if wallet_balance else 0.0
-
-            if available_balance <= 0:
-                logger.warning(f"No available balance for {symbol}: Available={available_balance:.2f}")
-                return
-
-            # Calculate position size based on available balance
-            position_size = self.engine.calculate_position_size(
-                symbol,
-                entry_price,
-                available_balance=available_balance
-            )
-
-            if position_size <= 0:
-                logger.info(f"Skipped trade for {symbol}: insufficient balance to meet minimum order size")
-                return
-
-            # Initialize order ID
-            order_id = f"auto_{symbol}_{int(time.time())}"
-
-            if trading_mode == "real":
-                # Ensure required margin <= available
-                required_margin = (position_size * entry_price) / self.leverage
-                if required_margin > available_balance:
-                    logger.warning(f"Insufficient balance for {symbol}: Required={required_margin:.2f}, Available={available_balance:.2f}")
-                    return
-
-                # Validate against symbol rules
-                symbol_info = self.engine.get_symbol_info(symbol)
-                if symbol_info:
-                    lot_size_filter = symbol_info.get("lotSizeFilter", {})
-                    min_qty = float(lot_size_filter.get("minOrderQty", 0))
-                    qty_step = float(lot_size_filter.get("qtyStep", 0))
-
-                    if position_size < min_qty:
-                        logger.info(f"Skipped trade for {symbol}: position size {position_size} < min {min_qty}")
-                        return
-
-                    if qty_step > 0:
-                        position_size = (position_size // qty_step) * qty_step
-
-                # Set isolated margin mode for futures
-                try:
-                    switch_result = self.client._make_request(
-                        "POST",
-                        "/v5/position/switch-isolated",
-                        {
-                            "category": "linear",
-                            "symbol": symbol,
-                            "tradeMode": 1,  # 1 = Isolated Margin
-                            "buyLeverage": str(self.leverage),
-                            "sellLeverage": str(self.leverage)
-                        }
-                    )
-                    if switch_result.get("retCode", -1) != 0:
-                        logger.error(f"Failed to set isolated margin for {symbol}: {switch_result.get('retMsg')}")
-                        return
-                    logger.info(f"Set isolated margin mode for {symbol} futures")
-                except Exception as e:
-                    logger.error(f"Error setting isolated margin for {symbol}: {e}")
-                    return
-
-                # Place the order (futures with isolated margin)
-                order_result = await self.client.place_order(
+                    order_id = order.get("order_id")
+                    entry_price = order.get("price", entry_price)  # Use actual fill price if available
+                
+                else:
+                    order_id = f"virtual_{int(time.time())}"
+                
+                trade = Trade(
                     symbol=symbol,
                     side=side,
                     qty=position_size,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    leverage=self.leverage,
-                    mode="ISOLATED"
-                )
-
-                if "error" in order_result:
-                    logger.error(f"Failed to place order for {symbol}: {order_result['error']}")
-                    return
-
-                if "order_id" not in order_result:
-                    logger.error(f"No order_id returned for {symbol}: {order_result}")
-                    return
-
-                order_id = order_result["order_id"]
-                entry_price = order_result.get("price", entry_price)
-
-            # Save trade
-            trade = Trade(
-                symbol=symbol,
-                side=side,
-                qty=position_size,
-                entry_price=entry_price,
-                order_id=order_id,
-                virtual=(trading_mode == "virtual"),
-                status="open",
-                score=score,
-                strategy="Automated",
-                leverage=self.leverage,
-                timestamp=datetime.now(timezone.utc)
-            )
-
-            trade_dict = asdict(trade)
-            if self.db.add_trade(trade_dict):
-                self.stats["trades_executed"] += 1
-                logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}, Futures ISOLATED",
-                            extra={"order_id": trade_dict["order_id"], "qty": position_size})
-
-                # Save signal to DB
-                signal_obj = Signal(
-                    symbol=symbol,
-                    interval=signal.get("interval", "60"),
-                    signal_type=signal.get("signal_type", "Auto"),
+                    entry_price=entry_price,
+                    order_id=order_id,
+                    virtual=trading_mode == "virtual",
+                    status="open",
                     score=score,
-                    indicators=signal.get("indicators", {}),
-                    side=side,
-                    sl=stop_loss,
-                    tp=take_profit,
-                    trail=signal.get("trail"),
-                    liquidation=signal.get("liquidation"),
-                    leverage=signal.get("leverage", self.leverage),
-                    margin_usdt=signal.get("margin_usdt"),
-                    entry=entry_price,
-                    market=signal.get("market", "futures"),
-                    created_at=signal.get("created_at", datetime.now(timezone.utc))
+                    leverage=self.leverage,
+                    timestamp=datetime.now(timezone.utc)
                 )
-                self.db.add_signal(signal_obj)
-            else:
-                logger.error(f"Failed to save trade for {symbol} in database")
+
+                trade_dict = asdict(trade)
+                if self.db.add_trade(trade_dict):
+                    self.stats["trades_executed"] += 1
+                    logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}, Futures ISOLATED",
+                                extra={"order_id": trade_dict["order_id"], "qty": position_size})
+
+                    # Save signal to DB
+                    signal_obj = Signal(
+                        symbol=symbol,
+                        interval=signal.get("interval", "60"),
+                        signal_type=signal.get("signal_type", "Auto"),
+                        score=score,
+                        indicators=signal.get("indicators", {}),
+                        side=side,
+                        sl=stop_loss,
+                        tp=take_profit,
+                        trail=signal.get("trail"),
+                        liquidation=signal.get("liquidation"),
+                        leverage=signal.get("leverage", self.leverage),
+                        margin_usdt=signal.get("margin_usdt"),
+                        entry=entry_price,
+                        market=signal.get("market", "futures"),
+                        created_at=signal.get("created_at", datetime.now(timezone.utc))
+                    )
+                    self.db.add_signal(signal_obj)
+                    executed += 1
+                else:
+                    logger.error(f"Failed to save trade for {symbol} in database")
 
         except Exception as e:
             logger.error(f"Error executing signal for {symbol}: {e}", exc_info=True)
@@ -481,11 +378,17 @@ class AutomatedTrader:
             pnl = self.engine.calculate_pnl(trade_dict)
             
             if trading_mode == "real":
-                # Cancel order on Bybit if still open
-                if trade.order_id:
-                    success = await self.client.cancel_order(trade.symbol, trade.order_id)
-                    if not success:
-                        logger.warning(f"Failed to cancel order {trade.order_id} for {trade.symbol}")
+                # Close position on Bybit
+                opposite_side = "Sell" if trade.side.upper() == "BUY" else "Buy"
+                close_order = await self.client.place_order(
+                    symbol=trade.symbol,
+                    side=opposite_side,
+                    qty=trade.qty,
+                    reduce_only=True
+                )
+                if not close_order:
+                    logger.warning(f"Failed to close position {trade.order_id} for {trade.symbol}")
+                    return
             
             # Update trade in database
             success = False
