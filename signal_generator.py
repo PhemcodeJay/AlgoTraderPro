@@ -91,24 +91,21 @@ def enhance_signal(analysis: Dict[str, Any], settings: Dict[str, Any]) -> Dict[s
     risk_pct = settings.get("RISK_PCT", 0.01)
     virtual_balance = settings.get("VIRTUAL_BALANCE", 100)
 
-    # Use previous standalone logic for TP/SL and trailing stop
+    # TP/SL and trailing stop
     entry = price
     if side == "LONG":
         tp = round(entry * 1.015, 6)
         sl = round(entry * 0.985, 6)
         trail = round(entry * (1 - settings.get("ENTRY_BUFFER_PCT", 0.002)), 6)
-        liq = round(entry * (1 - 1/leverage), 6)
+        liq = round(entry * (1 - 1 / leverage), 6)
     else:
         tp = round(entry * 0.985, 6)
         sl = round(entry * 1.015, 6)
         trail = round(entry * (1 + settings.get("ENTRY_BUFFER_PCT", 0.002)), 6)
-        liq = round(entry * (1 + 1/leverage), 6)
+        liq = round(entry * (1 + 1 / leverage), 6)
 
-    try:
-        sl_diff = abs(entry - sl)
-        margin = round((virtual_balance * risk_pct / sl_diff) * entry / leverage, 6)
-    except ZeroDivisionError:
-        margin = 5.0
+    # Fixed margin of 5 USDT
+    margin = 5.0
 
     bb_upper = indicators.get("bb_upper", 0)
     bb_lower = indicators.get("bb_lower", 0)
@@ -173,7 +170,7 @@ def generate_signals(
             "RSI_OVERBOUGHT": 70,
             "LEVERAGE": 10,
             "RISK_PCT": 0.01,
-            "VIRTUAL_BALANCE": 10000,
+            "VIRTUAL_BALANCE": 100,
             "ENTRY_BUFFER_PCT": 0.002,
             "TOP_N_SIGNALS": top_n,
             "ML_THRESHOLD": 0.4
