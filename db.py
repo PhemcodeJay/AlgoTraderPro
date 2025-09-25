@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from dateutil import parser 
 from typing import List, Dict, Any, Optional, Callable, Union
 from dataclasses import dataclass, asdict, field
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy import create_engine, Integer, String, Float, DateTime, Boolean, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Mapped, mapped_column
@@ -115,7 +116,7 @@ class SignalModel(Base):
     __tablename__ = 'signals'
     
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        PG_UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4  # 👈 auto-generate UUID
     )
