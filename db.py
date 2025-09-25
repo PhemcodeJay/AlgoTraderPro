@@ -395,14 +395,15 @@ class DatabaseManager:
         def _add_signal():
             if not self.session:
                 raise DatabaseConnectionException("Database session not initialized")
+
             signal_model = SignalModel(
                 symbol=signal.symbol,
                 interval=signal.interval,
                 signal_type=signal.signal_type,
                 score=signal.score,
-                indicators=json.dumps(signal.indicators),
+                indicators=json.dumps(signal.indicators),  # ✅ store JSON as text
                 strategy=signal.strategy,
-                side=signal.side,
+                side=signal.side.upper(),  # ✅ normalize side
                 sl=signal.sl,
                 tp=signal.tp,
                 trail=signal.trail,
@@ -413,20 +414,27 @@ class DatabaseManager:
                 market=signal.market,
                 created_at=signal.created_at or datetime.now(timezone.utc)
             )
+
             self.session.add(signal_model)
             return True
 
         try:
-            result = self._safe_transaction(_add_signal, operation_type="INSERT", table="signals")()
-            logger.info(f"Signal added for {signal.symbol}")
+            result = self._safe_transaction(
+                _add_signal,
+                operation_type="INSERT",
+                table="signals"
+            )()
+            logger.info(f"✅ Signal added for {signal.symbol}")
             return result
+
         except DatabaseException:
-            logger.error(f"Failed to add signal for {signal.symbol}")
+            logger.error(f"❌ Failed to add signal for {signal.symbol}")
             raise
         except Exception as e:
-            logger.error(f"Unexpected error adding signal for {signal.symbol}: {e}")
+            logger.error(f"🔥 Unexpected error adding signal for {signal.symbol}: {e}")
             return False
-    
+
+        
     def add_trade(self, trade: Dict) -> bool:
         if not self.session:
             raise DatabaseConnectionException("Database session not initialized")
