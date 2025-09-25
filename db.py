@@ -114,8 +114,8 @@ class WalletBalance:
 # SQLAlchemy Models
 class SignalModel(Base):
     __tablename__ = 'signals'
-    
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
     interval: Mapped[str] = mapped_column(String(10), nullable=False)
     signal_type: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -412,6 +412,8 @@ class DatabaseManager:
                 margin_usdt=signal.margin_usdt,
                 entry=signal.entry,
                 market=signal.market,
+                bb_slope=signal.bb_slope,
+                time=signal.time,
                 created_at=signal.created_at or datetime.now(timezone.utc)
             )
             self.session.add(signal_model)
