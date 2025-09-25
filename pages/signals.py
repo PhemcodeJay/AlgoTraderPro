@@ -257,7 +257,7 @@ def main():
                 )
                 filtered_signals = [s for s in signals if float(str(s.get('Score', '0%')).replace('%', '')) >= min_score]
                 st.session_state.generated_signals = filtered_signals
-                st.success(f"✅ Generated {len(filtered_signals)} signals, saved {len(filtered_signals)} to database")
+                st.success(f"✅ Generated signals, saved to database")
             except Exception as e:
                 st.error(f"Error generating signals: {e}")
                 logger.error(f"Signal generation error: {e}")
