@@ -237,7 +237,7 @@ def main():
                     'PnL': format_currency_safe(t.get('pnl')) if t.get('status') == 'closed' else 'Open',
                     'Status': t.get('status'),
                     'Mode': 'Virtual' if t.get('virtual') else 'Real',
-                    'Timestamp': (t.get('timestamp')[:19] if t.get('timestamp') else 'N/A')
+                    'Timestamp': (ts[:19] if (ts := t.get('timestamp')) else 'N/A')
                 } for t in trades])
 
                 st.dataframe(
