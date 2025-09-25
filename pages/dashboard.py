@@ -226,9 +226,9 @@ def main():
                     'PnL': format_currency_safe(t.get('pnl')) if t.get('status') == 'closed' else 'Open',
                     'Status': t.get('status'),
                     'Mode': 'Virtual' if t.get('virtual') else 'Real',
-                    'Timestamp': t.get('timestamp')[:19] if t.get('timestamp') else 'N/A'
+                    'Timestamp': (t.get('timestamp') or 'N/A')[:19] if t.get('timestamp') else 'N/A'
                 } for t in trades])
-                
+
                 st.dataframe(
                     trades_df.sort_values('Status', ascending=False),
                     column_config={
@@ -274,8 +274,8 @@ def main():
                         entry_str = f"${format_currency_safe(entry_price)}"
                         pnl_str = f"${format_currency_safe(pnl)}" if pnl is not None else "Open"
                         status_str = str(status).title() if status is not None else "N/A"
-                        timestamp_str = trade.get('timestamp')[:19] if trade.get('timestamp') else 'N/A'
-                        
+                        timestamp_str = (ts[:19] if (ts := trade.get('timestamp')) else 'N/A')
+
                         vt_data.append({
                             "Symbol": trade.get("symbol", "N/A"),
                             "Side": trade.get("side", "N/A"),
@@ -312,7 +312,7 @@ def main():
                         entry_str = f"${format_currency_safe(entry_price)}"
                         pnl_str = f"${format_currency_safe(pnl)}" if pnl is not None else "Open"
                         status_str = str(status).title() if status is not None else "N/A"
-                        timestamp_str = trade.get('timestamp')[:19] if trade.get('timestamp') else 'N/A'
+                        timestamp_str = (ts[:19] if (ts := trade.get('timestamp')) else 'N/A')
                         
                         rt_data.append({
                             "Symbol": trade.get("symbol", "N/A"),

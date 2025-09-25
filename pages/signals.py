@@ -237,9 +237,9 @@ def main():
                     'PnL': format_currency_safe(t.get('pnl')) if t.get('status') == 'closed' else 'Open',
                     'Status': t.get('status'),
                     'Mode': 'Virtual' if t.get('virtual') else 'Real',
-                    'Timestamp': t.get('timestamp')[:19] if t.get('timestamp') else 'N/A'
+                    'Timestamp': (t.get('timestamp')[:19] if t.get('timestamp') else 'N/A')
                 } for t in trades])
-                
+
                 st.dataframe(
                     trades_df.sort_values('Timestamp', ascending=False),
                     column_config={
@@ -277,7 +277,7 @@ def main():
                         'volatility': volatility,
                         'trend_score': trend_score
                     }
-                    score = ml_filter.predict(features)
+                    score = ml_filter.predict_signal_quality(features)
                     st.metric("ML Score", f"{score:.2f}")
             
             importance = ml_filter.get_feature_importance()
