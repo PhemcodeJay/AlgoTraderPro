@@ -234,8 +234,8 @@ class DatabaseManager:
         self.session = None
         self._initialize_db()
         self.recovery_strategy = DatabaseErrorRecoveryStrategy()
-
-    def _initialize_db(self):
+    
+        def _initialize_db(self):
         try:
             # === PostgreSQL Configuration ===
             db_host = os.getenv("DB_HOST", "localhost")
@@ -248,28 +248,32 @@ class DatabaseManager:
             postgres_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
             # Try connecting to PostgreSQL
-            self.engine = create_engine(postgres_url, echo=False)
+            self.engine = create_engine(postgres_url, echo=False, pool_pre_ping=True)
             Base.metadata.create_all(self.engine)
             Session = sessionmaker(bind=self.engine)
             self.session = Session()
-            logger.info("PostgreSQL database initialized successfully")
+            logger.info("✅ PostgreSQL database initialized successfully")
 
         except OperationalError as pg_err:
-            logger.warning(f"PostgreSQL connection failed: {pg_err}. Falling back to SQLite.")
+            logger.warning(f"⚠️ PostgreSQL connection failed: {pg_err}. Falling back to SQLite.")
             try:
-                # Fallback to SQLite
+                # === Fallback to SQLite ===
                 sqlite_url = os.getenv("SQLITE_URL", "sqlite:///algotrader.db")
-                self.engine = create_engine(sqlite_url, echo=False)
+                self.engine = create_engine(sqlite_url, echo=False, connect_args={"check_same_thread": False})
                 Base.metadata.create_all(self.engine)
                 Session = sessionmaker(bind=self.engine)
                 self.session = Session()
-                logger.info("SQLite database initialized successfully")
+                logger.info("✅ SQLite database initialized successfully")
+
+                # 👉 Ensure initial tables & balances exist
+                self._ensure_default_records()
+
             except Exception as sqlite_err:
                 error_context = create_error_context(
                     module=__name__,
                     function='_initialize_db'
                 )
-                logger.error(f"Failed to initialize SQLite database: {sqlite_err}")
+                logger.error(f"❌ Failed to initialize SQLite database: {sqlite_err}")
                 raise DatabaseConnectionException(
                     f"Database initialization failed: {sqlite_err}",
                     context=error_context,
@@ -281,12 +285,50 @@ class DatabaseManager:
                 module=__name__,
                 function='_initialize_db'
             )
-            logger.error(f"Unexpected error during database initialization: {e}")
+            logger.error(f"🔥 Unexpected error during database initialization: {e}")
             raise DatabaseConnectionException(
                 f"Database initialization failed: {e}",
                 context=error_context,
                 original_exception=e
             )
+
+    def _ensure_default_records(self):
+        """Auto-create initial balances/settings for SQLite if not present"""
+        try:
+            # Check if wallet balances exist
+            existing = self.session.query(WalletBalanceModel).count()
+            if existing == 0:
+                logger.info("Initializing default wallet balances in SQLite")
+
+                default_virtual = WalletBalanceModel(
+                    trading_mode="virtual",
+                    capital=100.0,
+                    available=100.0,
+                    used=0.0,
+                    start_balance=100.0,
+                    currency="USDT"
+                )
+                default_real = WalletBalanceModel(
+                    trading_mode="real",
+                    capital=0.0,
+                    available=0.0,
+                    used=0.0,
+                    start_balance=0.0,
+                    currency="USDT"
+                )
+                self.session.add_all([default_virtual, default_real])
+                self.session.commit()
+
+            # Initialize default settings
+            existing_settings = self.session.query(SettingsModel).count()
+            if existing_settings == 0:
+                logger.info("Initializing default settings in SQLite")
+                self.session.add(SettingsModel(key="app_mode", value="demo"))
+                self.session.commit()
+
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize default records: {e}")
+
     
     def _get_session(self):
         if self.session is None:
