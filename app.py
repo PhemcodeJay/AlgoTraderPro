@@ -2,14 +2,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import streamlit as st
-import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 from db import db_manager
 from logging_config import get_logger
 from bybit_client import BybitClient
-from trading_engine import TradingEngine
-from utils import sync_real_wallet_balance
-from engine import create_engine
 
 # Logging using centralized system
 logger = get_logger(__name__)
@@ -23,26 +19,24 @@ st.set_page_config(
 )
 
 # --- Session State Initialization ---
-def initialize_session_state():
-    defaults = {
-        "trading_mode": "virtual",
-        "engine_initialized": False,
-        "wallet_cache": {},
-        "engine": None,
-        "trading_task": None,
-        "trader_status": None
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+if "trading_mode" not in st.session_state:
+    st.session_state.trading_mode = "virtual"
+if "engine_initialized" not in st.session_state:
+    st.session_state.engine_initialized = False
+if "wallet_cache" not in st.session_state:
+    st.session_state.wallet_cache = {}  # Store balances per mode
+if "bybit_client" not in st.session_state:
+    st.session_state.bybit_client = None
+if "engine" not in st.session_state:
+    st.session_state.engine = None
 
 # --- Initialize trading engine ---
-async def initialize_engine():
+def initialize_engine():
     try:
+        from engine import TradingEngine
         if not st.session_state.engine_initialized:
-            st.session_state.engine = create_engine()
+            st.session_state.engine = TradingEngine()
             st.session_state.engine_initialized = True
-            st.session_state.trader_status = await st.session_state.engine.trader.get_status()
             logger.info("Trading engine initialized successfully")
         return True
     except Exception as e:
@@ -50,30 +44,75 @@ async def initialize_engine():
         logger.error(f"Engine initialization failed: {e}", exc_info=True)
         return False
 
+# --- Initialize Bybit client ---
+def initialize_bybit():
+    if st.session_state.bybit_client is None:
+        st.session_state.bybit_client = BybitClient()
+        if st.session_state.bybit_client._test_connection():
+            logger.info("Bybit client connected successfully")
+        else:
+            st.warning("Bybit client connection failed. Check API keys.")
+            logger.error("Bybit client connection test failed")
+
 # --- Fetch wallet balance ---
 def get_wallet_balance() -> dict:
     """
-    Fetch wallet balance based on the selected trading mode from DB only.
-    Returns a dict with capital, available, used, and updated_at.
-    Always safe, fallback to defaults. No auto-sync.
+    Fetch wallet balance based on the selected trading mode.
+    Returns a dict with capital, available, and used balances.
+    Always safe, fallback to defaults.
     """
     mode = st.session_state.trading_mode
-    default_virtual = {"capital": 100.0, "available": 100.0, "used": 0.0, "updated_at": None}
-    default_real = {"capital": 0.0, "available": 0.0, "used": 0.0, "updated_at": None}
+    default_virtual = {"capital": 100.0, "available": 100.0, "used": 0.0}
+    default_real = {"capital": 0.0, "available": 0.0, "used": 0.0}
 
     # Check cache
     if mode in st.session_state.wallet_cache:
         logger.info(f"Returning cached {mode} balance: {st.session_state.wallet_cache[mode]}")
         return st.session_state.wallet_cache[mode]
 
+    balance_data = default_virtual if mode == "virtual" else default_real
     try:
-        wallet = db_manager.get_wallet_balance(mode)
-        if wallet:
-            balance_data = wallet.to_dict()
-            logger.info(f"Fetched {mode} wallet balance: {balance_data}")
-        else:
-            balance_data = default_virtual if mode == "virtual" else default_real
-            logger.warning(f"No {mode} wallet found in DB, using defaults")
+        if mode == "virtual":
+            wallet = st.session_state.engine.db.get_wallet_balance("virtual") \
+                if st.session_state.engine else None
+            if wallet:
+                balance_data = {
+                    "capital": getattr(wallet, "capital", default_virtual["capital"]),
+                    "available": getattr(wallet, "available", default_virtual["available"]),
+                    "used": getattr(wallet, "used", default_virtual["used"])
+                }
+                logger.info(f"Fetched virtual wallet balance: {balance_data}")
+        else:  # real mode
+            initialize_bybit()
+            client = st.session_state.bybit_client
+            if client and client.is_connected():
+                # Sync real balance with Bybit
+                st.session_state.engine.sync_real_balance()
+                wallet = st.session_state.engine.db.get_wallet_balance("real")
+                if wallet:
+                    balance_data = {
+                        "capital": getattr(wallet, "capital", default_real["capital"]),
+                        "available": getattr(wallet, "available", default_real["available"]),
+                        "used": getattr(wallet, "used", default_real["used"])
+                    }
+                    logger.info(
+                        f"Fetched real wallet balance after sync: capital=${balance_data['capital']:.2f}, "
+                        f"available=${balance_data['available']:.2f}, used=${balance_data['used']:.2f}"
+                    )
+                else:
+                    logger.warning("Failed to retrieve real balance after sync")
+                    st.error("❌ Failed to retrieve real balance. Check Bybit account or API permissions.")
+            else:
+                wallet = st.session_state.engine.db.get_wallet_balance("real") \
+                    if st.session_state.engine else None
+                if wallet:
+                    balance_data = {
+                        "capital": getattr(wallet, "capital", default_real["capital"]),
+                        "available": getattr(wallet, "available", default_real["available"]),
+                        "used": getattr(wallet, "used", default_real["used"])
+                    }
+                    logger.warning(f"Bybit client not connected, using DB real balance: {balance_data}")
+                st.warning("Bybit API not connected. Check API keys in .env file.")
     except Exception as e:
         logger.error(f"Error fetching {mode} wallet: {e}", exc_info=True)
         balance_data = default_virtual if mode == "virtual" else default_real
@@ -86,27 +125,13 @@ def get_wallet_balance() -> dict:
     if mode == "real":
         if balance_data["available"] == 0.0 and balance_data["capital"] > 0.0:
             st.info("Real available balance is $0.00. Funds may be in use (e.g., open positions).")
-        elif balance_data["available"] == 0.0 and balance_data["capital"] == 0.0:
+        elif balance_data["available"] == 0.0 and balance_data["capital"] == 0.0 and st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
             st.warning("No funds available in Bybit account. Verify account balance or API permissions.")
 
     return balance_data
 
-# --- Async trading cycle ---
-async def run_trading_cycle():
-    try:
-        while st.session_state.engine_initialized:
-            await asyncio.sleep(5)  # Adjust based on settings
-            if st.session_state.engine:
-                st.session_state.engine.run_trading_cycle()
-                # Update trader status
-                st.session_state.trader_status = await st.session_state.engine.trader.get_status()
-    except Exception as e:
-        logger.error(f"Error in trading cycle: {e}", exc_info=True)
-
 # --- Main App ---
 def main():
-    initialize_session_state()
-
     # Custom CSS
     st.markdown("""
     <style>
@@ -117,7 +142,7 @@ def main():
     # --- Logo Row ---
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image("logo.png", width=100)
+        st.image("logo.png", width=150)
 
     # Header
     st.markdown(f"""
@@ -127,14 +152,12 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Initialize engine asynchronously
-    if not asyncio.run(initialize_engine()):
+    if not initialize_engine():
         st.stop()
-
 
     # Load saved trading mode from DB
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
-        saved_mode = db_manager.get_setting("trading_mode")
+        saved_mode = st.session_state.engine.db.get_setting("trading_mode")
         st.session_state.trading_mode = saved_mode if saved_mode in ["virtual", "real"] else "virtual"
         logger.info(f"Loaded trading mode from DB: {st.session_state.trading_mode}")
 
@@ -153,9 +176,16 @@ def main():
         # Update session state and persist to DB if changed
         if selected_mode.lower() != st.session_state.trading_mode:
             st.session_state.trading_mode = selected_mode.lower()
-            db_manager.save_setting("trading_mode", st.session_state.trading_mode)
+            st.session_state.engine.db.save_setting("trading_mode", st.session_state.trading_mode)
             st.session_state.wallet_cache.clear()
             logger.info(f"Switched to {st.session_state.trading_mode} mode, cleared cache")
+
+            # Sync real balance if switching to real mode
+            if st.session_state.trading_mode == "real":
+                initialize_bybit()
+                if st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
+                    st.session_state.engine.sync_real_balance()
+                    logger.info("Real balance synced after mode switch")
             st.rerun()
 
         # Status
@@ -165,16 +195,9 @@ def main():
         st.markdown(f"**Trading Mode:** {mode_color} {st.session_state.trading_mode.title()}")
 
         # API Connection Status
-        api_status = "✅ Connected" if st.session_state.engine and st.session_state.engine.client and st.session_state.engine.client.is_connected() else "❌ Disconnected"
+        initialize_bybit()
+        api_status = "✅ Connected" if st.session_state.bybit_client and st.session_state.bybit_client.is_connected() else "❌ Disconnected"
         st.markdown(f"**API Status:** {api_status}")
-
-        # Trader Status
-        trader_status = st.session_state.trader_status
-        if trader_status:
-            status_icon = "🟢" if trader_status.get("is_running", False) else "🔴"
-            st.markdown(f"**Trader Status:** {status_icon} {'Running' if trader_status.get('is_running', False) else 'Stopped'}")
-            st.markdown(f"**Open Positions:** {trader_status.get('current_positions', 0)}/{trader_status.get('max_positions', 0)}")
-            st.markdown(f"**Total PnL:** ${trader_status.get('stats', {}).get('total_pnl', 0):.2f}")
 
         st.divider()
 
@@ -194,92 +217,57 @@ def main():
         st.divider()
 
         # Wallet Balance
-        balance_data = get_wallet_balance()
-        last_synced = balance_data.get("updated_at")
-        if last_synced:
-            last_synced = datetime.fromisoformat(last_synced).strftime('%Y-%m-%d %H:%M:%S') + " UTC"
+        current_mode = st.session_state.trading_mode
+        if current_mode == "virtual":
+            wallet_balance = db_manager.get_wallet_balance("virtual")
+            capital_val = wallet_balance.capital if wallet_balance else 100.0
+            available_val = wallet_balance.available if wallet_balance else 100.0
         else:
-            last_synced = "Never"
-        help_text = f"Last synced: {last_synced}"
-        if st.session_state.trading_mode == "virtual":
-            st.metric("💻 Virtual Capital", f"${balance_data['capital']:.2f}")
-            st.metric("💻 Virtual Available", f"${balance_data['available']:.2f}")
-            st.metric("💻 Virtual Used", f"${balance_data['used']:.2f}")
-        else:
-            st.metric("🏦 Real Capital", f"${balance_data['capital']:.2f}", help=help_text)
-            st.metric("🏦 Real Available", f"${balance_data['available']:.2f}", help=help_text)
-            st.metric("🏦 Real Used Margin", f"${balance_data['used']:.2f}", help=help_text)
+            try:
+                result = st.session_state.engine.client._make_request(
+                    "GET",
+                    "/v5/account/wallet-balance",
+                    {"accountType": "UNIFIED"}
+                )
 
-        # Sync button for real mode
-        if st.session_state.trading_mode == "real":
-            if st.button("🔄 Sync Real Balance"):
-                if st.session_state.engine and st.session_state.engine.client:
-                    sync_real_wallet_balance(st.session_state.engine.client)
-                    st.session_state.wallet_cache.clear()
-                    st.rerun()
+                if result and "list" in result and result["list"]:
+                    wallet = result["list"][0]
+                    capital_val = float(wallet.get("totalEquity", 0.0))
+                    coins = wallet.get("coin", [])
+                    usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
+                    available_val = float(usdt_coin.get("walletBalance", 0.0)) if usdt_coin else capital_val
                 else:
-                    st.error("Engine not initialized")
+                    capital_val = available_val = 0.0
+
+            except Exception as e:
+                logger.error(f"Failed to fetch real balance from Bybit: {e}")
+                capital_val = available_val = 0.0
+
+        available_val = max(available_val, 0.0)
+        used_val = capital_val - available_val
+        if abs(used_val) < 0.01:
+            used_val = 0.0
+
+        if current_mode == "virtual":
+            st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
+            st.metric("💻 Virtual Available", f"${available_val:.2f}")
+            st.metric("💻 Virtual Used", f"${used_val:.2f}")
+        else:
+            st.metric("🏦 Real Capital", f"${capital_val:.2f}")
+            st.metric("🏦 Real Available", f"${available_val:.2f}")
+            st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
 
         # Last updated
         st.markdown(
-            f"<small style='color:#888;'>Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</small>",
+            f"<small style='color:#888;'>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small>",
             unsafe_allow_html=True
         )
 
-        # Trading Controls
-        async def handle_start_trading():
-            if st.session_state.engine and st.session_state.engine.trader:
-                success = await st.session_state.engine.trader.start(st)
-                if success:
-                    st.success("Automated trading started")
-                    logger.info("Automated trading started via UI")
-                    st.session_state.trader_status = await st.session_state.engine.trader.get_status()
-                else:
-                    st.error("Failed to start trading. Check logs for details.")
-                    logger.error("Failed to start automated trading")
-            else:
-                st.error("Trading engine or trader not initialized")
-                logger.error("Start trading attempted but engine/trader not initialized")
-
-        async def handle_stop_trading():
-            if st.session_state.engine and st.session_state.engine.trader:
-                success = await st.session_state.engine.trader.stop()
-                if success:
-                    st.success("Automated trading stopped")
-                    logger.info("Automated trading stopped via UI")
-                    st.session_state.trader_status = await st.session_state.engine.trader.get_status()
-                else:
-                    st.error("Failed to stop trading. Check logs for details.")
-                    logger.error("Failed to stop automated trading")
-            else:
-                st.error("Trading engine or trader not initialized")
-                logger.error("Stop trading attempted but engine/trader not initialized")
-
-        async def handle_emergency_stop():
-            if st.session_state.engine:
-                success = await st.session_state.engine.emergency_stop("User-initiated emergency stop")
-                if success:
-                    st.session_state.wallet_cache.clear()
-                    st.success("All automated trading stopped and cache cleared")
-                    logger.info("Emergency stop triggered successfully, cache cleared")
-                    st.session_state.trader_status = await st.session_state.engine.trader.get_status()
-                else:
-                    st.error("Failed to execute emergency stop. Check logs for details.")
-                    logger.error("Emergency stop execution failed")
-            else:
-                st.error("Trading engine not initialized")
-                logger.error("Emergency stop attempted but engine not initialized")
-
-        st.divider()
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("▶️ Start Trading"):
-                asyncio.run(handle_start_trading())
-        with col2:
-            if st.button("⏸️ Stop Trading"):
-                asyncio.run(handle_stop_trading())
+        # Emergency Stop
         if st.button("🛑 Emergency Stop"):
-            asyncio.run(handle_emergency_stop())
+            st.session_state.wallet_cache.clear()
+            st.success("All automated trading stopped and cache cleared")
+            logger.info("Emergency stop triggered, cache cleared")
 
     # --- Main dashboard ---
     try:
@@ -292,9 +280,10 @@ def main():
     # Footer
     st.markdown("---")
     st.markdown(
-        f"<div style='text-align:center;color:#888;'>AlgoTrader Pro v1.0 | Last Updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</div>",
+        f"<div style='text-align:center;color:#888;'>AlgoTrader Pro v1.0 | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>",
         unsafe_allow_html=True
     )
+
 
 if __name__ == "__main__":
     main()

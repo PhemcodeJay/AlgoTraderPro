@@ -37,8 +37,6 @@ class Signal:
     margin_usdt: Optional[float] = None
     entry: Optional[float] = None
     market: Optional[str] = None
-    bb_slope: Optional[str] = None         # ✅ added
-    time: Optional[str] = None             # ✅ added
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     id: Union[str, None] = None
 
@@ -58,6 +56,7 @@ class Signal:
             data["created_at"] = self.created_at.isoformat()
         return data
 
+
 @dataclass
 class Trade:
     symbol: str
@@ -70,7 +69,7 @@ class Trade:
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
     score: Optional[float] = None
-    strategy: str = "Auto"
+    strategy: str = "Manual"
     leverage: int = 10
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at: Optional[datetime] = None
@@ -114,8 +113,12 @@ class WalletBalance:
 # SQLAlchemy Models
 class SignalModel(Base):
     __tablename__ = 'signals'
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4  # 👈 auto-generate UUID
+    )
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
     interval: Mapped[str] = mapped_column(String(10), nullable=False)
     signal_type: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -131,13 +134,11 @@ class SignalModel(Base):
     margin_usdt: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     market: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    bb_slope: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)   # ✅ Bollinger Band slope
-    time: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)       # ✅ signal timestamp
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    def to_signal(self) -> 'Signal':
+    def to_signal(self) -> Signal:
         return Signal(
-            id=str(self.id) if self.id is not None else None,
+            id=str(self.id) if self.id else None, # ✅ Cast int → str
             symbol=self.symbol,
             interval=self.interval,
             signal_type=self.signal_type,
@@ -153,8 +154,6 @@ class SignalModel(Base):
             margin_usdt=self.margin_usdt,
             entry=self.entry,
             market=self.market,
-            bb_slope=self.bb_slope,    # ✅ now included
-            time=self.time,            # ✅ now included
             created_at=self.created_at,
         )
 
@@ -396,14 +395,15 @@ class DatabaseManager:
         def _add_signal():
             if not self.session:
                 raise DatabaseConnectionException("Database session not initialized")
+
             signal_model = SignalModel(
                 symbol=signal.symbol,
                 interval=signal.interval,
                 signal_type=signal.signal_type,
                 score=signal.score,
-                indicators=json.dumps(signal.indicators),
+                indicators=json.dumps(signal.indicators),  # ✅ store JSON as text
                 strategy=signal.strategy,
-                side=signal.side,
+                side=signal.side.upper(),  # ✅ normalize side
                 sl=signal.sl,
                 tp=signal.tp,
                 trail=signal.trail,
@@ -412,24 +412,29 @@ class DatabaseManager:
                 margin_usdt=signal.margin_usdt,
                 entry=signal.entry,
                 market=signal.market,
-                bb_slope=signal.bb_slope,
-                time=signal.time,
                 created_at=signal.created_at or datetime.now(timezone.utc)
             )
+
             self.session.add(signal_model)
             return True
 
         try:
-            result = self._safe_transaction(_add_signal, operation_type="INSERT", table="signals")()
-            logger.info(f"Signal added for {signal.symbol}")
+            result = self._safe_transaction(
+                _add_signal,
+                operation_type="INSERT",
+                table="signals"
+            )()
+            logger.info(f"✅ Signal added for {signal.symbol}")
             return result
+
         except DatabaseException:
-            logger.error(f"Failed to add signal for {signal.symbol}")
+            logger.error(f"❌ Failed to add signal for {signal.symbol}")
             raise
         except Exception as e:
-            logger.error(f"Unexpected error adding signal for {signal.symbol}: {e}")
+            logger.error(f"🔥 Unexpected error adding signal for {signal.symbol}: {e}")
             return False
-    
+
+        
     def add_trade(self, trade: Dict) -> bool:
         if not self.session:
             raise DatabaseConnectionException("Database session not initialized")
@@ -539,21 +544,6 @@ class DatabaseManager:
             return self._execute_with_retry(_get_trades, "get_trades")
         except Exception as e:
             logger.error(f"Error getting trades: {e}")
-            return []
-
-    def get_open_trades(self) -> List[Trade]:
-        """Retrieve all open trades from the database."""
-        try:
-            def _get_open_trades():
-                if not self.session:
-                    raise DatabaseConnectionException("Database session not initialized")
-                trades = self.session.query(TradeModel).filter(
-                    TradeModel.status == "open"
-                ).order_by(TradeModel.timestamp.desc()).all()
-                return [t.to_trade() for t in trades]
-            return self._execute_with_retry(_get_open_trades, "get_open_trades")
-        except Exception as e:
-            logger.error(f"Error getting open trades: {e}")
             return []
 
     def get_wallet_balance(self, trading_mode: str) -> Optional[WalletBalance]:

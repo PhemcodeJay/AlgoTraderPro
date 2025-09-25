@@ -10,7 +10,6 @@ import requests.adapters
 from datetime import datetime
 import requests
 import threading
-import logging
 from dataclasses import dataclass
 from logging_config import get_trading_logger
 from exceptions import (
@@ -18,8 +17,7 @@ from exceptions import (
     APIAuthenticationException, APITimeoutException, APIDataException,
     APIErrorRecoveryStrategy, create_error_context
 )
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
 logger = get_trading_logger('api_client')
 
 @dataclass
@@ -30,6 +28,7 @@ class RateLimitInfo:
     request_count: int = 0
     minute_start: float = 0
     minute_count: int = 0
+
 
 class BybitClient:
     def __init__(self):
@@ -72,10 +71,6 @@ class BybitClient:
         self.successful_requests = 0
         self.failed_requests = 0
         
-        # Symbol cache for performance
-        self._symbol_cache = {"linear": {"symbols": [], "last_updated": 0}}
-        self._symbol_cache_ttl = 3600  # 1 hour TTL for symbol cache
-        
         # Initialize connection
         self._initialize_session()
         self._test_connection()  # Test connection during initialization
@@ -85,58 +80,42 @@ class BybitClient:
         
         logger.info(f"BybitClient initialized - Environment: mainnet - Account Type: {self.account_type}")
     
-
     def _initialize_session(self):
         """Initialize HTTP session with proper configuration"""
         try:
-            # Close existing session if reinitializing
-            if hasattr(self, "session") and self.session is not None:
-                try:
-                    self.session.close()
-                except Exception:
-                    pass
-
             self.session = requests.Session()
-
-            # Configure retry strategy (we still control retry policy here)
-            retry_strategy = Retry(
-                total=0,  # set to >0 if you want auto retries, else leave 0
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE"],
-                backoff_factor=0.5,  # exponential backoff
-                raise_on_status=False
-            )
-
-            adapter = HTTPAdapter(
+            
+            # Configure adapters for connection pooling and retries  
+            adapter = requests.adapters.HTTPAdapter(
                 pool_connections=10,
-                pool_maxsize=20,  # allow more concurrent connections
-                max_retries=retry_strategy
+                pool_maxsize=10,
+                max_retries=0  # We handle retries manually
             )
-
-            self.session.mount("https://", adapter)
-            self.session.mount("http://", adapter)
-
-            # Optional: set default headers or timeout
-            self.session.headers.update({"User-Agent": "AlgoTraderPro/1.0"})
-
-            logger.info("HTTP session initialized with connection pooling and retries")
-
+            
+            self.session.mount('https://', adapter)
+            self.session.mount('http://', adapter)
+            
+            # Configure session defaults (timeouts are passed to individual requests)
+            # Note: Session objects don't have a timeout attribute; timeouts are per-request
+            
+            logger.info("HTTP session initialized with connection pooling")
+            
         except Exception as e:
             error_context = create_error_context(
                 module=__name__,
-                function="_initialize_session"
+                function='_initialize_session'
             )
             raise APIConnectionException(
-                f"Failed to initialize HTTP session: {e}",
-                endpoint="session_init",
+                f"Failed to initialize HTTP session: {str(e)}",
+                endpoint='session_init',
                 context=error_context,
                 original_exception=e
             )
 
-
     def _start_background_loop(self):
         """Start background event loop for async operations"""
         try:
+            import threading
             def run_loop():
                 self.loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self.loop)
@@ -331,25 +310,18 @@ class BybitClient:
                 self.last_successful_request = datetime.now()
                 self.consecutive_errors = 0
                 
-                # Log successful request (batched every 60s)
-                key = (method, endpoint)
-                now = time.time()
-
-                if not hasattr(self, "_request_counter"):
-                    self._request_counter = {}
-                if not hasattr(self, "_last_log_time"):
-                    self._last_log_time = {}
-
-                self._request_counter[key] = self._request_counter.get(key, 0) + 1
-                last_time = self._last_log_time.get(key, 0)
-
-                if now - last_time > 300:  # log every 300 seconds
-                    count = self._request_counter[key]
-                    logger.info(f"{count} successful {method} {endpoint} calls in last 300s")
-                    self._request_counter[key] = 0
-                    self._last_log_time[key] = now
-
-                                
+                # Log successful request
+                logger.info(
+                    f"API request successful: {method} {endpoint}",
+                    extra={
+                        'endpoint': endpoint,
+                        'method': method,
+                        'response_time_ms': round(response_time, 2),
+                        'status_code': response.status_code,
+                        'attempt': attempt + 1
+                    }
+                )
+                
                 return data.get("result", {})
                 
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
@@ -488,6 +460,7 @@ class BybitClient:
                     'account_type': self.account_type
                 }
             )
+
             return False
             
         except APIRateLimitException as e:
@@ -547,31 +520,6 @@ class BybitClient:
             health_info['status'] = 'healthy'
             
         return health_info
-
-    def get_available_symbols(self, category: str = "linear") -> List[str]:
-        """Get list of available symbols for a category with caching"""
-        try:
-            # Check cache first
-            cache = self._symbol_cache.get(category, {})
-            if cache.get("last_updated", 0) > time.time() - self._symbol_cache_ttl:
-                logger.info(f"Returning cached symbols for category {category}, count: {len(cache['symbols'])}")
-                return cache["symbols"]
-
-            # Fetch from API
-            result = self._make_request("GET", "/v5/market/instruments-info", {"category": category})
-            symbols = []
-            if result and "list" in result:
-                for instr in result["list"]:
-                    if instr.get("status") == "Trading" and instr.get("symbol", "").endswith("USDT"):
-                        symbols.append(instr["symbol"])
-            
-            # Update cache
-            self._symbol_cache[category] = {"symbols": symbols, "last_updated": time.time()}
-            logger.info(f"Fetched {len(symbols)} tradable USDT symbols for category {category}: {symbols[:5]}...")
-            return symbols
-        except Exception as e:
-            logger.error(f"Error getting available symbols for {category}: {e}")
-            return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]  # Fallback to known futures symbols
 
     from typing import TYPE_CHECKING, Dict
     if TYPE_CHECKING:
@@ -675,13 +623,12 @@ class BybitClient:
         symbol: str,
         side: str,
         qty: float,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
+        stop_loss: float,
+        take_profit: float,
         leverage: Optional[int] = 10,
-        mode: str = "ISOLATED",
-        reduce_only: bool = False
+        mode: str = "ISOLATED"
     ) -> Dict:
-        """Place a market trading order with leverage, isolated margin mode, optional TP and SL"""
+        """Place a market trading order with leverage, isolated margin mode, required TP and SL"""
         try:
             # Default leverage = 10
             leverage = leverage or 10
@@ -698,7 +645,7 @@ class BybitClient:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
-            # Step 2: Build order params (always market order, with optional TP/SL)
+            # Step 2: Build order params (always market order, with TP/SL required)
             params = {
                 "category": "linear",
                 "symbol": symbol,
@@ -706,13 +653,9 @@ class BybitClient:
                 "orderType": "Market",
                 "qty": str(qty),
                 "timeInForce": "IOC",  # Immediate or Cancel for market orders
+                "stopLoss": str(stop_loss),
+                "takeProfit": str(take_profit)
             }
-            if reduce_only:
-                params["reduceOnly"] = str(reduce_only).lower()
-            if stop_loss is not None:
-                params["stopLoss"] = str(stop_loss)
-            if take_profit is not None:
-                params["takeProfit"] = str(take_profit)
 
             # Step 3: Place order (sync call via executor)
             result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
@@ -729,8 +672,8 @@ class BybitClient:
                     "timestamp": datetime.now(),
                     "virtual": False,
                     "leverage": leverage,
-                    "stopLoss": str(stop_loss) if stop_loss is not None else None,
-                    "takeProfit": str(take_profit) if take_profit is not None else None,
+                    "stopLoss": str(stop_loss),
+                    "takeProfit": str(take_profit),
                     "margin_mode": mode.upper()
                 }
             return {}
@@ -856,8 +799,6 @@ class BybitClient:
         try:
             if self.ws_connection and self.loop:
                 asyncio.run_coroutine_threadsafe(self.ws_connection.close(), self.loop)
-            if self.session:
-                self.session.close()
             if self.loop:
                 self.loop.call_soon_threadsafe(self.loop.stop)
             logger.info("Bybit client closed")

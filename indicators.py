@@ -1,8 +1,8 @@
 import numpy as np
+import requests
 from typing import Dict, List, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-from bybit_client import BybitClient  # Import BybitClient for symbol fetching
 
 # Logging using centralized system
 from logging_config import get_logger
@@ -12,17 +12,34 @@ logger = get_logger(__name__)
 INTERVALS = ["1", "3", "5", "15", "30", "60", "120", "240", "360", "720", "D", "W"]
 ML_ENABLED = True  # Feature flag for ML filtering
 
-def get_candles(client: BybitClient, symbol: str, interval: str, limit: int = 100) -> List[Dict]:
-    """Fetch candlestick data from Bybit API using BybitClient"""
+def get_candles(symbol: str, interval: str, limit: int = 100) -> List[Dict]:
+    """Fetch candlestick data from Bybit API"""
     try:
-        if not client or not client.is_connected():
-            logger.error(f"BybitClient not connected for fetching candles for {symbol}")
-            return []
+        url = "https://api.bybit.com/v5/market/kline"
+        params = {
+            "category": "linear",
+            "symbol": symbol,
+            "interval": interval,
+            "limit": str(limit)
+        }
         
-        candles = client.get_klines(symbol, interval, limit)
-        if not candles:
-            logger.warning(f"No candle data returned for {symbol}")
-        return candles
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get("retCode") == 0 and "result" in data:
+            klines = []
+            for k in data["result"]["list"]:
+                klines.append({
+                    "time": int(k[0]),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5])
+                })
+            return sorted(klines, key=lambda x: x["time"])
+        return []
     except Exception as e:
         logger.error(f"Error fetching candles for {symbol}: {e}")
         return []
@@ -234,57 +251,51 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         logger.error(f"Error calculating indicators: {e}")
         return {}
 
-def get_top_symbols(client: BybitClient, limit: int = 50) -> List[str]:
-    """Get top tradable USDT perpetual futures symbols by volume using BybitClient"""
+def get_top_symbols(limit: int = 50) -> List[str]:
+    """Get top USDT trading pairs by volume"""
     try:
-        if not client or not client.is_connected():
-            logger.warning("BybitClient not connected for top symbols, using fallback")
-            return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"][:limit]
+        url = "https://api.bybit.com/v5/market/tickers"
+        params = {"category": "linear"}
         
-        # Fetch tradable futures symbols
-        symbols = client.get_available_symbols("linear")
-        if not symbols:
-            logger.warning("No tradable symbols returned from Bybit API, using fallback")
-            return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"][:limit]
-
-        # Fetch ticker data to sort by volume
-        ticker_data = []
-        for symbol in symbols:
-            try:
-                result = client._make_request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol})
-                if result and "list" in result and result["list"]:
-                    ticker = result["list"][0]
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get("retCode") == 0 and "result" in data:
+            tickers = data["result"]["list"]
+            
+            # Filter USDT pairs and sort by volume
+            usdt_pairs = []
+            for ticker in tickers:
+                symbol = ticker.get("symbol", "")
+                if symbol.endswith("USDT"):
                     volume = float(ticker.get("volume24h", 0))
                     price = float(ticker.get("lastPrice", 0))
                     if volume > 0 and price > 0:
-                        ticker_data.append({
+                        usdt_pairs.append({
                             "symbol": symbol,
                             "volume": volume,
                             "price": price
                         })
-            except Exception as e:
-                logger.error(f"Error fetching ticker for {symbol}: {e}")
+            
+            # Sort by volume and return top symbols
+            usdt_pairs.sort(key=lambda x: x["volume"], reverse=True)
+            return [pair["symbol"] for pair in usdt_pairs[:limit]]
         
-        # Sort by volume and return top symbols
-        ticker_data.sort(key=lambda x: x["volume"], reverse=True)
-        top_symbols = [pair["symbol"] for pair in ticker_data[:limit]]
-        logger.info(f"Fetched {len(top_symbols)} top tradable USDT perpetual futures symbols: {top_symbols[:5]}...")
-        return top_symbols
+        return []
     except Exception as e:
         logger.error(f"Error getting top symbols: {e}")
-        return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"][:limit]
+        return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
 
-def analyze_symbol(client: BybitClient, symbol: str, interval: str = "60") -> Dict[str, Any]:
+def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
     """Comprehensive analysis of a single symbol"""
     try:
-        candles = get_candles(client, symbol, interval, 100)
+        candles = get_candles(symbol, interval, 100)
         if not candles:
-            logger.warning(f"No candles fetched for {symbol}")
             return {}
         
         indicators = calculate_indicators(candles)
         if not indicators:
-            logger.warning(f"No indicators calculated for {symbol}")
             return {}
         
         # Generate signal score based on multiple factors
@@ -367,14 +378,13 @@ def analyze_symbol(client: BybitClient, symbol: str, interval: str = "60") -> Di
 
 def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers: int = 10) -> List[Dict]:
     try:
-        client = BybitClient()  # Instantiate BybitClient
         results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_symbol = {
-                executor.submit(analyze_symbol, client, symbol, interval): symbol
+                executor.submit(analyze_symbol, symbol, interval): symbol
                 for symbol in symbols
             }
-            for future in as_completed(future_to_symbol, timeout=60):
+            for future in as_completed(future_to_symbol, timeout=60):  # Increase to 60s
                 symbol = future_to_symbol[future]
                 try:
                     result = future.result()

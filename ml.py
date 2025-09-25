@@ -10,8 +10,6 @@ import sys
 import argparse
 from db import DatabaseManager, Trade, Signal
 from logging_config import get_logger
-from datetime import datetime
-
 
 logger = get_logger(__name__, structured_format=True)
 
@@ -27,8 +25,6 @@ class MLFilter:
         ]
         self.model_path = "ml_model.joblib"
         self.scaler_path = "ml_scaler.joblib"
-        self.last_accuracy: float | None = None
-        self.last_trained: str | None = None
         self.load_model()
 
     def prepare_features(self, indicators: Dict[str, float]) -> np.ndarray:
@@ -96,9 +92,6 @@ class MLFilter:
 
             y_pred = self.model.predict(X_test_scaled)
             acc = accuracy_score(y_test, y_pred)
-            self.last_accuracy = float(acc)
-            self.last_trained = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
             logger.info(f"ML model trained with accuracy: {acc:.3f}")
             logger.info(f"Classification report:\n{classification_report(y_test, y_pred)}")
 
@@ -152,24 +145,6 @@ class MLFilter:
             importance = self.model.feature_importances_
             return {name: float(imp) for name, imp in zip(self.feature_columns, importance)}
         return None
-
-    def get_status(self) -> Dict[str, Any]:
-        """Return status info about the ML model"""
-        try:
-            return {
-                "model_loaded": self.model is not None,
-                "model_path": self.model_path if self.model else None,
-                "scaler_path": self.scaler_path if self.scaler else None,
-                "feature_count": len(self.feature_columns),
-                "features": self.feature_columns,
-                "mode": "Trained" if self.model else "Untrained",
-                "last_accuracy": round(self.last_accuracy, 3) if self.last_accuracy else None,
-                "last_trained": self.last_trained
-            }
-        except Exception as e:
-            logger.error(f"Error getting ML status: {e}")
-            return {"model_loaded": False, "error": str(e)}
-
 
     def save_model(self):
         if self.model:
