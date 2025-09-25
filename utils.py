@@ -31,7 +31,7 @@ def normalize_signal(signal: Any) -> Dict:
         "trail": getattr(signal, "trail", None),
         "liquidation": getattr(signal, "liquidation", None),
         "leverage": getattr(signal, "leverage", 10),
-        "margin_usdt": getattr(signal, "margin_usdt", None),
+        "margin_usdt": getattr(signal, "margin_usdt", 5),
         "entry": getattr(signal, "entry", None),
         "market": getattr(signal, "market", None),
         "created_at": getattr(signal, "created_at", None)

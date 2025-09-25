@@ -308,7 +308,7 @@ def generate_signals(
             trail=float(enhanced.get("trail", 0)),
             liquidation=float(enhanced.get("liquidation", 0)),
             leverage=int(enhanced.get("leverage", 10)),
-            margin_usdt=float(enhanced.get("margin_usdt", 0)),
+            margin_usdt=float(enhanced.get("margin_usdt", 5)),
             entry=float(enhanced.get("entry", 0)),
             market=str(enhanced.get("market", "futures")),
             created_at=enhanced.get("created_at", datetime.now(timezone.utc))
@@ -460,7 +460,7 @@ def analyze_single_symbol(symbol: str, interval: str = "60", settings: Optional[
         trail=float(enhanced.get("trail", 0)),
         liquidation=float(enhanced.get("liquidation", 0)),
         leverage=int(enhanced.get("leverage", 10)),
-        margin_usdt=float(enhanced.get("margin_usdt", 0)),
+        margin_usdt=float(enhanced.get("margin_usdt", 5)),
         entry=float(enhanced.get("entry", 0)),
         market=str(enhanced.get("market", "futures")),
         created_at=enhanced.get("created_at", datetime.now(timezone.utc))
