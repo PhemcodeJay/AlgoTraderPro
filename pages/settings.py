@@ -9,6 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bybit_client import BybitClient
 from db import db_manager, WalletBalance
 from logging_config import get_logger
+from utils import format_currency_safe
 
 # Import backend settings handlers
 import settings as backend_settings  # Rename to avoid conflict
@@ -189,20 +190,14 @@ def main():
                     test_client = BybitClient()
                     if test_client.is_connected():
                         st.success("✅ API connection successful!")
+                        balance = test_client.get_account_balance().get("USDT", None)
+                        if balance:
+                            st.info(f"Account Balance: {format_currency_safe(balance.available)} USDT available")
                     else:
-                        st.error("❌ API connection failed. Check keys and network.")
+                        st.error("❌ API connection failed. Check credentials.")
                 except Exception as e:
-                    st.error(f"Test failed: {e}")
-                    logger.error(f"API connection test failed: {e}", exc_info=True)
-
-            st.markdown("### 💡 API Setup Guide")
-            st.markdown("""
-            1. Log in to your Bybit account
-            2. Go to API Management
-            3. Create new API key with trading permissions
-            4. Copy Key and Secret here
-            5. Select correct account type
-            """)
+                    st.error(f"API test failed: {e}")
+                    logger.error(f"API test failed: {e}", exc_info=True)
 
         with tab2:
             st.subheader("📊 Trading Parameters")
@@ -212,55 +207,36 @@ def main():
             with col1:
                 scan_interval = st.number_input(
                     "Scan Interval (seconds)",
-                    min_value=60.0,
-                    value=current_settings.get("SCAN_INTERVAL", 3600.0),
-                    step=60.0
+                    min_value=60,
+                    max_value=3600,
+                    value=current_settings.get("SCAN_INTERVAL", 300),
+                    step=60
                 )
                 top_n_signals = st.number_input(
-                    "Top Signals to Consider",
+                    "Top N Signals",
                     min_value=1,
-                    value=current_settings.get("TOP_N_SIGNALS", 10),
-                    step=1
+                    max_value=50,
+                    value=current_settings.get("TOP_N_SIGNALS", 10)
                 )
                 leverage = st.number_input(
                     "Default Leverage",
-                    min_value=1.0,
-                    value=current_settings.get("LEVERAGE", 10.0),
-                    step=1.0
-                )
-                risk_pct = st.number_input(
-                    "Risk % per Trade",
-                    min_value=0.01,
-                    value=current_settings.get("RISK_PCT", 0.02),
-                    step=0.01,
-                    format="%.2f"
+                    min_value=1,
+                    max_value=125,
+                    value=current_settings.get("LEVERAGE", 10)
                 )
 
             with col2:
+                max_open_positions = st.number_input(
+                    "Max Open Positions",
+                    min_value=1,
+                    max_value=50,
+                    value=current_settings.get("MAX_OPEN_POSITIONS", 10)
+                )
                 min_signal_score = st.number_input(
                     "Min Signal Score",
                     min_value=0.0,
                     max_value=100.0,
-                    value=current_settings.get("MIN_SIGNAL_SCORE", 40.0),
-                    step=5.0
-                )
-                entry_buffer_pct = st.number_input(
-                    "Entry Buffer %",
-                    min_value=0.0,
-                    value=current_settings.get("ENTRY_BUFFER_PCT", 0.002),
-                    step=0.001,
-                    format="%.3f"
-                )
-                min_volume = st.number_input(
-                    "Min 24h Volume (USDT)",
-                    min_value=0.0,
-                    value=current_settings.get("MIN_VOLUME", 1000000.0),
-                    step=100000.0
-                )
-                min_atr_pct = st.number_input(
-                    "Min ATR %",
-                    min_value=0.0,
-                    value=current_settings.get("MIN_ATR_PCT", 0.5),
+                    value=current_settings.get("MIN_SIGNAL_SCORE", 60.0),
                     step=0.1
                 )
 
@@ -271,11 +247,8 @@ def main():
                         "SCAN_INTERVAL": scan_interval,
                         "TOP_N_SIGNALS": top_n_signals,
                         "LEVERAGE": leverage,
-                        "RISK_PCT": risk_pct,
-                        "MIN_SIGNAL_SCORE": min_signal_score,
-                        "ENTRY_BUFFER_PCT": entry_buffer_pct,
-                        "MIN_VOLUME": min_volume,
-                        "MIN_ATR_PCT": min_atr_pct
+                        "MAX_OPEN_POSITIONS": max_open_positions,
+                        "MIN_SIGNAL_SCORE": min_signal_score
                     })
                     if backend_settings.save_settings(new_settings):
                         st.success("✅ Trading parameters saved!")
@@ -283,7 +256,7 @@ def main():
                     else:
                         st.error("❌ Failed to save settings")
                 except Exception as e:
-                    st.error(f"Error saving settings: {e}")
+                    st.error(f"Error saving trading parameters: {e}")
                     logger.error(f"Error saving trading parameters: {e}", exc_info=True)
 
         with tab3:
@@ -292,57 +265,37 @@ def main():
             col1, col2 = st.columns(2)
 
             with col1:
-                max_loss_pct = st.number_input(
-                    "Max Loss % per Trade",
-                    min_value=-100.0,
-                    max_value=0.0,
-                    value=current_settings.get("MAX_LOSS_PCT", -15.0),
-                    step=1.0
-                )
-                tp_percent = st.number_input(
-                    "Take Profit %",
-                    min_value=0.0,
-                    value=current_settings.get("TP_PERCENT", 0.25),
-                    step=0.05
-                )
-                sl_percent = st.number_input(
-                    "Stop Loss %",
-                    min_value=0.0,
-                    value=current_settings.get("SL_PERCENT", 0.05),
-                    step=0.01
+                max_risk_per_trade = st.number_input(
+                    "Max Risk Per Trade (%)",
+                    min_value=0.01,
+                    max_value=10.0,
+                    value=current_settings.get("MAX_RISK_PER_TRADE", 0.05) * 100,
+                    step=0.1
+                ) / 100
+                max_daily_loss = st.number_input(
+                    "Max Daily Loss (USDT)",
+                    min_value=10.0,
+                    max_value=10000.0,
+                    value=current_settings.get("MAX_DAILY_LOSS", 1000.0),
+                    step=10.0
                 )
 
             with col2:
-                max_drawdown_pct = st.number_input(
-                    "Max Drawdown %",
-                    min_value=-100.0,
-                    max_value=0.0,
-                    value=current_settings.get("MAX_DRAWDOWN_PCT", -20.0),
-                    step=1.0
-                )
-                max_positions = st.number_input(
-                    "Max Open Positions",
-                    min_value=1,
-                    value=current_settings.get("MAX_POSITIONS", 10),
-                    step=1
-                )
-                max_spread_pct = st.number_input(
-                    "Max Spread %",
-                    min_value=0.0,
-                    value=current_settings.get("MAX_SPREAD_PCT", 0.1),
-                    step=0.01
+                max_position_size = st.number_input(
+                    "Max Position Size (USDT)",
+                    min_value=100.0,
+                    max_value=100000.0,
+                    value=current_settings.get("MAX_POSITION_SIZE", 10000.0),
+                    step=100.0
                 )
 
             if st.button("💾 Save Risk Settings", type="primary"):
                 try:
                     new_settings = current_settings.copy()
                     new_settings.update({
-                        "MAX_LOSS_PCT": max_loss_pct,
-                        "TP_PERCENT": tp_percent,
-                        "SL_PERCENT": sl_percent,
-                        "MAX_DRAWDOWN_PCT": max_drawdown_pct,
-                        "MAX_POSITIONS": max_positions,
-                        "MAX_SPREAD_PCT": max_spread_pct
+                        "MAX_RISK_PER_TRADE": max_risk_per_trade,
+                        "MAX_DAILY_LOSS": max_daily_loss,
+                        "MAX_POSITION_SIZE": max_position_size
                     })
                     if backend_settings.save_settings(new_settings):
                         st.success("✅ Risk settings saved!")
@@ -350,55 +303,87 @@ def main():
                     else:
                         st.error("❌ Failed to save settings")
                 except Exception as e:
-                    st.error(f"Error saving settings: {e}")
+                    st.error(f"Error saving risk settings: {e}")
                     logger.error(f"Error saving risk settings: {e}", exc_info=True)
 
-            st.subheader("💰 Capital Management")
+            st.markdown("### 💰 Capital Management")
             capital_data = load_capital_data()
 
-            with st.expander("Virtual Capital"):
-                virtual_capital = st.number_input(
-                    "Virtual Starting Balance (USDT)",
-                    min_value=0.0,
-                    value=capital_data.get("virtual", {}).get("start_balance", 100.0),
-                    step=10.0
-                )
+            # Virtual Capital
+            st.markdown("#### Virtual Account")
+            v_col1, v_col2, v_col3, v_col4 = st.columns(4)
+            v_col1.metric("Start Balance", format_currency_safe(capital_data.get("virtual", {}).get("start_balance", 100.0)))
+            v_col2.metric("Capital", format_currency_safe(capital_data.get("virtual", {}).get("capital", 100.0)))
+            v_col3.metric("Available", format_currency_safe(capital_data.get("virtual", {}).get("available", 100.0)))
+            v_col4.metric("Used", format_currency_safe(capital_data.get("virtual", {}).get("used", 0.0)))
 
-            with st.expander("Real Capital"):
-                st.info("Real balance is synced from Bybit. Manual edits are for simulation only.")
-                real_capital = st.number_input(
-                    "Real Starting Balance (USDT)",
-                    min_value=0.0,
-                    value=capital_data.get("real", {}).get("start_balance", 0.0),
-                    step=10.0,
-                    disabled=True  # Disable manual edit for real
-                )
+            # Real Capital
+            st.markdown("#### Real Account")
+            r_col1, r_col2, r_col3, r_col4 = st.columns(4)
+            r_col1.metric("Start Balance", format_currency_safe(capital_data.get("real", {}).get("start_balance", 0.0)))
+            r_col2.metric("Capital", format_currency_safe(capital_data.get("real", {}).get("capital", 0.0)))
+            r_col3.metric("Available", format_currency_safe(capital_data.get("real", {}).get("available", 0.0)))
+            r_col4.metric("Used", format_currency_safe(capital_data.get("real", {}).get("used", 0.0)))
 
-            if st.button("💾 Save Capital Settings"):
-                try:
-                    updated_capital = {
-                        "virtual": {
-                            "start_balance": virtual_capital,
-                            "capital": virtual_capital,
-                            "available": virtual_capital,
-                            "used": 0.0
-                        },
-                        "real": {
-                            "start_balance": real_capital,
-                            "capital": real_capital,
-                            "available": real_capital,
-                            "used": 0.0
-                        }
-                    }
-                    if save_capital_data(updated_capital):
-                        st.session_state.wallet_cache.clear()
-                        st.success("✅ Capital settings saved!")
-                        st.rerun()
-                    else:
-                        st.error("❌ Failed to save capital settings")
-                except Exception as e:
-                    st.error(f"Error saving capital settings: {e}")
-                    logger.error(f"Error saving capital settings: {e}", exc_info=True)
+            # Edit capital
+            with st.expander("✏️ Edit Capital"):
+                updated_capital = capital_data.copy()
+
+                v_edit_col1, v_edit_col2 = st.columns(2)
+                with v_edit_col1:
+                    st.markdown("**Virtual**")
+                    updated_capital["virtual"]["start_balance"] = st.number_input(
+                        "Virtual Start Balance",
+                        value=capital_data.get("virtual", {}).get("start_balance", 100.0)
+                    )
+                    updated_capital["virtual"]["capital"] = st.number_input(
+                        "Virtual Capital",
+                        value=capital_data.get("virtual", {}).get("capital", 100.0)
+                    )
+
+                with v_edit_col2:
+                    updated_capital["virtual"]["available"] = st.number_input(
+                        "Virtual Available",
+                        value=capital_data.get("virtual", {}).get("available", 100.0)
+                    )
+                    updated_capital["virtual"]["used"] = st.number_input(
+                        "Virtual Used",
+                        value=capital_data.get("virtual", {}).get("used", 0.0)
+                    )
+
+                r_edit_col1, r_edit_col2 = st.columns(2)
+                with r_edit_col1:
+                    st.markdown("**Real**")
+                    updated_capital["real"]["start_balance"] = st.number_input(
+                        "Real Start Balance",
+                        value=capital_data.get("real", {}).get("start_balance", 0.0)
+                    )
+                    updated_capital["real"]["capital"] = st.number_input(
+                        "Real Capital",
+                        value=capital_data.get("real", {}).get("capital", 0.0)
+                    )
+
+                with r_edit_col2:
+                    updated_capital["real"]["available"] = st.number_input(
+                        "Real Available",
+                        value=capital_data.get("real", {}).get("available", 0.0)
+                    )
+                    updated_capital["real"]["used"] = st.number_input(
+                        "Real Used",
+                        value=capital_data.get("real", {}).get("used", 0.0)
+                    )
+
+                if st.button("💾 Save Capital Settings"):
+                    try:
+                        if save_capital_data(updated_capital):
+                            st.session_state.wallet_cache.clear()
+                            st.success("✅ Capital settings saved!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to save capital settings")
+                    except Exception as e:
+                        st.error(f"Error saving capital settings: {e}")
+                        logger.error(f"Error saving capital settings: {e}", exc_info=True)
 
         with tab4:
             st.subheader("📢 Notification Channels")
@@ -554,6 +539,10 @@ def main():
         with info_col3:
             st.info(f"**Environment:** {'Production' if not os.getenv('BYBIT_MAINNET') else 'Live'}")
             st.info(f"**Version:** AlgoTrader Pro v1.0")
+
+        # Connection status
+        connection_status = "✅ Connected" if bybit_client and bybit_client.is_connected() else "❌ Disconnected"
+        st.metric("API Status", connection_status)
 
     except Exception as e:
         st.error(f"Settings page error: {e}")

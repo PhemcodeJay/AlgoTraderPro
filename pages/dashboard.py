@@ -190,12 +190,21 @@ def main():
                     'Side': s.get('side'),
                     'Entry': format_currency_safe(s.get('entry')),
                     'SL': format_currency_safe(s.get('sl')),
-                    'TP': format_currency_safe(s.get('tp'))
+                    'TP': format_currency_safe(s.get('tp')),
+                    'Market': s.get('market', 'N/A'),
+                    'Leverage': s.get('leverage', 10)
                 } for s in signals])
                 
                 st.dataframe(
                     signals_df.sort_values('Score', ascending=False),
-            
+                    column_config={
+                        "Score": st.column_config.NumberColumn(format="%.1f"),
+                        "Entry": st.column_config.NumberColumn(format="$ %.4f"),
+                        "SL": st.column_config.NumberColumn(format="$ %.4f"),
+                        "TP": st.column_config.NumberColumn(format="$ %.4f"),
+                        "Leverage": st.column_config.NumberColumn(format="%d x")
+                    },
+                    use_container_width=True
                 )
             else:
                 st.info("No signals available")
@@ -204,7 +213,7 @@ def main():
             st.subheader("Market Overview")
             market_fig = create_market_overview_chart()
             if market_fig:
-                st.plotly_chart(market_fig)
+                st.plotly_chart(market_fig, use_container_width=True)
             else:
                 st.info("No market data available")
             
@@ -216,12 +225,18 @@ def main():
                     'Entry': format_currency_safe(t.get('entry_price')),
                     'PnL': format_currency_safe(t.get('pnl')) if t.get('status') == 'closed' else 'Open',
                     'Status': t.get('status'),
-                    'Mode': 'Virtual' if t.get('virtual') else 'Real'
+                    'Mode': 'Virtual' if t.get('virtual') else 'Real',
+                    'Timestamp': t.get('timestamp')[:19] if t.get('timestamp') else 'N/A'
                 } for t in trades])
                 
                 st.dataframe(
                     trades_df.sort_values('Status', ascending=False),
-            
+                    column_config={
+                        "Entry": st.column_config.NumberColumn(format="$ %.4f"),
+                        "PnL": st.column_config.NumberColumn(format="$ %.2f"),
+                        "Timestamp": st.column_config.DateColumn(format="YYYY-MM-DD HH:mm:ss")
+                    },
+                    use_container_width=True
                 )
             else:
                 st.info("No trades available")
@@ -231,13 +246,13 @@ def main():
             
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Trades", portfolio_metrics.get('total_trades', 0))
-            col2.metric("Win Rate", f"{portfolio_metrics.get('win_rate', 0)}%")
-            col3.metric("Total PnL", f"${portfolio_metrics.get('total_pnl', 0):.2f}")
-            col4.metric("Avg PnL/Trade", f"${portfolio_metrics.get('avg_pnl', 0):.2f}")
+            col2.metric("Win Rate", f"{portfolio_metrics.get('win_rate', 0):.1f}%")
+            col3.metric("Total PnL", f"${format_currency_safe(portfolio_metrics.get('total_pnl', 0))}")
+            col4.metric("Avg PnL/Trade", f"${format_currency_safe(portfolio_metrics.get('avg_pnl', 0))}")
             
             portfolio_fig = create_portfolio_chart(engine)
             if portfolio_fig:
-                st.plotly_chart(portfolio_fig)
+                st.plotly_chart(portfolio_fig, use_container_width=True)
             else:
                 st.info("No portfolio data available")
             
@@ -256,18 +271,29 @@ def main():
                         status = trade.get("status", "N/A")
                         
                         # Safe formatting
-                        entry_str = f"${float(entry_price):.4f}" if entry_price is not None else "$0.0000"
-                        pnl_str = f"${float(pnl):.2f}" if pnl is not None else "Open"
+                        entry_str = f"${format_currency_safe(entry_price)}"
+                        pnl_str = f"${format_currency_safe(pnl)}" if pnl is not None else "Open"
                         status_str = str(status).title() if status is not None else "N/A"
+                        timestamp_str = trade.get('timestamp')[:19] if trade.get('timestamp') else 'N/A'
                         
                         vt_data.append({
                             "Symbol": trade.get("symbol", "N/A"),
                             "Side": trade.get("side", "N/A"),
                             "Entry": entry_str,
                             "PnL": pnl_str,
-                            "Status": status_str
+                            "Status": status_str,
+                            "Timestamp": timestamp_str
                         })
-                    st.dataframe(pd.DataFrame(vt_data), height=200)
+                    st.dataframe(
+                        pd.DataFrame(vt_data),
+                        column_config={
+                            "Entry": st.column_config.NumberColumn(format="$ %.4f"),
+                            "PnL": st.column_config.NumberColumn(format="$ %.2f"),
+                            "Timestamp": st.column_config.DateColumn(format="YYYY-MM-DD HH:mm:ss")
+                        },
+                        height=200,
+                        use_container_width=True
+                    )
                 else:
                     st.info("No virtual trades")
             
@@ -283,18 +309,29 @@ def main():
                         status = trade.get("status", "N/A")
                         
                         # Safe formatting
-                        entry_str = f"${float(entry_price):.4f}" if entry_price is not None else "$0.0000"
-                        pnl_str = f"${float(pnl):.2f}" if pnl is not None else "Open"
+                        entry_str = f"${format_currency_safe(entry_price)}"
+                        pnl_str = f"${format_currency_safe(pnl)}" if pnl is not None else "Open"
                         status_str = str(status).title() if status is not None else "N/A"
+                        timestamp_str = trade.get('timestamp')[:19] if trade.get('timestamp') else 'N/A'
                         
                         rt_data.append({
                             "Symbol": trade.get("symbol", "N/A"),
                             "Side": trade.get("side", "N/A"),
                             "Entry": entry_str,
                             "PnL": pnl_str,
-                            "Status": status_str
+                            "Status": status_str,
+                            "Timestamp": timestamp_str
                         })
-                    st.dataframe(pd.DataFrame(rt_data), height=200)
+                    st.dataframe(
+                        pd.DataFrame(rt_data),
+                        column_config={
+                            "Entry": st.column_config.NumberColumn(format="$ %.4f"),
+                            "PnL": st.column_config.NumberColumn(format="$ %.2f"),
+                            "Timestamp": st.column_config.DateColumn(format="YYYY-MM-DD HH:mm:ss")
+                        },
+                        height=200,
+                        use_container_width=True
+                    )
                 else:
                     st.info("No real trades")
         
