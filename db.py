@@ -114,7 +114,11 @@ class WalletBalance:
 class SignalModel(Base):
     __tablename__ = 'signals'
     
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4  # 👈 auto-generate UUID
+    )
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
     interval: Mapped[str] = mapped_column(String(10), nullable=False)
     signal_type: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -134,7 +138,7 @@ class SignalModel(Base):
 
     def to_signal(self) -> Signal:
         return Signal(
-            id=str(self.id) if self.id is not None else None,  # ✅ Cast int → str
+            id=str(self.id) if self.id else None, # ✅ Cast int → str
             symbol=self.symbol,
             interval=self.interval,
             signal_type=self.signal_type,
