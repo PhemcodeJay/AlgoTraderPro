@@ -28,7 +28,6 @@ def initialize_session_state():
         "trading_mode": "virtual",
         "engine_initialized": False,
         "wallet_cache": {},
-        "bybit_client": None,
         "engine": None,
         "trading_task": None,
         "trader_status": None
@@ -51,77 +50,30 @@ async def initialize_engine():
         logger.error(f"Engine initialization failed: {e}", exc_info=True)
         return False
 
-# --- Initialize Bybit client ---
-def initialize_bybit():
-    try:
-        if st.session_state.bybit_client is None:
-            st.session_state.bybit_client = BybitClient()
-            if st.session_state.bybit_client.is_connected():
-                logger.info("Bybit client connected successfully")
-            else:
-                st.warning("Bybit client connection failed. Check API keys.")
-                logger.error("Bybit client connection test failed")
-    except Exception as e:
-        st.warning(f"Failed to initialize Bybit client: {e}")
-        logger.error(f"Bybit client initialization failed: {e}", exc_info=True)
-
 # --- Fetch wallet balance ---
 def get_wallet_balance() -> dict:
     """
-    Fetch wallet balance based on the selected trading mode.
-    Returns a dict with capital, available, and used balances.
-    Always safe, fallback to defaults.
+    Fetch wallet balance based on the selected trading mode from DB only.
+    Returns a dict with capital, available, used, and updated_at.
+    Always safe, fallback to defaults. No auto-sync.
     """
     mode = st.session_state.trading_mode
-    default_virtual = {"capital": 100.0, "available": 100.0, "used": 0.0}
-    default_real = {"capital": 0.0, "available": 0.0, "used": 0.0}
+    default_virtual = {"capital": 100.0, "available": 100.0, "used": 0.0, "updated_at": None}
+    default_real = {"capital": 0.0, "available": 0.0, "used": 0.0, "updated_at": None}
 
     # Check cache
     if mode in st.session_state.wallet_cache:
         logger.info(f"Returning cached {mode} balance: {st.session_state.wallet_cache[mode]}")
         return st.session_state.wallet_cache[mode]
 
-    balance_data = default_virtual if mode == "virtual" else default_real
     try:
-        if mode == "virtual":
-            wallet = db_manager.get_wallet_balance("virtual")
-            if wallet:
-                balance_data = {
-                    "capital": getattr(wallet, "capital", default_virtual["capital"]),
-                    "available": getattr(wallet, "available", default_virtual["available"]),
-                    "used": getattr(wallet, "used", default_virtual["used"])
-                }
-                logger.info(f"Fetched virtual wallet balance: {balance_data}")
-        else:  # real mode
-            initialize_bybit()
-            client = st.session_state.bybit_client
-            if client and client.is_connected():
-                # Sync real balance with Bybit
-                sync_real_wallet_balance(client)
-                wallet = db_manager.get_wallet_balance("real")
-                if wallet:
-                    balance_data = {
-                        "capital": getattr(wallet, "capital", default_real["capital"]),
-                        "available": getattr(wallet, "available", default_real["available"]),
-                        "used": getattr(wallet, "used", default_real["used"])
-                    }
-                    logger.info(
-                        f"Fetched real wallet balance after sync: capital=${balance_data['capital']:.2f}, "
-                        f"available=${balance_data['available']:.2f}, used=${balance_data['used']:.2f}"
-                    )
-                else:
-                    logger.warning("Failed to retrieve real balance after sync")
-                    st.error("❌ Failed to retrieve real balance. Check Bybit account or API permissions.")
-            else:
-                wallet = db_manager.get_wallet_balance("real")
-                if wallet:
-                    balance_data = {
-                        "capital": getattr(wallet, "capital", default_real["capital"]),
-                        "available": getattr(wallet, "available", default_real["available"]),
-                        "used": getattr(wallet, "used", default_real["used"])
-                    }
-                    logger.warning(f"Bybit client not connected, using DB real balance: {balance_data}")
-                st.warning("Bybit API not connected. Check API keys in .env file.")
+        wallet = db_manager.get_wallet_balance(mode)
+        if wallet:
+            balance_data = wallet.to_dict()
+            logger.info(f"Fetched {mode} wallet balance: {balance_data}")
+        else:
+            balance_data = default_virtual if mode == "virtual" else default_real
+            logger.warning(f"No {mode} wallet found in DB, using defaults")
     except Exception as e:
         logger.error(f"Error fetching {mode} wallet: {e}", exc_info=True)
         balance_data = default_virtual if mode == "virtual" else default_real
@@ -134,7 +86,7 @@ def get_wallet_balance() -> dict:
     if mode == "real":
         if balance_data["available"] == 0.0 and balance_data["capital"] > 0.0:
             st.info("Real available balance is $0.00. Funds may be in use (e.g., open positions).")
-        elif balance_data["available"] == 0.0 and balance_data["capital"] == 0.0 and st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
+        elif balance_data["available"] == 0.0 and balance_data["capital"] == 0.0:
             st.warning("No funds available in Bybit account. Verify account balance or API permissions.")
 
     return balance_data
@@ -165,7 +117,7 @@ def main():
     # --- Logo Row ---
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image("logo.png", width=150)
+        st.image("logo.png", width=100)
 
     # Header
     st.markdown(f"""
@@ -204,13 +156,6 @@ def main():
             db_manager.save_setting("trading_mode", st.session_state.trading_mode)
             st.session_state.wallet_cache.clear()
             logger.info(f"Switched to {st.session_state.trading_mode} mode, cleared cache")
-
-            # Sync real balance if switching to real mode
-            if st.session_state.trading_mode == "real":
-                initialize_bybit()
-                if st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
-                    sync_real_wallet_balance(st.session_state.bybit_client)
-                    logger.info("Real balance synced after mode switch")
             st.rerun()
 
         # Status
@@ -220,8 +165,7 @@ def main():
         st.markdown(f"**Trading Mode:** {mode_color} {st.session_state.trading_mode.title()}")
 
         # API Connection Status
-        initialize_bybit()
-        api_status = "✅ Connected" if st.session_state.bybit_client and st.session_state.bybit_client.is_connected() else "❌ Disconnected"
+        api_status = "✅ Connected" if st.session_state.engine and st.session_state.engine.client and st.session_state.engine.client.is_connected() else "❌ Disconnected"
         st.markdown(f"**API Status:** {api_status}")
 
         # Trader Status
@@ -251,14 +195,30 @@ def main():
 
         # Wallet Balance
         balance_data = get_wallet_balance()
+        last_synced = balance_data.get("updated_at")
+        if last_synced:
+            last_synced = datetime.fromisoformat(last_synced).strftime('%Y-%m-%d %H:%M:%S') + " UTC"
+        else:
+            last_synced = "Never"
+        help_text = f"Last synced: {last_synced}"
         if st.session_state.trading_mode == "virtual":
             st.metric("💻 Virtual Capital", f"${balance_data['capital']:.2f}")
             st.metric("💻 Virtual Available", f"${balance_data['available']:.2f}")
             st.metric("💻 Virtual Used", f"${balance_data['used']:.2f}")
         else:
-            st.metric("🏦 Real Capital", f"${balance_data['capital']:.2f}")
-            st.metric("🏦 Real Available", f"${balance_data['available']:.2f}")
-            st.metric("🏦 Real Used Margin", f"${balance_data['used']:.2f}")
+            st.metric("🏦 Real Capital", f"${balance_data['capital']:.2f}", help=help_text)
+            st.metric("🏦 Real Available", f"${balance_data['available']:.2f}", help=help_text)
+            st.metric("🏦 Real Used Margin", f"${balance_data['used']:.2f}", help=help_text)
+
+        # Sync button for real mode
+        if st.session_state.trading_mode == "real":
+            if st.button("🔄 Sync Real Balance"):
+                if st.session_state.engine and st.session_state.engine.client:
+                    sync_real_wallet_balance(st.session_state.engine.client)
+                    st.session_state.wallet_cache.clear()
+                    st.rerun()
+                else:
+                    st.error("Engine not initialized")
 
         # Last updated
         st.markdown(
