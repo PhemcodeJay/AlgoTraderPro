@@ -322,7 +322,11 @@ class BybitClient:
                     }
                 )
                 
-                return data.get("result", {})
+                # --- 🔧 Normalized return ---
+                result = data.get("result", {})
+                if isinstance(result, dict) and "list" in result:
+                    return result["list"]
+                return result
                 
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 self.failed_requests += 1

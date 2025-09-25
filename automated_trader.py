@@ -3,6 +3,7 @@ from dataclasses import asdict
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
+from blinker import signal
 from sqlalchemy import update
 from engine import TradingEngine
 from bybit_client import BybitClient
@@ -223,9 +224,23 @@ class AutomatedTrader:
                 logger.warning("Signal missing symbol")
                 return
 
-            # Validate symbol exists and is tradable (USDT perpetual futures)
-            ticker_info = self.client._make_request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol})
-            if not ticker_info or "result" not in ticker_info or not ticker_info["result"].get("list"):
+            # ✅ Force check from instruments-info (linear = USDT Perpetual Futures)
+            symbol_info = {}
+            try:
+                result = self.client._make_request(
+                    "GET",
+                    "/v5/market/instruments-info",
+                    {"category": "linear", "symbol": symbol}
+                )
+                if isinstance(result, list) and result:
+                    symbol_info = result[0]
+                elif isinstance(result, dict) and "list" in result and result["list"]:
+                    symbol_info = result["list"][0]
+            except Exception as e:
+                logger.error(f"Failed to fetch instruments-info for {symbol}: {e}")
+                symbol_info = {}
+
+            if not symbol_info:
                 logger.warning(f"Symbol {symbol} not found or not tradable in futures")
                 return
 
@@ -247,7 +262,6 @@ class AutomatedTrader:
             if trading_mode == "real":
                 available_balance = 0.0
                 try:
-                    # Fetch unified wallet balance (covers futures)
                     result = self.client._make_request(
                         "GET",
                         "/v5/account/wallet-balance",
@@ -259,7 +273,7 @@ class AutomatedTrader:
                         available_balance = float(account_info.get("totalAvailableBalance", 0.0))
                         logger.info(f"Fetched UNIFIED balance for {symbol}: Available={available_balance:.2f}")
                     else:
-                        logger.warning(f"No UNIFIED wallet data returned")
+                        logger.warning("No UNIFIED wallet data returned")
 
                 except Exception as e:
                     logger.error(f"Failed to fetch UNIFIED wallet balance for {symbol}: {e}")
@@ -291,22 +305,22 @@ class AutomatedTrader:
                 # Ensure required margin <= available
                 required_margin = (position_size * entry_price) / self.leverage
                 if required_margin > available_balance:
-                    logger.warning(f"Insufficient balance for {symbol}: Required={required_margin:.2f}, Available={available_balance:.2f}")
+                    logger.warning(
+                        f"Insufficient balance for {symbol}: Required={required_margin:.2f}, Available={available_balance:.2f}"
+                    )
                     return
 
-                # Validate against symbol rules
-                symbol_info = self.engine.get_symbol_info(symbol)
-                if symbol_info:
-                    lot_size_filter = symbol_info.get("lotSizeFilter", {})
-                    min_qty = float(lot_size_filter.get("minOrderQty", 0))
-                    qty_step = float(lot_size_filter.get("qtyStep", 0))
+                # ✅ Use previously fetched symbol_info to validate filters
+                lot_size_filter = symbol_info.get("lotSizeFilter", {})
+                min_qty = float(lot_size_filter.get("minOrderQty", 0))
+                qty_step = float(lot_size_filter.get("qtyStep", 0))
 
-                    if position_size < min_qty:
-                        logger.info(f"Skipped trade for {symbol}: position size {position_size} < min {min_qty}")
-                        return
+                if position_size < min_qty:
+                    logger.info(f"Skipped trade for {symbol}: position size {position_size} < min {min_qty}")
+                    return
 
-                    if qty_step > 0:
-                        position_size = (position_size // qty_step) * qty_step
+                if qty_step > 0:
+                    position_size = (position_size // qty_step) * qty_step
 
                 # Set isolated margin mode for futures
                 try:
@@ -369,8 +383,10 @@ class AutomatedTrader:
             trade_dict = asdict(trade)
             if self.db.add_trade(trade_dict):
                 self.stats["trades_executed"] += 1
-                logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}, Futures ISOLATED",
-                            extra={"order_id": trade_dict["order_id"], "qty": position_size})
+                logger.info(
+                    f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}, Futures ISOLATED",
+                    extra={"order_id": trade_dict["order_id"], "qty": position_size}
+                )
 
                 # Save signal to DB
                 signal_obj = Signal(

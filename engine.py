@@ -211,19 +211,19 @@ class TradingEngine:
         ])
 
     def get_symbol_info(self, symbol: str) -> Dict:
-        """Get symbol information (e.g., lot size)"""
+        """Get symbol information (e.g., lot size, price filters)"""
         try:
-            result = self.client._make_request("GET", "/v5/market/instruments-info", {
-                "category": "linear",
-                "symbol": symbol
-            })
-            if result and "list" in result and result["list"]:
-                return result["list"][0]
-            return {}
+            result = self.client._make_request(
+                "GET",
+                "/v5/market/instruments-info",
+                {"category": "linear", "symbol": symbol}
+            )
+            # result is already a list (thanks to _make_request normalization)
+            return result[0] if result else {}
         except Exception as e:
             logger.error(f"Error getting symbol info for {symbol}: {e}")
             return {}
-    
+
     def calculate_position_size(
         self,
         symbol: str,
