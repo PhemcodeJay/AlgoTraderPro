@@ -187,8 +187,8 @@ class AutomatedTrader:
                 logger.info(f"Max positions reached: {current_positions}/{self.max_positions}")
                 return
             
-            # Get symbols to scan
-            symbols = get_usdt_symbols()
+            # Get symbols to scan (use valid futures symbols from engine)
+            symbols = self.engine.get_usdt_symbols()
             
             # Generate signals
             signals = generate_signals(
@@ -316,7 +316,7 @@ class AutomatedTrader:
                         {
                             "category": "linear",
                             "symbol": symbol,
-                            "tradeMode": 2,  # 2 = Isolated Margin
+                            "tradeMode": 1,  # 1 = Isolated Margin (corrected from 2)
                             "buyLeverage": str(self.leverage),
                             "sellLeverage": str(self.leverage)
                         }
@@ -481,11 +481,36 @@ class AutomatedTrader:
             pnl = self.engine.calculate_virtual_pnl(trade_dict)
             
             if trading_mode == "real":
-                # Cancel order on Bybit if still open
-                if trade.order_id:
+                # First, check and cancel open order if exists
+                open_orders = self.client.get_open_orders(trade.symbol)
+                order_exists = any(o["order_id"] == trade.order_id for o in open_orders)
+                if order_exists:
                     success = await self.client.cancel_order(trade.symbol, trade.order_id)
                     if not success:
                         logger.warning(f"Failed to cancel order {trade.order_id} for {trade.symbol}")
+                
+                # Then, check and close position if exists
+                positions = self.client.get_positions(trade.symbol)
+                if positions:
+                    pos = positions[0]
+                    close_side = "Sell" if pos["side"] == "Buy" else "Buy"
+                    # Place a market order to close the position
+                    close_result = await self.client.place_order(
+                        symbol=trade.symbol,
+                        side=close_side,
+                        qty=pos["size"],
+                        stop_loss=0,  # No SL for closing order
+                        take_profit=0,  # No TP for closing order
+                        leverage=pos["leverage"],
+                        mode="ISOLATED"
+                    )
+                    if "order_id" not in close_result:
+                        logger.error(f"Failed to close position for {trade.symbol}: {close_result}")
+                        return
+                    # Wait briefly to ensure order is processed
+                    await asyncio.sleep(1)
+                    # Recalculate pnl after close (approximate)
+                    pnl = self.engine.calculate_virtual_pnl(trade_dict)
             
             # Update trade in database
             success = False
@@ -521,7 +546,7 @@ class AutomatedTrader:
                 
         except Exception as e:
             logger.error(f"Error closing trade {trade.order_id}: {e}", exc_info=True)
-
+            
     def get_performance_summary(self) -> Dict[str, Any]:
         """Get performance summary"""
         try:
