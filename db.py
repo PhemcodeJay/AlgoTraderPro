@@ -67,6 +67,8 @@ class Trade:
     order_id: str
     virtual: bool = True
     status: str = "open"
+    sl: Optional[float] = None
+    tp: Optional[float] = None
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
     score: Optional[float] = None
@@ -161,7 +163,11 @@ class SignalModel(Base):
 class TradeModel(Base):
     __tablename__ = 'trades'
     
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4  # 👈 auto-generate UUID
+    )
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
     side: Mapped[str] = mapped_column(String(10), nullable=False)
     qty: Mapped[float] = mapped_column(Float, nullable=False)
@@ -169,6 +175,8 @@ class TradeModel(Base):
     order_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     virtual: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(20), default="open")
+    sl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tp: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -188,6 +196,8 @@ class TradeModel(Base):
             virtual=self.virtual,
             status=self.status,
             exit_price=self.exit_price,
+            sl=self.sl,
+            tp=self.tp,
             pnl=self.pnl,
             score=self.score,
             strategy=self.strategy,
@@ -459,6 +469,8 @@ class DatabaseManager:
                 virtual=trade.get('virtual', True),
                 status=trade.get('status', 'open'),
                 exit_price=trade.get('exit_price'),
+                sl=trade.get('sl'),
+                tp=trade.get('tp'),
                 pnl=trade.get('pnl'),
                 score=trade.get('score'),
                 strategy=trade.get('strategy', 'Manual'),
@@ -682,6 +694,30 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Unexpected error getting setting {key}: {str(e)}")
             return None
+
+    def get_open_trades(self, virtual: bool) -> List[Trade]:
+        """Retrieve open trades from the database, filtered by virtual or real mode."""
+        try:
+            if not self.session:
+                logger.error("Database session not initialized")
+                return []
+            
+            # Query trades with status 'open' and matching virtual flag
+            trades = self.session.execute(
+                select(TradeModel).where(
+                    TradeModel.status == "open",
+                    TradeModel.virtual == virtual
+                )
+            ).scalars().all()
+            
+            # Convert to Trade objects
+            result = [Trade.from_orm(trade) for trade in trades]
+            logger.info(f"Retrieved {len(result)} open {'virtual' if virtual else 'real'} trades")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error retrieving open trades: {e}", exc_info=True)
+            return []
 
     def close(self):
         """Close database connection"""

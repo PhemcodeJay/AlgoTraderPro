@@ -435,25 +435,68 @@ def main():
         with tab4:
             st.subheader("🔑 API Configuration")
 
-            st.warning("⚠️ API keys are managed through environment variables for security")
-
             col1, col2 = st.columns(2)
 
+            # ---------------- LEFT SIDE: API INPUTS + STATUS ----------------
             with col1:
                 st.markdown("### 📡 Bybit API")
-                api_key_status = "✅ Configured" if os.getenv("BYBIT_API_KEY") else "❌ Not Set"
+
+                # Current env/session values
+                current_key = os.getenv("BYBIT_API_KEY", st.session_state.get("BYBIT_API_KEY", ""))
+                current_secret = os.getenv("BYBIT_API_SECRET", st.session_state.get("BYBIT_API_SECRET", ""))
+                current_mainnet = os.getenv("BYBIT_MAINNET", "false").lower() == "true"
+                current_account_type = os.getenv("BYBIT_ACCOUNT_TYPE", st.session_state.get("BYBIT_ACCOUNT_TYPE", "UNIFIED"))
+
+                # ✅ / ❌ Status
+                api_key_status = "✅ Configured" if current_key else "❌ Not Set"
                 st.metric("API Key", api_key_status)
-                secret_status = "✅ Configured" if os.getenv("BYBIT_API_SECRET") else "❌ Not Set"
+
+                secret_status = "✅ Configured" if current_secret else "❌ Not Set"
                 st.metric("API Secret", secret_status)
-                mainnet_mode = os.getenv("BYBIT_MAINNET", "false").lower() == "true"
-                mode_text = "🧪 Mainnet" if mainnet_mode else "🔴 Testnet"
+
+                mode_text = "🧪 Mainnet" if current_mainnet else "🔴 Testnet"
                 st.metric("Trading Mode", mode_text)
 
+                # Editable inputs
+                api_key = st.text_input("Update API Key", value=current_key, type="password")
+                api_secret = st.text_input("Update API Secret", value=current_secret, type="password")
+
+                mainnet_mode = st.radio(
+                    "Trading Mode",
+                    options=[True, False],
+                    index=0 if current_mainnet else 1,
+                    format_func=lambda x: "🧪 Mainnet" if x else "🔴 Testnet"
+                )
+
+                account_type = st.selectbox(
+                    "Account Type",
+                    ["UNIFIED", "CONTRACT", "SPOT"],
+                    index=["UNIFIED", "CONTRACT", "SPOT"].index(current_account_type)
+                )
+
+                if st.button("💾 Save Keys"):
+                    st.session_state["BYBIT_API_KEY"] = api_key
+                    st.session_state["BYBIT_API_SECRET"] = api_secret
+                    st.session_state["BYBIT_MAINNET"] = mainnet_mode
+                    st.session_state["BYBIT_ACCOUNT_TYPE"] = account_type
+                    st.success("✅ API keys saved in session")
+
+            # ---------------- RIGHT SIDE: CONNECTION STATUS ----------------
             with col2:
                 st.markdown("### 🔗 Connection Status")
+
                 if st.button("🔍 Test API Connection"):
                     with st.spinner("Testing connection..."):
                         try:
+                            # Set env vars from session or inputs
+                            os.environ["BYBIT_API_KEY"] = api_key
+                            os.environ["BYBIT_API_SECRET"] = api_secret
+                            os.environ["BYBIT_ACCOUNT_TYPE"] = account_type
+                            os.environ["BYBIT_MAINNET"] = "true" if mainnet_mode else "false"
+
+                            # Recreate client with new values
+                            bybit_client = BybitClient()
+
                             connection_ok = bybit_client._test_connection()
                             if connection_ok:
                                 st.success("✅ API connection successful!")
