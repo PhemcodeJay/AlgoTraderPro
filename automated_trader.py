@@ -266,6 +266,11 @@ class AutomatedTrader:
                     available_balance = 0.0
 
             else:
+                # Ensure session is valid for virtual mode
+                if not self.db.session:
+                    logger.warning("Database session is None, reinitializing")
+                    self.db._get_session()
+                
                 wallet_balance = self.db.get_wallet_balance("virtual")
                 available_balance = getattr(wallet_balance, "available", 0.0) if wallet_balance else 0.0
 
@@ -316,7 +321,7 @@ class AutomatedTrader:
                         {
                             "category": "linear",
                             "symbol": symbol,
-                            "tradeMode": 1,  # 1 = Isolated Margin (corrected from 2)
+                            "tradeMode": 1,  # 1 = Isolated Margin
                             "buyLeverage": str(self.leverage),
                             "sellLeverage": str(self.leverage)
                         }
@@ -349,7 +354,23 @@ class AutomatedTrader:
                     return
 
                 order_id = order_result["order_id"]
-                entry_price = order_result.get("price", entry_price)
+                
+                # Wait for order to fill and confirm position
+                await asyncio.sleep(2)  # Give time for execution
+                
+                positions = self.client.get_positions(symbol)
+                if not positions or positions[0]["size"] == 0:
+                    logger.error(f"Failed to open position for {symbol} after order {order_id}")
+                    return
+                
+                pos = positions[0]
+                if pos["side"].upper() != side.upper():
+                    logger.error(f"Position side mismatch for {symbol}: expected {side}, got {pos['side']}")
+                    return
+                
+                position_size = pos["size"]  # Actual filled qty
+                entry_price = pos["entry_price"]  # Actual avg entry price
+                self.leverage = pos["leverage"]  # Update if needed
 
             # Save trade
             trade = Trade(
@@ -367,6 +388,10 @@ class AutomatedTrader:
             )
 
             trade_dict = asdict(trade)
+            if not self.db.session:
+                logger.warning("Database session is None, reinitializing")
+                self.db._get_session()
+            
             if self.db.add_trade(trade_dict):
                 self.stats["trades_executed"] += 1
                 logger.info(f"Automated trade executed: {symbol} {side} @ {entry_price}, Mode: {trading_mode}, Futures ISOLATED",
@@ -394,12 +419,20 @@ class AutomatedTrader:
                 self.db.add_signal(signal_obj)
             else:
                 logger.error(f"Failed to save trade for {symbol} in database")
+                if self.db.session:
+                    self.db.session.rollback()
 
         except Exception as e:
             logger.error(f"Error executing signal for {symbol}: {e}", exc_info=True)
+            if self.db.session:
+                self.db.session.rollback()
 
     def _get_open_trades(self, trading_mode: Optional[str] = None) -> List[Trade]:
         """Get open trades, optionally filtered by mode"""
+        if not self.db.session:
+            logger.warning("Database session is None, reinitializing")
+            self.db._get_session()
+        
         trades = self.db.get_trades(limit=100)  # Adjust limit as needed
         open_trades = [t for t in trades if t.status == "open"]
 
@@ -415,6 +448,65 @@ class AutomatedTrader:
         try:
             open_trades = self._get_open_trades(trading_mode)
             
+            if trading_mode == "real":
+                # Ensure database session is initialized
+                session = self.db.session
+                if session is None:
+                    logger.warning("Database session is None, reinitializing")
+                    self.db._get_session()
+                    session = self.db.session
+                if session is None:
+                    raise ValueError("Failed to initialize database session")
+                
+                # Sync closed positions for real mode
+                bybit_positions = self.client.get_positions()
+                pos_symbols = {p["symbol"] for p in bybit_positions if p["size"] > 0}
+                
+                for trade in open_trades:
+                    if trade.symbol not in pos_symbols:
+                        # Position closed externally (e.g., by TP/SL)
+                        try:
+                            # Fetch recent closed PnL records starting from trade timestamp
+                            start_time_ms = int(trade.timestamp.timestamp() * 1000)
+                            pnl_params = {
+                                "category": "linear",
+                                "symbol": trade.symbol,
+                                "startTime": start_time_ms,
+                                "limit": 1
+                            }
+                            closed_pnl = self.client._make_request("GET", "/v5/position/closed-pnl", pnl_params)
+                            
+                            if closed_pnl and "list" in closed_pnl and closed_pnl["list"]:
+                                pnl_info = closed_pnl["list"][0]
+                                exit_price = float(pnl_info.get("avgExitPrice", 0))
+                                pnl = float(pnl_info.get("closedPnl", 0))
+                                closed_at = datetime.fromtimestamp(int(pnl_info["updatedTime"]) / 1000, timezone.utc)
+                                
+                                # Update trade in DB
+                                session.execute(
+                                    update(TradeModel)
+                                    .where(TradeModel.order_id == trade.order_id)
+                                    .values(
+                                        status="closed",
+                                        exit_price=exit_price,
+                                        pnl=pnl,
+                                        closed_at=closed_at
+                                    )
+                                )
+                                session.commit()
+                                
+                                logger.info(f"Synced externally closed trade {trade.order_id}: PnL {pnl:.2f}")
+                                
+                                # Sync balance
+                                self.engine.sync_real_balance()
+                            else:
+                                logger.warning(f"No closed PnL found for {trade.symbol} since {trade.timestamp}")
+                                
+                        except Exception as e:
+                            logger.error(f"Error syncing closed trade {trade.order_id}: {e}", exc_info=True)
+                            session.rollback()
+            
+            # Monitor open trades
             for trade in open_trades:
                 try:
                     await self._check_trade_exit(trade, trading_mode)
@@ -423,9 +515,15 @@ class AutomatedTrader:
                     
         except Exception as e:
             logger.error(f"Error monitoring positions: {e}", exc_info=True)
+            if self.db.session:
+                self.db.session.rollback()
 
     async def _check_trade_exit(self, trade: Trade, trading_mode: str):
         """Check if trade should be closed"""
+        if trading_mode == "real":
+            # For real trades, skip manual exit checks as TP/SL are handled by Bybit
+            return
+        
         try:
             symbol = trade.symbol
             current_price = self.client.get_current_price(symbol)
@@ -473,9 +571,13 @@ class AutomatedTrader:
     async def _close_trade(self, trade: Trade, exit_price: float, reason: str, trading_mode: str):
         """Close a trade"""
         try:
-            if not self.db.session:
-                logger.error("Database session not initialized")
-                return
+            session = self.db.session
+            if session is None:
+                logger.warning("Database session is None, reinitializing")
+                self.db._get_session()
+                session = self.db.session
+            if session is None:
+                raise ValueError("Failed to initialize database session")
             
             trade_dict = asdict(trade)
             pnl = self.engine.calculate_virtual_pnl(trade_dict)
@@ -515,7 +617,7 @@ class AutomatedTrader:
             # Update trade in database
             success = False
             try:
-                self.db.session.execute(
+                session.execute(
                     update(TradeModel)
                     .where(TradeModel.order_id == trade.order_id)
                     .values(
@@ -525,11 +627,11 @@ class AutomatedTrader:
                         closed_at=datetime.now(timezone.utc)
                     )
                 )
-                self.db.session.commit()
+                session.commit()
                 success = True
             except Exception as e:
-                self.db.session.rollback()
                 logger.error(f"Database error updating trade {trade.order_id}: {e}", exc_info=True)
+                session.rollback()
             
             if success:
                 # Update statistics
@@ -546,6 +648,8 @@ class AutomatedTrader:
                 
         except Exception as e:
             logger.error(f"Error closing trade {trade.order_id}: {e}", exc_info=True)
+            if self.db.session:
+                self.db.session.rollback()
             
     def get_performance_summary(self) -> Dict[str, Any]:
         """Get performance summary"""
