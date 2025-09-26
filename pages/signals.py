@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db import db_manager
 from indicators import get_candles
 from signal_generator import generate_signals, get_usdt_symbols, analyze_single_symbol
-from notification_pdf import send_all_notifications
+from notifications import send_all_notifications
 from engine import TradingEngine
 
 # Configure logging

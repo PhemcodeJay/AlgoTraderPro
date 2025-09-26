@@ -513,7 +513,7 @@ def main():
                 st.metric("Discord Webhook", discord_status)
                 if st.button("📤 Test Discord"):
                     try:
-                        from notification_pdf import send_discord
+                        from notifications import send_discord
                         test_signal = [{
                             'Symbol': 'BTCUSDT',
                             'Type': 'Buy',
@@ -543,7 +543,7 @@ def main():
                 st.metric("Telegram Bot", telegram_status)
                 if st.button("📤 Test Telegram"):
                     try:
-                        from notification_pdf import send_telegram
+                        from notifications import send_telegram
                         test_signal = [{
                             'Symbol': 'BTCUSDT',
                             'Type': 'Buy',

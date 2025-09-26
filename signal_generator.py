@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 from datetime import datetime, timezone
 from indicators import scan_multiple_symbols, get_top_symbols
 from ml import MLFilter
-from notification_pdf import send_all_notifications
+from notifications import send_all_notifications
 
 from db import Signal, db_manager
 
