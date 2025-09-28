@@ -17,21 +17,21 @@ from notifications import send_all_notifications
 from engine import TradingEngine
 
 # Configure logging
-# Logging using centralized system
 from logging_config import get_logger
 logger = get_logger(__name__)
-
 
 st.set_page_config(page_title="Signals - AlgoTrader Pro", page_icon="🎯", layout="wide")
 
 def create_signal_chart(signal_data):
-    """Create a candlestick chart with entry, TP, and SL lines"""
+    """Create a candlestick chart with entry, TP, SL, trail, and liquidation lines"""
     try:
         symbol = signal_data.get('Symbol', signal_data.get('symbol', 'BTCUSDT'))
         try:
             entry = float(signal_data.get('Entry', signal_data.get('entry', 0)) or 0)
             tp = float(signal_data.get('TP', signal_data.get('tp', 0)) or 0)
             sl = float(signal_data.get('SL', signal_data.get('sl', 0)) or 0)
+            trail = float(signal_data.get('Trail', signal_data.get('trail', 0)) or 0)
+            liquidation = float(signal_data.get('Liquidation', signal_data.get('liquidation', 0)) or 0)
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid price values for {symbol}: {e}")
             return None
@@ -77,6 +77,12 @@ def create_signal_chart(signal_data):
         if sl > 0:
             fig.add_hline(y=sl, line_dash="dot", line_color="red", 
                          annotation_text=f"Stop Loss: ${sl:.4f}")
+        if trail > 0:
+            fig.add_hline(y=trail, line_dash="dashdot", line_color="purple", 
+                         annotation_text=f"Trail: ${trail:.4f}")
+        if liquidation > 0:
+            fig.add_hline(y=liquidation, line_dash="dashdot", line_color="orange", 
+                         annotation_text=f"Liquidation: ${liquidation:.4f}")
         
         fig.update_layout(
             title=f"{symbol} - Technical Analysis",
@@ -101,22 +107,26 @@ def display_signal_details(signal):
         st.write(f"**Symbol:** {signal.get('Symbol', signal.get('symbol', 'N/A'))}")
         st.write(f"**Side:** {signal.get('Side', signal.get('side', 'N/A'))}")
         st.write(f"**Type:** {signal.get('signal_type', 'N/A')}")
-        st.write(f"**Score:** {signal.get('Score', '0%')}")
+        score = signal.get('Score', signal.get('score', '0%'))
+        st.write(f"**Score:** {score if isinstance(score, str) and '%' in score else f'{float(score):.1f}%'}")
+        st.write(f"**BB Slope:** {signal.get('bb_slope', signal.get('indicators', {}).get('bb_slope', 'N/A'))}")
     
     with col2:
         st.markdown("**💰 Price Levels**")
+        st.write(f"**Market Price:** ${float(signal.get('indicators', {}).get('price', 0)):.4f}")
         st.write(f"**Entry:** ${float(signal.get('Entry', signal.get('entry', 0)) or 0):.4f}")
         st.write(f"**Take Profit:** ${float(signal.get('TP', signal.get('tp', 0)) or 0):.4f}")
         st.write(f"**Stop Loss:** ${float(signal.get('SL', signal.get('sl', 0)) or 0):.4f}")
-        st.write(f"**Trail Stop:** ${float(signal.get('Trail', signal.get('trail', 0)) or 0):.4f}")
+        st.write(f"**Trail:** ${float(signal.get('Trail', signal.get('trail', 0)) or 0):.4f}")
     
     with col3:
-        st.markdown("**⚙️ Trading Info**")
-        st.write(f"**Market:** {signal.get('Market', signal.get('market', 'N/A'))}")
-        st.write(f"**BB Slope:** {signal.get('bb_slope', 'N/A')}")
-        st.write(f"**Leverage:** {signal.get('leverage', 10)}x")
+        st.markdown("**🔒 Risk Management**")
+        st.write(f"**Liquidation:** ${float(signal.get('Liquidation', signal.get('liquidation', 0)) or 0):.4f}")
+        st.write(f"**Margin USDT:** ${float(signal.get('Margin USDT', signal.get('margin_usdt', 0)) or 0):.2f}")
+        st.write(f"**Leverage:** {signal.get('leverage', 'N/A')}x")
+        st.write(f"**Market Type:** {signal.get('market', 'N/A')}")
         created_at = signal.get('Time', signal.get('created_at', 'N/A'))
-        st.write(f"**Generated:** {created_at if created_at != 'N/A' else 'Unknown'}")
+        st.write(f"**Generated:** {created_at if isinstance(created_at, str) and created_at != 'N/A' else str(created_at)[:19]}")
 
 async def execute_real_trade(engine, signal):
     """Execute a real trade based on a signal"""
@@ -143,16 +153,24 @@ async def execute_real_trade(engine, signal):
             "order_id": f"real_{symbol}_{int(datetime.now().timestamp())}",
             "virtual": False,
             "status": "open",
-            "score": signal.get("score"),
+            "score": float(str(signal.get("score", "0%")).replace("%", "")),
             "strategy": signal.get("strategy", "Auto"),
-            "leverage": signal.get("leverage", 10)
+            "leverage": signal.get("leverage", 10),
+            "sl": float(signal.get("sl", 0)),
+            "tp": float(signal.get("tp", 0)),
+            "trail": float(signal.get("trail", 0)),
+            "liquidation": float(signal.get("liquidation", 0)),
+            "margin_usdt": float(signal.get("margin_usdt", 0))
         }
         order_result = await engine.client.place_order(
             symbol=symbol,
             side=side,
             qty=trade_data["qty"],
             price=entry_price,
-            order_type="Market"
+            stop_loss=trade_data["sl"],
+            take_profit=trade_data["tp"],
+            leverage=trade_data["leverage"],
+            mode="ISOLATED"
         )
         if order_result.get("success"):
             engine.db.add_trade(trade_data)
@@ -177,7 +195,6 @@ def main():
     if 'generated_signals' not in st.session_state:
         st.session_state.generated_signals = []
         try:
-            # Fetch recent signals from DB as fallback
             db_signals = db_manager.get_signals(limit=10)
             st.session_state.generated_signals = [s.to_dict() for s in db_signals if s.score >= 40]
             logger.info(f"Initialized {len(st.session_state.generated_signals)} signals from database")
@@ -192,7 +209,6 @@ def main():
     with st.sidebar:
         st.header("🎛️ Signal Controls")
         
-        # Trading mode selection
         trading_mode = st.selectbox(
             "Trading Mode", 
             ["virtual", "real"], 
@@ -203,12 +219,10 @@ def main():
         
         st.divider()
         
-        # Signal generation settings
         st.subheader("📊 Generation Settings")
         top_n_signals = st.slider("Number of Signals", 1, 20, 10)
         min_score = st.slider("Minimum Score", 30, 90, 50)
         
-        # Symbol selection
         available_symbols = get_usdt_symbols(100)
         selected_symbols = st.multiselect(
             "Select Symbols (leave empty for auto-selection)",
@@ -218,15 +232,12 @@ def main():
         
         st.divider()
         
-        # Generation controls
         if st.button("🎯 Generate New Signals", 
-                    disabled=st.session_state.signal_generation_in_progress,
-            ):
+                    disabled=st.session_state.signal_generation_in_progress):
             st.session_state.signal_generation_in_progress = True
         
         if st.button("📤 Send Notifications", 
-                    disabled=len(st.session_state.generated_signals) == 0,
-            ):
+                    disabled=len(st.session_state.generated_signals) == 0):
             if st.session_state.generated_signals:
                 try:
                     send_all_notifications(st.session_state.generated_signals)
@@ -236,7 +247,6 @@ def main():
         
         st.divider()
         
-        # Filters for database signals
         st.subheader("🔍 Database Filters")
         symbol_filter = st.text_input("Symbol Filter", placeholder="BTC, ETH, etc.")
         side_filter = st.selectbox("Side Filter", ["All", "Buy", "Sell"])
@@ -255,9 +265,9 @@ def main():
                     top_n=top_n_signals,
                     trading_mode=trading_mode
                 )
-                filtered_signals = [s for s in signals if float(str(s.get('Score', '0%')).replace('%', '')) >= min_score]
+                filtered_signals = [s for s in signals if float(str(s.get('score', '0%')).replace('%', '')) >= min_score]
                 st.session_state.generated_signals = filtered_signals
-                st.success(f"✅ Generated {len(filtered_signals)} signals, saved {len(filtered_signals)} to database")
+                st.success(f"✅ Generated {len(filtered_signals)} signals, saved to database")
             except Exception as e:
                 st.error(f"Error generating signals: {e}")
                 logger.error(f"Signal generation error: {e}")
@@ -268,42 +278,25 @@ def main():
     tab1, tab2, tab3, tab4 = st.tabs(["🆕 Generated Signals", "💾 Database Signals", "🔍 Single Symbol Analysis", "🤖 ML Signal Filter"])
     
     with tab1:
-        signals = st.session_state.generated_signals    
-        def format_signal_label(idx):
-            sig = signals[idx]
-            # Normalize score
-            score_val = sig.get("Score") or sig.get("score") or 0
-            try:
-                score_float = float(str(score_val).replace("%", ""))
-                score_str = f"{score_float:.1f}%"
-            except Exception:
-                score_str = "0.0%"
-            return f"{sig.get('Symbol', sig.get('symbol', 'N/A'))} - {score_str}"
         st.subheader("🆕 Recently Generated Signals")
-        logger.debug(f"Rendering Tab 1 with {len(st.session_state.generated_signals)} signals")
         signals = st.session_state.generated_signals
-
         if signals:
             signals_data = []
             for s in signals:
                 try:
-                    entry_val = float(s.get("Entry", s.get("entry", 0)) or 0)
-                    tp_val = float(s.get("TP", s.get("tp", 0)) or 0)
-                    sl_val = float(s.get("SL", s.get("sl", 0)) or 0)
-
-                    # Normalize score (accepts both 'Score' with "%" or 'score' numeric)
-                    raw_score = s.get("Score") or s.get("score") or 0
-                    score_val = float(str(raw_score).replace("%", "") or 0)
-
                     signals_data.append({
                         "Symbol": s.get("Symbol", s.get("symbol", "N/A")),
                         "Side": s.get("Side", s.get("side", "N/A")),
-                        "Score": f"{score_val:.2f}%",
-                        "Entry": f"${entry_val:.4f}",
-                        "Take Profit": f"${tp_val:.4f}",
-                        "Stop Loss": f"${sl_val:.4f}",
+                        "Score": f"{float(s.get('score', '0%').replace('%', '')):.1f}%",
+                        "Market Price": f"${float(s.get('indicators', {}).get('price', 0)):.4f}",
+                        "Entry": f"${float(s.get('Entry', s.get('entry', 0)) or 0):.4f}",
+                        "Stop Loss": f"${float(s.get('SL', s.get('sl', 0)) or 0):.4f}",
+                        "Take Profit": f"${float(s.get('TP', s.get('tp', 0)) or 0):.4f}",
+                        "Trail": f"${float(s.get('Trail', s.get('trail', 0)) or 0):.4f}",
+                        "Liquidation": f"${float(s.get('Liquidation', s.get('liquidation', 0)) or 0):.4f}",
+                        "Margin USDT": f"${float(s.get('Margin USDT', s.get('margin_usdt', 0)) or 0):.2f}",
                         "Market": s.get("Market", s.get("market", "N/A")),
-                        "Time": s.get("Time", s.get("created_at", 'N/A'))
+                        "BB Slope": s.get("bb_slope", s.get("indicators", {}).get("bb_slope", "N/A"))
                     })
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Skipping invalid signal: {s}, error: {e}")
@@ -313,21 +306,10 @@ def main():
                 signals_df = pd.DataFrame(signals_data)
                 st.dataframe(signals_df, height=400)
 
-                # Helper for dropdown label formatting
-                def format_signal_label(idx):
-                    sig = signals[idx]
-                    raw_score = sig.get("Score") or sig.get("score") or 0
-                    try:
-                        score_float = float(str(raw_score).replace("%", "") or 0)
-                        score_str = f"{score_float:.1f}%"
-                    except Exception:
-                        score_str = "0.0%"
-                    return f"{sig.get('Symbol', sig.get('symbol', 'N/A'))} - {score_str}"
-
                 selected_idx = st.selectbox(
                     "Select signal for detailed analysis:",
                     range(len(signals)),
-                    format_func=format_signal_label
+                    format_func=lambda idx: f"{signals[idx].get('Symbol', signals[idx].get('symbol', 'N/A'))} - {signals[idx].get('score', '0%')}"
                 )
 
                 if selected_idx is not None:
@@ -392,20 +374,20 @@ def main():
                 if filtered_db_signals:
                     db_data = []
                     for s in filtered_db_signals[:30]:
-                        score_val = s.get('score', 0)
-                        entry_val = s.get('entry', 0)
-                        created_val = s.get("created_at", None)
-                        score_str = f"{float(score_val or 0):.1f}%" if score_val is not None else "0.0%"
-                        entry_str = f"${float(entry_val or 0):.4f}" if entry_val is not None else "$0.0000"
-                        created_str = str(created_val)[:19] if created_val is not None else "N/A"
                         db_data.append({
                             "Symbol": s.get("symbol", "N/A"),
                             "Side": s.get("side", "N/A"),
-                            "Score": score_str,
-                            "Entry": entry_str,
-                            "Strategy": s.get("strategy", "N/A"),
-                            "Interval": s.get("interval", "N/A"),
-                            "Created": created_str
+                            "Score": f"{float(s.get('score', 0)):.1f}%",
+                            "Market Price": f"${float(s.get('indicators', {}).get('price', 0)):.4f}",
+                            "Entry": f"${float(s.get('entry', 0)):.4f}",
+                            "Stop Loss": f"${float(s.get('sl', 0)):.4f}",
+                            "Take Profit": f"${float(s.get('tp', 0)):.4f}",
+                            "Trail": f"${float(s.get('trail', 0)):.4f}",
+                            "Liquidation": f"${float(s.get('liquidation', 0)):.4f}",
+                            "Margin USDT": f"${float(s.get('margin_usdt', 0)):.2f}",
+                            "Market": s.get("market", "N/A"),
+                            "BB Slope": s.get("indicators", {}).get("bb_slope", "N/A"),
+                            "Created": str(s.get("created_at", "N/A"))[:19]
                         })
                     
                     db_df = pd.DataFrame(db_data)
@@ -458,15 +440,19 @@ def main():
                 analysis = st.session_state['single_analysis']
                 metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
                 with metrics_col1:
-                    st.metric("Signal Score", f"{analysis.get('score', 0):.1f}%")
+                    st.metric("Signal Score", f"{float(analysis.get('score', 0)):.1f}%")
                     st.metric("Signal Type", analysis.get('signal_type', 'N/A').title())
+                    st.metric("BB Slope", analysis.get('indicators', {}).get('bb_slope', 'N/A'))
                 with metrics_col2:
                     indicators = analysis.get('indicators', {})
-                    st.metric("RSI", f"{indicators.get('rsi', 0):.1f}")
-                    st.metric("Price", f"${indicators.get('price', 0):.4f}")
+                    st.metric("Market Price", f"${float(indicators.get('price', 0)):.4f}")
+                    st.metric("Entry", f"${float(analysis.get('entry', 0)):.4f}")
+                    st.metric("Stop Loss", f"${float(analysis.get('sl', 0)):.4f}")
                 with metrics_col3:
-                    st.metric("Side", analysis.get('side', 'N/A'))
-                    st.metric("Volatility", f"{indicators.get('volatility', 0):.2f}%")
+                    st.metric("Take Profit", f"${float(analysis.get('tp', 0)):.4f}")
+                    st.metric("Trail", f"${float(analysis.get('trail', 0)):.4f}")
+                    st.metric("Liquidation", f"${float(analysis.get('liquidation', 0)):.4f}")
+                    st.metric("Margin USDT", f"${float(analysis.get('margin_usdt', 0)):.2f}")
                 chart = create_signal_chart(analysis)
                 if chart:
                     st.plotly_chart(chart)
@@ -496,59 +482,17 @@ def main():
                         st.error("Trading is disabled or emergency stop is active. Cannot execute trade.")
                     else:
                         signal = st.session_state['single_analysis']
-                        symbol = signal.get("symbol")
-                        if not isinstance(symbol, str):
-                            st.error("Invalid symbol. Cannot execute trade.")
+                        success = asyncio.run(execute_real_trade(engine, signal))
+                        if success:
+                            st.success(f"✅ Real trade executed for {signal.get('symbol', 'N/A')}")
                         else:
-                            side = signal.get("side", "Buy")
-                            entry_price = signal.get("entry")
-                            if not entry_price:
-                                # If get_current_price is sync
-                                entry_price = engine.client.get_current_price(symbol)
-                                # If it's async, then use:
-                                # entry_price = asyncio.run(engine.client.get_current_price(symbol))
-
-                            if not entry_price or entry_price <= 0:
-                                st.error("Invalid entry price. Cannot execute trade.")
-                            else:
-                                position_size = engine.calculate_position_size(symbol, entry_price)
-                                trade_data = {
-                                    "symbol": symbol,
-                                    "side": side,
-                                    "qty": position_size,
-                                    "entry_price": entry_price,
-                                    "order_id": f"real_{symbol}_{int(datetime.now().timestamp())}",
-                                    "virtual": False,
-                                    "status": "open",
-                                    "score": signal.get("score"),
-                                    "strategy": signal.get("strategy", "Auto"),
-                                    "leverage": signal.get("leverage", 10)
-                                }
-                                order_result = asyncio.run(engine.client.place_order(
-                                    symbol=symbol,
-                                    side=side,
-                                    qty=trade_data["qty"],
-                                    stop_loss=float(trade_data["sl"]),
-                                    take_profit=float(trade_data["tp"]),
-                                    leverage=trade_data.get("leverage", 10),
-                                    mode="ISOLATED"
-                                ))
-
-                                if order_result.get("success"):
-                                    engine.db.add_trade(trade_data)
-                                    engine.sync_real_balance()
-                                    st.success(f"✅ Real trade executed for {symbol}")
-                                else:
-                                    st.error(f"❌ Real trade failed: {order_result.get('error', 'Unknown error')}")
+                            st.error("❌ Failed to execute real trade")
                 except Exception as e:
                     st.error(f"Real trade error: {e}")
 
     with tab4:
         st.subheader("🤖 ML-Powered Signal Filtering")
-
         ml_filter = MLFilter()
-
-        # ML Threshold slider
         threshold = st.slider(
             "ML Score Threshold",
             min_value=0.0,
@@ -557,19 +501,34 @@ def main():
             step=0.05,
             help="Minimum ML probability for signal to pass filter"
         )
-
-        # Fetch signals from DB
         signals = db_manager.get_signals(limit=100)
         st.write(f"Fetched {len(signals)} signals from database")
-
-        # Filter signals with ML
         filtered_signals = ml_filter.filter_signals(signals, threshold=threshold)
         st.write(f"{len(filtered_signals)} signals passed the ML filter")
-        st.dataframe(pd.DataFrame([s.to_dict() for s in filtered_signals]))
+        
+        filtered_data = []
+        for sig in filtered_signals:
+            ind = sig.indicators if hasattr(sig, "indicators") else sig.get("indicators", {})
+            readable_ind = "\n".join([f"{k}: {v:.4f}" if isinstance(v, (int, float)) else f"{k}: {v}" for k, v in ind.items()])
+            filtered_data.append({
+                "Symbol": sig.symbol if hasattr(sig, "symbol") else sig.get("symbol", "N/A"),
+                "Side": sig.side if hasattr(sig, "side") else sig.get("side", "N/A"),
+                "Score": f"{float(sig.score if hasattr(sig, 'score') else sig.get('score', 0)):.1f}%",
+                "Market Price": f"${float(ind.get('price', 0)):.4f}",
+                "Entry": f"${float(sig.entry if hasattr(sig, 'entry') else sig.get('entry', 0)):.4f}",
+                "Stop Loss": f"${float(sig.sl if hasattr(sig, 'sl') else sig.get('sl', 0)):.4f}",
+                "Take Profit": f"${float(sig.tp if hasattr(sig, 'tp') else sig.get('tp', 0)):.4f}",
+                "Trail": f"${float(sig.trail if hasattr(sig, 'trail') else sig.get('trail', 0)):.4f}",
+                "Liquidation": f"${float(sig.liquidation if hasattr(sig, 'liquidation') else sig.get('liquidation', 0)):.4f}",
+                "Margin USDT": f"${float(sig.margin_usdt if hasattr(sig, 'margin_usdt') else sig.get('margin_usdt', 0)):.2f}",
+                "Market": sig.market if hasattr(sig, "market") else sig.get("market", "N/A"),
+                "BB Slope": ind.get("bb_slope", "N/A"),
+                "Indicators": readable_ind
+            })
+        
+        st.dataframe(pd.DataFrame(filtered_data), height=400)
 
         st.markdown("---")
-
-        # Feature Importance
         if st.button("Show Feature Importance"):
             importance = ml_filter.get_feature_importance()
             if importance:
@@ -580,15 +539,11 @@ def main():
                 st.info("No trained ML model available")
 
         st.markdown("---")
-
-        # Train ML Model button
         if st.button("Train ML Model from Trades"):
             trades = db_manager.get_trades(limit=1000)
             training_data = []
-
             for trade in trades:
-                # Match trade with closest signal (within 1 hour)
-                signals_for_trade = db_manager.get_signals(limit=50)  # limit to recent signals
+                signals_for_trade = db_manager.get_signals(limit=50)
                 signal = next(
                     (s for s in signals_for_trade 
                     if s.symbol == trade.symbol and abs((s.created_at - trade.timestamp).total_seconds()) < 3600),
@@ -599,7 +554,6 @@ def main():
                         'indicators': signal.indicators,
                         'profit': trade.pnl if trade.pnl is not None else 0
                     })
-
             if not training_data:
                 st.error("No trades with matching signal indicators found for training")
             else:
