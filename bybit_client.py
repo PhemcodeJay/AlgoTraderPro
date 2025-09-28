@@ -416,6 +416,10 @@ class BybitClient:
                 extra_data={'endpoint': endpoint, 'max_retries': self.recovery_strategy.max_retries}
             )
         )
+    
+    async def _make_request_async(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict:
+        """Async wrapper around _make_request using asyncio.to_thread"""
+        return await asyncio.to_thread(self._make_request, method, endpoint, params)
 
     def is_connected(self) -> bool:
         """Check if client is connected and authenticated"""
@@ -722,19 +726,18 @@ class BybitClient:
             logger.error(f"Error getting open orders: {e}")
             return []
 
-    def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
-        """Get current positions"""
+    async def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
+        """Get current positions asynchronously"""
         try:
-            params = {
-                "category": "linear"
-            }
+            params = {"category": "linear"}
             if symbol:
                 params["symbol"] = symbol
-                
-            result = self._make_request("GET", "/v5/position/list", params)
-            
+
+            # Assuming `_make_request` has an async version
+            result = await self._make_request_async("GET", "/v5/position/list", params)
+
             if result and "list" in result:
-                positions = []
+                positions: List[Dict] = []
                 for pos in result["list"]:
                     size = float(pos.get("size", 0))
                     if size > 0:  # Only active positions
@@ -745,7 +748,7 @@ class BybitClient:
                             "entry_price": float(pos.get("avgPrice", 0)),
                             "mark_price": float(pos.get("markPrice", 0)),
                             "unrealized_pnl": float(pos.get("unrealisedPnl", 0)),
-                            "leverage": float(pos.get("leverage", 10))
+                            "leverage": float(pos.get("leverage", 10)),
                         })
                 return positions
             return []

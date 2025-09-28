@@ -72,7 +72,7 @@ class Trade:
     tp: Optional[float] = None
     pnl: Optional[float] = None
     score: Optional[float] = None
-    strategy: str = "Manual"
+    strategy: str = "Auto"
     leverage: int = 10
     trail: Optional[float] = None
     liquidation: Optional[float] = None
@@ -182,7 +182,7 @@ class TradeModel(Base):
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    strategy: Mapped[str] = mapped_column(String(20), default="Manual")
+    strategy: Mapped[str] = mapped_column(String(20), default="Auto")
     leverage: Mapped[int] = mapped_column(Integer, default=10)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

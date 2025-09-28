@@ -76,7 +76,7 @@ def enhance_signal(analysis: Dict[str, Any]) -> Any:
         liq = price * (1 + 0.9 / leverage)
 
     trail = atr
-    margin_usdt = 5.0
+    margin_usdt = 1.0
 
     bb_upper = indicators.get("bb_upper", 0)
     bb_lower = indicators.get("bb_lower", 0)
