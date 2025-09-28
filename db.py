@@ -68,10 +68,15 @@ class Trade:
     virtual: bool = True
     status: str = "open"
     exit_price: Optional[float] = None
+    sl: Optional[float] = None
+    tp: Optional[float] = None
     pnl: Optional[float] = None
     score: Optional[float] = None
     strategy: str = "Manual"
     leverage: int = 10
+    trail: Optional[float] = None
+    liquidation: Optional[float] = None
+    margin_usdt: Optional[float] = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at: Optional[datetime] = None
     id: Union[str, None] = None
@@ -169,6 +174,11 @@ class TradeModel(Base):
     order_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     virtual: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(20), default="open")
+    sl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    trail: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    liquidation: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    margin_usdt: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tp: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -188,7 +198,12 @@ class TradeModel(Base):
             virtual=self.virtual,
             status=self.status,
             exit_price=self.exit_price,
+            sl=self.sl,
+            tp=self.tp,
             pnl=self.pnl,
+            trail=self.trail,
+            liquidation=self.liquidation,
+            margin_usdt=self.margin_usdt,
             score=self.score,
             strategy=self.strategy,
             leverage=self.leverage,
@@ -459,7 +474,12 @@ class DatabaseManager:
                 virtual=trade.get('virtual', True),
                 status=trade.get('status', 'open'),
                 exit_price=trade.get('exit_price'),
+                sl=trade.get('sl'),
+                tp=trade.get('tp'),
                 pnl=trade.get('pnl'),
+                trail=trade.get('trail'),
+                liquidation=trade.get('liquidation'),
+                margin_usdt=trade.get('margin_usdt'),
                 score=trade.get('score'),
                 strategy=trade.get('strategy', 'Manual'),
                 leverage=trade.get('leverage', 10),

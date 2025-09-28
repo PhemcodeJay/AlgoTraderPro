@@ -146,7 +146,7 @@ class AutomatedTrader:
                     trading_mode = db_manager.get_setting("trading_mode") or "virtual"
                     if trading_mode == "real":
                         self.engine.sync_real_balance()
-                        self.engine.sync_real_trades()
+                        self.engine.get_open_real_trades()
                     
                     # Scan for signals
                     await self._scan_and_trade(trading_mode)
@@ -209,7 +209,7 @@ class AutomatedTrader:
                         # Wait briefly for Bybit to process
                         await asyncio.sleep(2)
                         # Sync real trades to DB after execution
-                        self.engine.sync_real_trades()
+                        self.engine.get_open_real_trades()
                         logger.info(f"Synced real trades to DB after executing trade for {symbol}")
                 
                 if success:
@@ -237,6 +237,7 @@ class AutomatedTrader:
     async def _check_trade_exit(self, trade: Trade, trading_mode: str):
         """Check if trade should be closed"""
         try:
+            from typing import List, Dict, Any
             symbol = trade.symbol
             current_price = self.client.get_current_price(symbol)
             
@@ -247,7 +248,7 @@ class AutomatedTrader:
             entry_price = trade.entry_price
             side = trade.side.upper()
             
-            # Calculate current PnL
+            # Calculate current PnL (for logging/stats)
             if side in ["BUY", "LONG"]:
                 pnl_pct = (current_price - entry_price) / entry_price * 100
             else:
@@ -257,29 +258,66 @@ class AutomatedTrader:
             should_exit = False
             exit_reason = ""
             
-            # Stop loss (5% loss)
-            if pnl_pct <= -5:
-                should_exit = True
-                exit_reason = "Stop Loss"
+            # For real trades, check if Bybit closed the position (SL/TP triggered)
+            if trading_mode == "real":
+                try:
+                    positions: List[Dict[str, Any]] = self.client.get_positions(symbol=symbol)
+                    position = next((p for p in positions if p["size"] > 0 and p["side"].upper() == side), None)
+                    if not position:
+                        # Position closed by Bybit (e.g., SL/TP triggered)
+                        should_exit = True
+                        exit_reason = "Bybit Closed (SL/TP)"
+                        current_price = self.client.get_current_price(symbol)  # Use latest price for close
+                except Exception as e:
+                    logger.warning(f"Failed to check Bybit position for {symbol}: {e}")
+                    # Fallback to manual SL/TP check
+                    if trade.sl is None or trade.tp is None:
+                        logger.warning(f"Missing SL/TP for real trade {trade.order_id}")
+                        return
+                    if side in ["BUY", "LONG"]:
+                        should_exit_sl = current_price <= trade.sl
+                        should_exit_tp = current_price >= trade.tp
+                    else:
+                        should_exit_sl = current_price >= trade.sl
+                        should_exit_tp = current_price <= trade.tp
+                    if should_exit_sl:
+                        should_exit = True
+                        exit_reason = "Stop Loss"
+                    elif should_exit_tp:
+                        should_exit = True
+                        exit_reason = "Take Profit"
+            else:
+                # Virtual trades: Use stored SL/TP
+                if trade.sl is None or trade.tp is None:
+                    logger.warning(f"Missing SL/TP for virtual trade {trade.order_id}")
+                    return
+                if side in ["BUY", "LONG"]:
+                    should_exit_sl = current_price <= trade.sl
+                    should_exit_tp = current_price >= trade.tp
+                else:
+                    should_exit_sl = current_price >= trade.sl
+                    should_exit_tp = current_price <= trade.tp
+                if should_exit_sl:
+                    should_exit = True
+                    exit_reason = "Stop Loss"
+                elif should_exit_tp:
+                    should_exit = True
+                    exit_reason = "Take Profit"
             
-            # Take profit (10% gain)
-            elif pnl_pct >= 10:
-                should_exit = True
-                exit_reason = "Take Profit"
-            
-            # Time-based exit (24 hours)
-            elif trade.timestamp:
+            # Time-based exit (24 hours) for both modes
+            if not should_exit and trade.timestamp:
                 hours_open = (datetime.now(timezone.utc) - trade.timestamp).total_seconds() / 3600
                 if hours_open >= 24:
                     should_exit = True
                     exit_reason = "Time Limit"
             
             if should_exit:
+                logger.info(f"Triggering exit for {symbol}: Reason={exit_reason}, PnL={pnl_pct:.2f}%")
                 await self._close_trade(trade, current_price, exit_reason, trading_mode)
-                
+                    
         except Exception as e:
             logger.error(f"Error checking trade exit for {trade.symbol}: {e}", exc_info=True)
-
+                
     async def _close_trade(self, trade: Trade, exit_price: float, reason: str, trading_mode: str):
         """Close a trade"""
         try:
@@ -312,7 +350,7 @@ class AutomatedTrader:
                 logger.info(f"Closed real position {trade.order_id}")
                 # Sync after close
                 await asyncio.sleep(2)
-                self.engine.sync_real_trades()
+                self.engine.get_open_real_trades()
                 logger.info(f"Synced real trades to DB after closing {trade.order_id}")
 
             # Update trade in database
