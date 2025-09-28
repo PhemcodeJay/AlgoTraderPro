@@ -287,7 +287,7 @@ def main():
                     signals_data.append({
                         "Symbol": s.get("Symbol", s.get("symbol", "N/A")),
                         "Side": s.get("Side", s.get("side", "N/A")),
-                        "Score": f"{float(s.get('score', '0%').replace('%', '')):.1f}%",
+                        "Score": f"{float(str(s.get('score', '0')).replace('%','') or 0):.1f}%",
                         "Market Price": f"${float(s.get('indicators', {}).get('price', 0)):.4f}",
                         "Entry": f"${float(s.get('Entry', s.get('entry', 0)) or 0):.4f}",
                         "Stop Loss": f"${float(s.get('SL', s.get('sl', 0)) or 0):.4f}",
