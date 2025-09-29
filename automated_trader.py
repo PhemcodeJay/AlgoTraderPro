@@ -10,6 +10,7 @@ from signal_generator import generate_signals, get_usdt_symbols
 from db import db_manager, Trade, Signal
 from settings import load_settings
 from logging_config import get_trading_logger
+from exceptions import APIException
 
 logger = get_trading_logger(__name__)
 
@@ -204,13 +205,23 @@ class AutomatedTrader:
                 if trading_mode == "virtual":
                     success = self.engine.execute_virtual_trade(signal_dict)
                 else:
-                    success = await self.engine.execute_real_trade(signal_dict)
-                    if success:
-                        # Wait briefly for Bybit to process
-                        await asyncio.sleep(2)
-                        # Sync real trades to DB after execution
-                        self.engine.get_open_real_trades()
-                        logger.info(f"Synced real trades to DB after executing trade for {symbol}")
+                    try:
+                        success = await self.engine.execute_real_trade(signal_dict)
+                        if success:
+                            # Wait briefly for Bybit to process
+                            await asyncio.sleep(2)
+                            # Sync real trades to DB after execution
+                            self.engine.get_open_real_trades()
+                            logger.info(f"Synced real trades to DB after executing trade for {symbol}")
+                    except APIException as e:
+                        if e.error_code == "100028":
+                            logger.warning(f"Unified account error for {symbol}: {e}. Retrying with cross margin mode.")
+                            signal_dict["margin_mode"] = "CROSS"  # Ensure cross margin mode
+                            success = await self.engine.execute_real_trade(signal_dict)
+                            if success:
+                                await asyncio.sleep(2)
+                                self.engine.get_open_real_trades()
+                                logger.info(f"Synced real trades to DB after retrying trade for {symbol}")
                 
                 if success:
                     self.stats["trades_executed"] += 1
@@ -261,13 +272,21 @@ class AutomatedTrader:
             # For real trades, check if Bybit closed the position (SL/TP triggered)
             if trading_mode == "real":
                 try:
-                    positions: List[Dict[str, Any]] = self.client.get_positions(symbol=symbol)
+                    positions: List[Dict[str, Any]] = await self.client.get_positions(symbol=symbol)
                     position = next((p for p in positions if p["size"] > 0 and p["side"].upper() == side), None)
                     if not position:
                         # Position closed by Bybit (e.g., SL/TP triggered)
                         should_exit = True
                         exit_reason = "Bybit Closed (SL/TP)"
                         current_price = self.client.get_current_price(symbol)  # Use latest price for close
+                    else:
+                        # Update leverage from position, using self.leverage as fallback
+                        leverage_from_api = position.get("leverage")
+                        if leverage_from_api is not None and float(leverage_from_api) > 0:
+                            trade.leverage = int(leverage_from_api)
+                            logger.debug(f"Updated leverage for {symbol} to {trade.leverage} from Bybit API")
+                        else:
+                            logger.warning(f"Invalid or missing leverage for {symbol} in API response, retaining {trade.leverage}")
                 except Exception as e:
                     logger.warning(f"Failed to check Bybit position for {symbol}: {e}")
                     # Fallback to manual SL/TP check
@@ -330,28 +349,52 @@ class AutomatedTrader:
                 if not self.client.is_connected():
                     logger.error("Bybit client not connected for real trade close")
                     return
-                positions = self.client.get_positions(symbol=trade.symbol)
+                positions = await self.client.get_positions(symbol=trade.symbol)
                 pnl = positions[0].get("unrealisedPnl", 0.0) if positions else 0.0
 
             # For real mode, place closing order (reverse side market order)
             if trading_mode == "real":
                 close_side = "Sell" if trade.side.upper() in ["BUY", "LONG"] else "Buy"
-                close_result = await self.client.place_order(
-                    symbol=trade.symbol,
-                    side=close_side,
-                    qty=trade.qty,
-                    stop_loss=0.0,  # Fixed: Use float default
-                    take_profit=0.0,  # Fixed: Use float default
-                    leverage=trade.leverage
-                )
-                if "error" in close_result:
-                    logger.error(f"Failed to close real position {trade.order_id}: {close_result['error']}")
-                    return
-                logger.info(f"Closed real position {trade.order_id}")
-                # Sync after close
-                await asyncio.sleep(2)
-                self.engine.get_open_real_trades()
-                logger.info(f"Synced real trades to DB after closing {trade.order_id}")
+                try:
+                    close_result = await self.client.place_order(
+                        symbol=trade.symbol,
+                        side=close_side,
+                        qty=trade.qty,
+                        stop_loss=0.0,
+                        take_profit=0.0,
+                        leverage=trade.leverage,
+                        mode="CROSS"  # Ensure cross margin mode
+                    )
+                    if "error" in close_result:
+                        logger.error(f"Failed to close real position {trade.order_id}: {close_result['error']}")
+                        return
+                    logger.info(f"Closed real position {trade.order_id}")
+                    # Sync after close
+                    await asyncio.sleep(2)
+                    self.engine.get_open_real_trades()
+                    logger.info(f"Synced real trades to DB after closing {trade.order_id}")
+                except APIException as e:
+                    if e.error_code == "100028":
+                        logger.warning(f"Unified account error closing {trade.order_id}: {e}. Retrying with cross margin mode.")
+                        close_result = await self.client.place_order(
+                            symbol=trade.symbol,
+                            side=close_side,
+                            qty=trade.qty,
+                            stop_loss=0.0,
+                            take_profit=0.0,
+                            leverage=trade.leverage,
+                            mode="CROSS"
+                        )
+                        if "error" in close_result:
+                            logger.error(f"Retry failed to close real position {trade.order_id}: {close_result['error']}")
+                            return
+                        logger.info(f"Closed real position {trade.order_id} on retry")
+                        await asyncio.sleep(2)
+                        self.engine.get_open_real_trades()
+                        logger.info(f"Synced real trades to DB after closing {trade.order_id}")
+                    else:
+                        logger.error(f"Error closing real position {trade.order_id}: {e}")
+                        return
 
             # Update trade in database
             from db import TradeModel

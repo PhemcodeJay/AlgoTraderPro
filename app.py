@@ -54,6 +54,50 @@ def initialize_bybit():
             st.warning("Bybit client connection failed. Check API keys.")
             logger.error("Bybit client connection test failed")
 
+# --- Helper: does DB already have any REAL trades? ---
+def db_has_any_trade(mode: str = "real") -> bool:
+    """
+    Return True if the DB already contains at least one trade for the given mode.
+    Tries several common DB methods and fails closed (False) without raising.
+    """
+    try:
+        db = st.session_state.engine.db if st.session_state.engine else None
+        if not db:
+            return False
+
+        # Try a few likely APIs, quietly skipping if missing
+        try:
+            return (db.get_trade_count(mode) or 0) > 0
+        except Exception:
+            pass
+        try:
+            return (db.count_trades(mode) or 0) > 0
+        except Exception:
+            pass
+        try:
+            return bool(db.has_trades(mode))
+        except Exception:
+            pass
+        try:
+            return db.get_last_trade(mode) is not None
+        except Exception:
+            pass
+        try:
+            trades = db.get_trades(mode=mode, limit=1)
+            return bool(trades)
+        except Exception:
+            pass
+        try:
+            trades = db.get_trades(mode)
+            return bool(trades)
+        except Exception:
+            pass
+
+        return False
+    except Exception as e:
+        logger.error(f"db_has_any_trade check failed: {e}", exc_info=True)
+        return False
+
 # --- Fetch wallet balance ---
 def get_wallet_balance() -> dict:
     """
@@ -86,7 +130,7 @@ def get_wallet_balance() -> dict:
             initialize_bybit()
             client = st.session_state.bybit_client
             if client and client.is_connected():
-                # Sync real balance with Bybit
+                # Sync real balance with Bybit (safe to do regardless of trades)
                 st.session_state.engine.sync_real_balance()
                 wallet = st.session_state.engine.db.get_wallet_balance("real")
                 if wallet:
@@ -163,9 +207,16 @@ def main():
                 if st.session_state.trading_mode == "real":
                     initialize_bybit()
                     if st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
+                        # Always safe to sync balances
                         st.session_state.engine.sync_real_balance()
-                        st.session_state.engine.sync_real_trades()  # Fixed: Added trade sync
-                        logger.info("Real balance and trades synced after mode switch")
+
+                        # NEW: Only sync real trades if there is already at least one trade in DB
+                        if db_has_any_trade("real"):
+                            st.session_state.engine.sync_real_trades()
+                            logger.info("Real trades synced after mode switch (DB already had trades).")
+                        else:
+                            logger.info("Skipped real trade sync: no existing real trades in DB yet.")
+                            st.info("Live mode enabled. Trade sync will start after the first real trade exists in the database.")
                 st.rerun()
 
         # Status

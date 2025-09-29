@@ -29,7 +29,6 @@ class RateLimitInfo:
     minute_start: float = 0
     minute_count: int = 0
 
-
 class BybitClient:
     def __init__(self):
         self.api_key: str = os.getenv("BYBIT_API_KEY", "")
@@ -94,9 +93,6 @@ class BybitClient:
             
             self.session.mount('https://', adapter)
             self.session.mount('http://', adapter)
-            
-            # Configure session defaults (timeouts are passed to individual requests)
-            # Note: Session objects don't have a timeout attribute; timeouts are per-request
             
             logger.info("HTTP session initialized with connection pooling")
             
@@ -218,12 +214,22 @@ class BybitClient:
                 f"Invalid signature: {ret_msg}",
                 context=create_error_context(module=__name__, function='_handle_api_error')
             )
+        elif ret_code == 100028:
+            raise APIException(
+                f"Operation forbidden for unified account: {ret_msg}. Use cross margin mode.",
+                error_code=str(ret_code),
+                context=create_error_context(
+                    module=__name__,
+                    function='_handle_api_error',
+                    extra_data={'endpoint': endpoint, 'ret_code': ret_code}
+                )
+            )
         else:
             raise APIException(
                 f"API Error (code {ret_code}): {ret_msg}",
                 error_code=str(ret_code),
                 context=create_error_context(
-                    module=__name__, 
+                    module=__name__,
                     function='_handle_api_error',
                     extra_data={'endpoint': endpoint, 'ret_code': ret_code}
                 )
@@ -464,7 +470,6 @@ class BybitClient:
                     'account_type': self.account_type
                 }
             )
-
             return False
             
         except APIRateLimitException as e:
@@ -630,26 +635,40 @@ class BybitClient:
         stop_loss: float,
         take_profit: float,
         leverage: Optional[int] = 10,
-        mode: str = "ISOLATED"
+        mode: str = "CROSS"  # Default to CROSS for unified accounts
     ) -> Dict:
-        """Place a market trading order with leverage, isolated margin mode, required TP and SL"""
+        """Place a market trading order with leverage, cross margin mode for unified accounts, required TP and SL"""
         try:
             # Default leverage = 10
             leverage = leverage or 10
 
-            # Step 1: Set margin mode and leverage using correct endpoint
-            trade_mode = 1 if mode.upper() == "ISOLATED" else 0
-            lev_params = {
-                "category": "linear",
-                "symbol": symbol,
-                "tradeMode": trade_mode,
-                "buyLeverage": str(leverage),
-                "sellLeverage": str(leverage)
-            }
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
+            # For unified accounts, use cross margin mode and set leverage only
+            if self.account_type == "UNIFIED":
+                mode = "CROSS"
+                logger.info(f"Unified account detected, using CROSS margin mode for {symbol}")
+                # Set leverage for the symbol (unified accounts use cross margin by default)
+                lev_params = {
+                    "category": "linear",
+                    "symbol": symbol,
+                    "buyLeverage": str(leverage),
+                    "sellLeverage": str(leverage)
+                }
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/set-leverage", lev_params)
+            else:
+                # For non-unified accounts, set margin mode and leverage
+                trade_mode = 1 if mode.upper() == "ISOLATED" else 0
+                lev_params = {
+                    "category": "linear",
+                    "symbol": symbol,
+                    "tradeMode": trade_mode,
+                    "buyLeverage": str(leverage),
+                    "sellLeverage": str(leverage)
+                }
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
-            # Step 2: Build order params (always market order, with TP/SL required)
+            # Build order params (always market order, with TP/SL required)
             params = {
                 "category": "linear",
                 "symbol": symbol,
@@ -661,14 +680,14 @@ class BybitClient:
                 "takeProfit": str(take_profit)
             }
 
-            # Step 3: Place order (sync call via executor)
+            # Place order
             result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
 
             if result:
                 return {
                     "order_id": result.get("orderId"),
                     "symbol": symbol,
-                    "accountType": self.account_type, 
+                    "accountType": self.account_type,
                     "side": side,
                     "qty": qty,
                     "price": self.get_current_price(symbol),
@@ -682,8 +701,15 @@ class BybitClient:
                 }
             return {}
 
+        except APIException as e:
+            if e.error_code == "100028":
+                logger.warning(f"Unified account error for {symbol}: {e}. Using cross margin mode.")
+                # Retry with cross margin mode
+                return await self.place_order(symbol, side, qty, stop_loss, take_profit, leverage, mode="CROSS")
+            logger.error(f"Error placing order for {symbol}: {e}")
+            return {"error": str(e)}
         except Exception as e:
-            logger.error(f"Error placing order: {e}")
+            logger.error(f"Unexpected error placing order for {symbol}: {e}")
             return {"error": str(e)}
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
@@ -733,7 +759,6 @@ class BybitClient:
             if symbol:
                 params["symbol"] = symbol
 
-            # Assuming `_make_request` has an async version
             result = await self._make_request_async("GET", "/v5/position/list", params)
 
             if result and "list" in result:
