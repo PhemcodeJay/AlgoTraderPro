@@ -646,15 +646,7 @@ class BybitClient:
             if self.account_type == "UNIFIED":
                 mode = "CROSS"
                 logger.info(f"Unified account detected, using CROSS margin mode for {symbol}")
-                # Set leverage for the symbol (unified accounts use cross margin by default)
-                lev_params = {
-                    "category": "linear",
-                    "symbol": symbol,
-                    "buyLeverage": str(leverage),
-                    "sellLeverage": str(leverage)
-                }
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/set-leverage", lev_params)
             else:
                 # For non-unified accounts, set margin mode and leverage
                 trade_mode = 1 if mode.upper() == "ISOLATED" else 0
