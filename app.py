@@ -6,9 +6,8 @@ from datetime import datetime
 from db import db_manager
 from logging_config import get_logger
 from bybit_client import BybitClient
-from check_license import validate_license  # Import validate_license
+from check_licenses import check_license, format_expiration_date
 
-# Logging using centralized system
 logger = get_logger(__name__)
 
 # Configure Streamlit page
@@ -122,27 +121,26 @@ def get_wallet_balance() -> dict:
     balance_data = default_virtual if mode == "virtual" else default_real
     try:
         if mode == "virtual":
-            wallet = st.session_state.engine.db.get_wallet_balance("virtual") \
-                if st.session_state.engine else None
+            wallet = db_manager.get_wallet_balance("virtual")
             if wallet:
                 balance_data = {
-                    "capital": getattr(wallet, "capital", default_virtual["capital"]),
-                    "available": getattr(wallet, "available", default_virtual["available"]),
-                    "used": getattr(wallet, "used", default_virtual["used"])
+                    "capital": wallet.capital,
+                    "available": wallet.available,
+                    "used": wallet.used
                 }
                 logger.info(f"Fetched virtual wallet balance: {balance_data}")
         else:  # real mode
             initialize_bybit()
             client = st.session_state.bybit_client
             if client and client.is_connected():
-                # Sync real balance with Bybit (safe to do regardless of trades)
+                # Sync real balance with Bybit
                 st.session_state.engine.sync_real_balance()
-                wallet = st.session_state.engine.db.get_wallet_balance("real")
+                wallet = db_manager.get_wallet_balance("real")
                 if wallet:
                     balance_data = {
-                        "capital": getattr(wallet, "capital", default_real["capital"]),
-                        "available": getattr(wallet, "available", default_real["available"]),
-                        "used": getattr(wallet, "used", default_real["used"])
+                        "capital": wallet.capital,
+                        "available": wallet.available,
+                        "used": wallet.used
                     }
                     logger.info(
                         f"Fetched real wallet balance after sync: capital=${balance_data['capital']:.2f}, "
@@ -152,13 +150,12 @@ def get_wallet_balance() -> dict:
                     logger.warning("Failed to retrieve real balance after sync")
                     st.error("❌ Failed to retrieve real balance. Check Bybit account or API permissions.")
             else:
-                wallet = st.session_state.engine.db.get_wallet_balance("real") \
-                    if st.session_state.engine else None
+                wallet = db_manager.get_wallet_balance("real")
                 if wallet:
                     balance_data = {
-                        "capital": getattr(wallet, "capital", default_real["capital"]),
-                        "available": getattr(wallet, "available", default_real["available"]),
-                        "used": getattr(wallet, "used", default_real["used"])
+                        "capital": wallet.capital,
+                        "available": wallet.available,
+                        "used": wallet.used
                     }
                     logger.warning(f"Bybit client not connected, using DB real balance: {balance_data}")
                 st.warning("Bybit API not connected. Check API keys in .env file.")
@@ -171,85 +168,20 @@ def get_wallet_balance() -> dict:
     logger.info(f"Cached {mode} balance: {balance_data}")
 
     # Conditional messaging for real balance
-    if mode == "real":
-        if balance_data["available"] <= 0:
-            st.warning("Real available balance is low or zero. Deposit funds on Bybit.")
+    if mode == "real" and balance_data["available"] <= 0:
+        st.warning("Real available balance is low or zero. Deposit funds on Bybit.")
     return balance_data
 
-# --- Validate License ---
-def validate_user_license():
-    """
-    Validate the user's license key, prompting for a new key if none exists or if invalid.
-    Returns True if the license is valid, False otherwise.
-    """
-    # Check for saved license key in the database
-    saved_license_key = db_manager.get_setting("license_key")
-    if saved_license_key and st.session_state.license_key != saved_license_key:
-        st.session_state.license_key = saved_license_key
-
-    # If no license key in session state, prompt for one
-    if not st.session_state.license_key:
-        st.warning("Please enter a valid license key to access AlgoTrader Pro.")
-        with st.form("license_form"):
-            license_key_input = st.text_input("License Key", placeholder="e.g., 123e4567-e89b-12d3-a456-426614174000")
-            submitted = st.form_submit_button("Validate License")
-            if submitted:
-                if not license_key_input:
-                    st.error("Please enter a license key.")
-                    return False
-                license_result = db_manager.validate_license(license_key_input)
-                if license_result["valid"]:
-                    st.session_state.license_valid = True
-                    st.session_state.license_key = license_key_input
-                    db_manager.save_setting("license_key", license_key_input)
-                    st.success(f"License validated successfully! Tier: {license_result['tier']}, Expires: {license_result['formatted_expiration_date']}")
-                    logger.info(f"License validated: {license_key_input}, Tier: {license_result['tier']}")
-                    st.rerun()
-                else:
-                    st.error(f"Invalid license key: {license_result['message']}")
-                    logger.error(f"License validation failed: {license_result['message']}")
-                    return False
-        return False
-
-    # Validate existing license key
-    license_result = db_manager.validate_license(st.session_state.license_key)
-    if license_result["valid"]:
-        st.session_state.license_valid = True
-        logger.info(f"License {st.session_state.license_key} is valid: Tier={license_result['tier']}")
-        return True
-    else:
-        st.error(f"License is invalid: {license_result['message']}. Please enter a new license key.")
-        logger.error(f"License validation failed for {st.session_state.license_key}: {license_result['message']}")
-        with st.form("license_form"):
-            license_key_input = st.text_input("New License Key", placeholder="e.g., 123e4567-e89b-12d3-a456-426614174000")
-            submitted = st.form_submit_button("Validate New License")
-            if submitted:
-                if not license_key_input:
-                    st.error("Please enter a license key.")
-                    return False
-                new_license_result = db_manager.validate_license(license_key_input)
-                if new_license_result["valid"]:
-                    st.session_state.license_valid = True
-                    st.session_state.license_key = license_key_input
-                    db_manager.save_setting("license_key", license_key_input)
-                    st.success(f"License validated successfully! Tier: {new_license_result['tier']}, Expires: {new_license_result['formatted_expiration_date']}")
-                    logger.info(f"New license validated: {license_key_input}, Tier: {new_license_result['tier']}")
-                    st.rerun()
-                else:
-                    st.error(f"Invalid license key: {new_license_result['message']}")
-                    logger.error(f"New license validation failed: {new_license_result['message']}")
-                    return False
-        return False
-
 def main():
-    # Validate license before proceeding
-    if not validate_user_license():
+    # Check license before proceeding
+    is_valid, license_result = check_license()
+    if not is_valid:
         return  # Stop execution if license is invalid
 
     initialize_engine()
     # Load saved trading mode from DB
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
-        saved_mode = st.session_state.engine.db.get_setting("trading_mode")
+        saved_mode = db_manager.get_setting("trading_mode")
         st.session_state.trading_mode = saved_mode if saved_mode in ["virtual", "real"] else "virtual"
         logger.info(f"Loaded trading mode from DB: {st.session_state.trading_mode}")
 
@@ -270,7 +202,7 @@ def main():
                     st.warning("Must confirm to switch to real mode.")
             if selected_mode.lower() != "real" or confirm_real:
                 st.session_state.trading_mode = selected_mode.lower()
-                st.session_state.engine.db.save_setting("trading_mode", st.session_state.trading_mode)
+                db_manager.save_setting("trading_mode", st.session_state.trading_mode)
                 st.session_state.wallet_cache.clear()
                 logger.info(f"Switched to {st.session_state.trading_mode} mode, cleared cache")
 
@@ -298,14 +230,13 @@ def main():
 
         # --- License Info ---
         st.divider()
-        license_info = db_manager.validate_license(st.session_state.license_key)
-        st.markdown(f"**License Status:** {'✅ Valid' if license_info['valid'] else '❌ Invalid'}")
-        st.markdown(f"**License Tier:** {license_info.get('tier', 'N/A')}")
-        st.markdown(f"**Expires:** {license_info.get('formatted_expiration_date', 'N/A')}")
+        st.markdown(f"**License Status:** {'✅ Valid' if license_result['valid'] else '❌ Invalid'}")
+        st.markdown(f"**License Tier:** {license_result.get('tier', 'N/A')}")
+        st.markdown(f"**Expires:** {license_result.get('formatted_expiration_date', 'N/A')}")
 
         st.divider()
 
-        # --- Lower Section: Page Navigation ---
+        # --- Page Navigation ---
         st.markdown("### 📂 Pages")
         pages = {
             "📊 Dashboard": "dashboard",
@@ -350,13 +281,26 @@ def main():
             st.success("All automated trading stopped and cache cleared")
             logger.info("Emergency stop triggered, cache cleared")
 
-    # --- Main dashboard ---
+    # --- Main content based on selected page ---
     try:
-        from pages.dashboard import main as dashboard_main
-        dashboard_main()
+        if st.session_state.active_page == "📊 Dashboard":
+            from pages.dashboard import main as dashboard_main
+            dashboard_main()
+        elif st.session_state.active_page == "🎯 Signals":
+            from pages.signals import main as signals_main
+            signals_main()
+        elif st.session_state.active_page == "📈 Trades":
+            from pages.trades import main as trades_main
+            trades_main()
+        elif st.session_state.active_page == "📊 Performance":
+            from pages.performance import main as performance_main
+            performance_main()
+        elif st.session_state.active_page == "⚙️ Settings":
+            from pages.settings import main as settings_main
+            settings_main()
     except Exception as e:
-        st.error(f"Error loading dashboard: {e}")
-        logger.error(f"Dashboard error: {e}", exc_info=True)
+        st.error(f"Error loading page: {e}")
+        logger.error(f"Page load error: {e}", exc_info=True)
 
     # Footer
     st.markdown("---")

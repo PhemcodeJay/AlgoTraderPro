@@ -16,7 +16,6 @@ from exceptions import (
     DatabaseException, DatabaseConnectionException, DatabaseTransactionException,
     DatabaseIntegrityException, DatabaseErrorRecoveryStrategy, create_error_context
 )
-from check_license import validate_license, format_expiration_date  # Import from check_license.py
 
 logger = get_logger(__name__, structured_format=True)
 
@@ -661,28 +660,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error getting wallet balance for {trading_mode}: {e}")
             return None
-
-    def validate_license(self, license_key: str, hostname: Optional[str] = None, mac: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Validate a license key using the external license server.
-        
-        Args:
-            license_key (str): The license key to validate.
-            hostname (str, optional): The hostname of the machine.
-            mac (str, optional): The MAC address of the machine.
-        
-        Returns:
-            dict: Response containing 'valid', 'message', 'tier', and 'expiration_date'.
-        """
-        try:
-            result = validate_license(license_key, hostname, mac)
-            logger.info(f"License validation for {license_key}: {result['message']}")
-            if result["valid"]:
-                result["formatted_expiration_date"] = format_expiration_date(result.get("expiration_date"))
-            return result
-        except Exception as e:
-            logger.error(f"Error validating license {license_key}: {e}")
-            return {"valid": False, "message": f"License validation failed: {str(e)}", "tier": None, "expiration_date": None}
 
     def get_licenses(self, limit: int = 100) -> List[License]:
         """
