@@ -1,9 +1,3 @@
-Got it ✅
-Here’s your **updated `README.md`** with **PostgreSQL + pgAdmin4 + Streamlit + Alembic migrations** all included in one place.
-
----
-
-````markdown
 # AlgoTrader Pro
 
 AlgoTrader Pro is a cryptocurrency algorithmic trading platform built with Streamlit that provides automated trading capabilities across multiple trading pairs on the Bybit exchange. The system operates in both virtual (paper trading) and real trading modes, featuring signal generation using technical indicators, machine learning filtering, portfolio management, and comprehensive performance analytics.
