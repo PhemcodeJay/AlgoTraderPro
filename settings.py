@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv, set_key
-from check_licenses import validate_license, format_expiration_date  # Import license validation functions
+from license_manager import validate_license, format_expiration_date  # Import license validation functions
 
 # Logging using centralized system
 from logging_config import get_logger

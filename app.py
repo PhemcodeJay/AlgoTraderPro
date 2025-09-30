@@ -6,7 +6,7 @@ from datetime import datetime
 from db import db_manager
 from logging_config import get_logger
 from bybit_client import BybitClient
-from check_licenses import check_license, format_expiration_date
+from license_manager import check_license, format_expiration_date
 
 logger = get_logger(__name__)
 

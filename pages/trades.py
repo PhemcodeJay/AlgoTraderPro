@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 import json
 
-from check_licenses import check_license
+from license_manager import check_license
 license_result = check_license()
 
 # Add parent directory to path
