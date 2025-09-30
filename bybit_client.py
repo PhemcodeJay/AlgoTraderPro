@@ -632,23 +632,22 @@ class BybitClient:
         symbol: str,
         side: str,
         qty: float,
-        stop_loss: float,
-        take_profit: float,
         leverage: Optional[int] = 10,
         mode: str = "CROSS"  # Default to CROSS for unified accounts
     ) -> Dict:
-        """Place a market trading order with leverage, cross margin mode for unified accounts, required TP and SL"""
+        """
+        Place a market trading order with leverage, cross margin mode for unified accounts,
+        automatically calculates TP (25% from entry) and SL (5% from entry).
+        """
         try:
-            # Default leverage = 10
             leverage = leverage or 10
 
-            # For unified accounts, use cross margin mode and set leverage only
+            # Determine margin mode for unified/non-unified accounts
             if self.account_type == "UNIFIED":
                 mode = "CROSS"
                 logger.info(f"Unified account detected, using CROSS margin mode for {symbol}")
                 loop = asyncio.get_running_loop()
             else:
-                # For non-unified accounts, set margin mode and leverage
                 trade_mode = 1 if mode.upper() == "ISOLATED" else 0
                 lev_params = {
                     "category": "linear",
@@ -660,7 +659,21 @@ class BybitClient:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
-            # Build order params (always market order, with TP/SL required)
+            # Get current price to calculate SL/TP
+            entry_price = self.get_current_price(symbol)
+
+            # Calculate stop loss and take profit
+            side_lower = side.lower()
+            if side_lower == "buy":
+                stop_loss = entry_price * 0.95  # 5% below entry
+                take_profit = entry_price * 1.25  # 25% above entry
+            elif side_lower == "sell":
+                stop_loss = entry_price * 1.05  # 5% above entry
+                take_profit = entry_price * 0.75  # 25% below entry
+            else:
+                raise ValueError("side must be 'buy' or 'sell'")
+
+            # Build order params
             params = {
                 "category": "linear",
                 "symbol": symbol,
@@ -682,7 +695,7 @@ class BybitClient:
                     "accountType": self.account_type,
                     "side": side,
                     "qty": qty,
-                    "price": self.get_current_price(symbol),
+                    "price": entry_price,
                     "status": "pending",
                     "timestamp": datetime.now(),
                     "virtual": False,
@@ -696,8 +709,7 @@ class BybitClient:
         except APIException as e:
             if e.error_code == "100028":
                 logger.warning(f"Unified account error for {symbol}: {e}. Using cross margin mode.")
-                # Retry with cross margin mode
-                return await self.place_order(symbol, side, qty, stop_loss, take_profit, leverage, mode="CROSS")
+                return await self.place_order(symbol, side, qty, leverage, mode="CROSS")
             logger.error(f"Error placing order for {symbol}: {e}")
             return {"error": str(e)}
         except Exception as e:
