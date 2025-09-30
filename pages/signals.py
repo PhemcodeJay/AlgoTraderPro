@@ -6,6 +6,8 @@ import os
 from datetime import datetime
 import asyncio
 from ml import MLFilter
+from check_license import validate_license, format_expiration_date
+license_result = validate_license(st.text_input("License Key", placeholder="Enter license key"))
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

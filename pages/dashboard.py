@@ -7,6 +7,8 @@ import sys
 import os
 import json
 from datetime import datetime, timezone
+from check_license import validate_license, format_expiration_date
+license_result = validate_license(st.text_input("License Key", placeholder="Enter license key"))
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
