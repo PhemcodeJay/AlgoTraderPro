@@ -674,7 +674,7 @@ class TradingEngine:
                 "qty": position_size,
                 "entry_price": entry_price,
                 "order_id": order_id,
-                "virtual": trading_mode == "virtual",
+                "virtual": trading_mode == "real",
                 "status": "open",
                 "score": signal.get("score"),
                 "strategy": signal.get("strategy", "Auto"),
