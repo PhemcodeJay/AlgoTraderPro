@@ -5,7 +5,11 @@ import sys
 from db import db_manager, WalletBalance
 
 from license_manager import check_license
-license_result = check_license()
+is_valid, license_result = check_license()
+if not is_valid:
+    import streamlit as st
+    st.error("❌ Access Denied: A valid license key is required to use this page.")
+    st.stop()  # ⛔ Prevent the rest of the page from rendering
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -122,9 +126,7 @@ def save_capital_data(capital_data: dict) -> bool:
         return False
 
 def main():
-    is_valid, result = check_license()
-    if not is_valid:
-        st.stop()
+    
     st.markdown("""
     <div style="text-align: center; padding: 1rem 0; border-bottom: 2px solid #00ff88; margin-bottom: 2rem;">
         <h1 style="color: #00ff88; margin: 0;">⚙️ Settings</h1>

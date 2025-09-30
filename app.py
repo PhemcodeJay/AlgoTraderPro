@@ -19,20 +19,20 @@ st.set_page_config(
 )
 
 # --- Session State Initialization ---
-if "trading_mode" not in st.session_state:
-    st.session_state.trading_mode = "virtual"
-if "engine_initialized" not in st.session_state:
-    st.session_state.engine_initialized = False
-if "wallet_cache" not in st.session_state:
-    st.session_state.wallet_cache = {}  # Store balances per mode
-if "bybit_client" not in st.session_state:
-    st.session_state.bybit_client = None
-if "engine" not in st.session_state:
-    st.session_state.engine = None
-if "license_valid" not in st.session_state:
-    st.session_state.license_valid = False
-if "license_key" not in st.session_state:
-    st.session_state.license_key = None
+default_states = {
+    "trading_mode": "virtual",
+    "engine_initialized": False,
+    "wallet_cache": {},
+    "bybit_client": None,
+    "engine": None,
+    "license_valid": False,
+    "license_key": None,
+    "active_page": "📊 Dashboard",
+}
+for k, v in default_states.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
 
 # --- Initialize trading engine ---
 def initialize_engine():
@@ -48,6 +48,7 @@ def initialize_engine():
         logger.error(f"Engine initialization failed: {e}", exc_info=True)
         return False
 
+
 # --- Initialize Bybit client ---
 def initialize_bybit():
     if st.session_state.bybit_client is None:
@@ -58,18 +59,14 @@ def initialize_bybit():
             st.warning("Bybit client connection failed. Check API keys.")
             logger.error("Bybit client connection test failed")
 
+
 # --- Helper: does DB already have any REAL trades? ---
 def db_has_any_trade(mode: str = "real") -> bool:
-    """
-    Return True if the DB already contains at least one trade for the given mode.
-    Tries several common DB methods and fails closed (False) without raising.
-    """
     try:
         db = st.session_state.engine.db if st.session_state.engine else None
         if not db:
             return False
 
-        # Try a few likely APIs, quietly skipping if missing
         try:
             return (db.get_trade_count(mode) or 0) > 0
         except Exception:
@@ -102,18 +99,13 @@ def db_has_any_trade(mode: str = "real") -> bool:
         logger.error(f"db_has_any_trade check failed: {e}", exc_info=True)
         return False
 
+
 # --- Fetch wallet balance ---
 def get_wallet_balance() -> dict:
-    """
-    Fetch wallet balance based on the selected trading mode.
-    Returns a dict with capital, available, and used balances.
-    Always safe, fallback to defaults.
-    """
     mode = st.session_state.trading_mode
     default_virtual = {"capital": 100.0, "available": 100.0, "used": 0.0}
     default_real = {"capital": 0.0, "available": 0.0, "used": 0.0}
 
-    # Check cache
     if mode in st.session_state.wallet_cache:
         logger.info(f"Returning cached {mode} balance: {st.session_state.wallet_cache[mode]}")
         return st.session_state.wallet_cache[mode]
@@ -129,11 +121,10 @@ def get_wallet_balance() -> dict:
                     "used": wallet.used
                 }
                 logger.info(f"Fetched virtual wallet balance: {balance_data}")
-        else:  # real mode
+        else:
             initialize_bybit()
             client = st.session_state.bybit_client
             if client and client.is_connected():
-                # Sync real balance with Bybit
                 st.session_state.engine.sync_real_balance()
                 wallet = db_manager.get_wallet_balance("real")
                 if wallet:
@@ -163,24 +154,30 @@ def get_wallet_balance() -> dict:
         logger.error(f"Error fetching {mode} wallet: {e}", exc_info=True)
         balance_data = default_virtual if mode == "virtual" else default_real
 
-    # Cache balance for this session
     st.session_state.wallet_cache[mode] = balance_data
     logger.info(f"Cached {mode} balance: {balance_data}")
 
-    # Conditional messaging for real balance
     if mode == "real" and balance_data["available"] <= 0:
         st.warning("Real available balance is low or zero. Deposit funds on Bybit.")
     return balance_data
 
-def main():
-    # Check license before proceeding
-    is_valid, license_result = check_license()
-    if not is_valid:
-        return  # Stop execution if license is invalid
 
+# --- Main ---
+def main():
+    # ✅ License check first
+    is_valid, license_result = check_license()
+    st.session_state.license_valid = is_valid
+
+    if not is_valid:
+        st.session_state.active_page = None
+        st.error("❌ Access Denied: A valid license key is required to use AlgoTrader Pro.")
+        logger.warning("App blocked due to invalid or missing license key.")
+        return  # ⛔ Stop app here
+
+    # --- If license is valid, continue ---
     initialize_engine()
-    # Load saved trading mode from DB
-    if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
+
+    if not st.session_state.trading_mode:
         saved_mode = db_manager.get_setting("trading_mode")
         st.session_state.trading_mode = saved_mode if saved_mode in ["virtual", "real"] else "virtual"
         logger.info(f"Loaded trading mode from DB: {st.session_state.trading_mode}")
@@ -189,7 +186,6 @@ def main():
     with st.sidebar:
         st.markdown("### 🎛️ Trading Controls")
 
-        # --- Mode selector ---
         mode_options = ["Virtual", "Real"]
         selected_mode_index = 0 if st.session_state.trading_mode == "virtual" else 1
         selected_mode = st.selectbox("Trading Mode", mode_options, index=selected_mode_index)
@@ -218,7 +214,6 @@ def main():
                             st.info("Live mode enabled. Trade sync will start after the first real trade exists in the database.")
                 st.rerun()
 
-        # --- Engine & API status ---
         engine_status = "🟢 Online" if st.session_state.engine_initialized else "🔴 Offline"
         st.markdown(f"**Engine Status:** {engine_status}")
         mode_color = "🟢" if st.session_state.trading_mode == "virtual" else "🟡"
@@ -228,15 +223,12 @@ def main():
         api_status = "✅ Connected" if st.session_state.bybit_client and st.session_state.bybit_client.is_connected() else "❌ Disconnected"
         st.markdown(f"**API Status:** {api_status}")
 
-        # --- License Info ---
         st.divider()
         st.markdown(f"**License Status:** {'✅ Valid' if license_result['valid'] else '❌ Invalid'}")
         st.markdown(f"**License Tier:** {license_result.get('tier', 'N/A')}")
         st.markdown(f"**Expires:** {license_result.get('formatted_expiration_date', 'N/A')}")
-
         st.divider()
 
-        # --- Page Navigation ---
         st.markdown("### 📂 Pages")
         pages = {
             "📊 Dashboard": "dashboard",
@@ -246,14 +238,9 @@ def main():
             "⚙️ Settings": "settings"
         }
 
-        # Use radio buttons for user-friendly navigation
-        if "active_page" not in st.session_state:
-            st.session_state.active_page = "📊 Dashboard"
-
         selected_page = st.radio("Navigate", list(pages.keys()), index=list(pages.keys()).index(st.session_state.active_page))
         st.session_state.active_page = selected_page
 
-        # --- Wallet Balance ---
         st.divider()
         balance = get_wallet_balance()
         current_mode = st.session_state.trading_mode
@@ -272,7 +259,6 @@ def main():
             st.metric("🏦 Real Available", f"${available_val:.2f}")
             st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
 
-        # --- Emergency Stop ---
         st.divider()
         if st.button("🛑 Emergency Stop"):
             st.session_state.wallet_cache.clear()
@@ -281,7 +267,7 @@ def main():
             st.success("All automated trading stopped and cache cleared")
             logger.info("Emergency stop triggered, cache cleared")
 
-    # --- Main content based on selected page ---
+    # --- Main content ---
     try:
         if st.session_state.active_page == "📊 Dashboard":
             from pages.dashboard import main as dashboard_main
@@ -302,12 +288,12 @@ def main():
         st.error(f"Error loading page: {e}")
         logger.error(f"Page load error: {e}", exc_info=True)
 
-    # Footer
     st.markdown("---")
     st.markdown(
         f"<div style='text-align:center;color:#888;'>AlgoTrader Pro v1.0 | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>",
         unsafe_allow_html=True
     )
+
 
 if __name__ == "__main__":
     main()

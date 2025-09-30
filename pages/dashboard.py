@@ -9,7 +9,11 @@ import json
 from datetime import datetime, timezone
 
 from license_manager import check_license
-license_result = check_license()
+is_valid, license_result = check_license()
+if not is_valid:
+    import streamlit as st
+    st.error("❌ Access Denied: A valid license key is required to use this page.")
+    st.stop()  # ⛔ Prevent the rest of the page from rendering
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -236,9 +240,7 @@ def load_capital_data(bybit_client: Optional['BybitClient'] = None) -> dict:
 
 
 def main():
-    is_valid, result = check_license()
-    if not is_valid:
-        st.stop()
+    
     # Ensure trading mode is initialized
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
         saved_mode = db_manager.get_setting("trading_mode")
