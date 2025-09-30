@@ -187,6 +187,9 @@ async def execute_real_trade(engine, signal):
         return False
 
 def main():
+    is_valid, result = check_license()
+    if not is_valid:
+        st.stop()
     st.markdown("""
     <div style="text-align: center; padding: 1rem 0; border-bottom: 2px solid #00ff88; margin-bottom: 2rem;">
         <h1 style="color: #00ff88; margin: 0;">🎯 Trading Signals</h1>

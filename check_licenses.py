@@ -60,7 +60,7 @@ def format_expiration_date(expiration_str):
 # Helper function to initialize license tables
 def init_license_tables():
     try:
-        conn = sqlite3.connect("algotrader.db")
+        conn = sqlite3.connect("algotrader-license.db")
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -86,7 +86,7 @@ def init_license_tables():
 # Helper function to get license key from DB
 def get_license_from_db():
     try:
-        conn = sqlite3.connect("algotrader.db")
+        conn = sqlite3.connect("algotrader-license.db")
         cursor = conn.cursor()
         cursor.execute("SELECT value FROM settings WHERE key = ?", ("license_key",))
         result = cursor.fetchone()
@@ -99,7 +99,7 @@ def get_license_from_db():
 # Helper function to save license key and log to DB
 def save_license_to_db(license_key: str, result: dict) -> bool:
     try:
-        conn = sqlite3.connect("algotrader.db")
+        conn = sqlite3.connect("algotrader-license.db")
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("license_key", license_key))
         cursor.execute("""

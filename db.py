@@ -347,7 +347,7 @@ class DatabaseManager:
         try:
             db_host = os.getenv("DB_HOST", "localhost")
             db_port = os.getenv("DB_PORT", 5432)
-            db_name = os.getenv("DB_NAME", "Algotrader")
+            db_name = os.getenv("DB_NAME", "Algotrader-license")
             db_user = os.getenv("DB_USER", "postgres")
             db_password = os.getenv("DB_PASSWORD", "1234")
 
@@ -361,7 +361,7 @@ class DatabaseManager:
         except OperationalError as pg_err:
             logger.warning(f"PostgreSQL connection failed: {pg_err}. Falling back to SQLite.")
             try:
-                sqlite_url = os.getenv("SQLITE_URL", "sqlite:///algotrader.db")
+                sqlite_url = os.getenv("SQLITE_URL", "sqlite:///algotrader-license.db")
                 self.engine = create_engine(sqlite_url, echo=False)
                 Base.metadata.create_all(self.engine)
                 Session = sessionmaker(bind=self.engine)

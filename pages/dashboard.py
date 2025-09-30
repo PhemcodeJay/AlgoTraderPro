@@ -236,6 +236,9 @@ def load_capital_data(bybit_client: Optional['BybitClient'] = None) -> dict:
 
 
 def main():
+    is_valid, result = check_license()
+    if not is_valid:
+        st.stop()
     # Ensure trading mode is initialized
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
         saved_mode = db_manager.get_setting("trading_mode")
