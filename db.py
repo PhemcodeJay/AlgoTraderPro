@@ -2,10 +2,10 @@ import os
 import json
 import time
 from datetime import datetime, timezone
-from dateutil import parser 
+from dateutil import parser
 from typing import List, Dict, Any, Optional, Callable, Union
 from dataclasses import dataclass, asdict, field
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy import create_engine, Integer, String, Float, DateTime, Boolean, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Mapped, mapped_column
@@ -16,6 +16,7 @@ from exceptions import (
     DatabaseException, DatabaseConnectionException, DatabaseTransactionException,
     DatabaseIntegrityException, DatabaseErrorRecoveryStrategy, create_error_context
 )
+from check_license import validate_license, format_expiration_date  # Import from check_license.py
 
 logger = get_logger(__name__, structured_format=True)
 
@@ -42,12 +43,9 @@ class Signal:
     id: Union[str, None] = None
 
     def __post_init__(self):
-        # Auto-generate UUID if no id provided
         if not self.id:
             self.id = str(uuid.uuid4())
-        # Normalize side to uppercase
         self.side = self.side.upper()
-        # Ensure created_at is UTC-aware
         if self.created_at and self.created_at.tzinfo is None:
             self.created_at = self.created_at.replace(tzinfo=timezone.utc)
 
@@ -56,7 +54,6 @@ class Signal:
         if self.created_at:
             data["created_at"] = self.created_at.isoformat()
         return data
-
 
 @dataclass
 class Trade:
@@ -82,10 +79,8 @@ class Trade:
     id: Union[str, None] = None
 
     def __post_init__(self):
-        # Auto-generate UUID if no id provided
         if not self.id:
             self.id = str(uuid.uuid4())
-        # Normalize datetimes to UTC-aware
         if self.timestamp and self.timestamp.tzinfo is None:
             self.timestamp = self.timestamp.replace(tzinfo=timezone.utc)
         if self.closed_at and self.closed_at.tzinfo is None:
@@ -101,7 +96,7 @@ class Trade:
 
 @dataclass
 class WalletBalance:
-    trading_mode: str  # 'virtual' or 'real'
+    trading_mode: str
     capital: float
     available: float
     used: float
@@ -116,20 +111,65 @@ class WalletBalance:
             data['updated_at'] = self.updated_at.isoformat()
         return data
 
+@dataclass
+class License:
+    license_key: str
+    user_email: Optional[str] = None
+    tier: str = "basic"
+    duration_days: int = 30
+    machine_hash: Optional[str] = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    expiration_date: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    is_active: bool = True
+    notes: Optional[str] = None
+    id: Optional[int] = None
+
+    def __post_init__(self):
+        if self.created_at and self.created_at.tzinfo is None:
+            self.created_at = self.created_at.replace(tzinfo=timezone.utc)
+        if self.expiration_date and self.expiration_date.tzinfo is None:
+            self.expiration_date = self.expiration_date.replace(tzinfo=timezone.utc)
+
+    def to_dict(self) -> Dict:
+        data = asdict(self)
+        if self.created_at:
+            data["created_at"] = self.created_at.isoformat()
+        if self.expiration_date:
+            data["expiration_date"] = self.expiration_date.isoformat()
+        return data
+
+@dataclass
+class LicenseLog:
+    license_key: str
+    event_type: str
+    event_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    hostname: Optional[str] = None
+    mac_address: Optional[str] = None
+    ip_address: Optional[str] = None
+    geo: Optional[Dict] = None
+    message: Optional[str] = None
+    id: Optional[int] = None
+
+    def __post_init__(self):
+        if self.event_time and self.event_time.tzinfo is None:
+            self.event_time = self.event_time.replace(tzinfo=timezone.utc)
+
+    def to_dict(self) -> Dict:
+        data = asdict(self)
+        if self.event_time:
+            data["event_time"] = self.event_time.isoformat()
+        return data
+
 # SQLAlchemy Models
 class SignalModel(Base):
     __tablename__ = 'signals'
     
-    id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4  # 👈 auto-generate UUID
-    )
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
     interval: Mapped[str] = mapped_column(String(10), nullable=False)
     signal_type: Mapped[str] = mapped_column(String(20), nullable=False)
     score: Mapped[float] = mapped_column(Float, nullable=False)
-    indicators: Mapped[str] = mapped_column(Text, nullable=False)  # JSON string
+    indicators: Mapped[str] = mapped_column(Text, nullable=False)
     strategy: Mapped[str] = mapped_column(String(20), default="Auto")
     side: Mapped[str] = mapped_column(String(10), default="Buy")
     sl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -144,7 +184,7 @@ class SignalModel(Base):
 
     def to_signal(self) -> Signal:
         return Signal(
-            id=str(self.id) if self.id else None, # ✅ Cast int → str
+            id=str(self.id) if self.id else None,
             symbol=self.symbol,
             interval=self.interval,
             signal_type=self.signal_type,
@@ -189,7 +229,7 @@ class TradeModel(Base):
 
     def to_trade(self) -> Trade:
         return Trade(
-            id=str(self.id) if self.id is not None else None,  # ✅ Cast int → str
+            id=str(self.id) if self.id is not None else None,
             symbol=self.symbol,
             side=self.side,
             qty=self.qty,
@@ -243,6 +283,60 @@ class SettingsModel(Base):
     value: Mapped[str] = mapped_column(String(255), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+class LicenseModel(Base):
+    __tablename__ = 'licenses'
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    license_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    user_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    tier: Mapped[str] = mapped_column(String(50), default="basic")
+    duration_days: Mapped[int] = mapped_column(Integer, default=30)
+    machine_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    expiration_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    def to_license(self) -> License:
+        return License(
+            id=self.id,
+            license_key=self.license_key,
+            user_email=self.user_email,
+            tier=self.tier,
+            duration_days=self.duration_days,
+            machine_hash=self.machine_hash,
+            created_at=self.created_at,
+            expiration_date=self.expiration_date,
+            is_active=self.is_active,
+            notes=self.notes
+        )
+
+class LicenseLogModel(Base):
+    __tablename__ = 'license_logs'
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    license_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    mac_address: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    geo: Mapped[Optional[Dict]] = mapped_column(JSONB, nullable=True)
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    def to_license_log(self) -> LicenseLog:
+        return LicenseLog(
+            id=self.id,
+            license_key=self.license_key,
+            event_type=self.event_type,
+            event_time=self.event_time,
+            hostname=self.hostname,
+            mac_address=self.mac_address,
+            ip_address=self.ip_address,
+            geo=self.geo,
+            message=self.message
+        )
+
 class DatabaseManager:
     def __init__(self):
         self.engine = None
@@ -252,17 +346,13 @@ class DatabaseManager:
 
     def _initialize_db(self):
         try:
-            # === PostgreSQL Configuration ===
             db_host = os.getenv("DB_HOST", "localhost")
             db_port = os.getenv("DB_PORT", 5432)
             db_name = os.getenv("DB_NAME", "Algotrader")
             db_user = os.getenv("DB_USER", "postgres")
             db_password = os.getenv("DB_PASSWORD", "1234")
 
-            # Construct PostgreSQL URL
             postgres_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-
-            # Try connecting to PostgreSQL
             self.engine = create_engine(postgres_url, echo=False)
             Base.metadata.create_all(self.engine)
             Session = sessionmaker(bind=self.engine)
@@ -272,7 +362,6 @@ class DatabaseManager:
         except OperationalError as pg_err:
             logger.warning(f"PostgreSQL connection failed: {pg_err}. Falling back to SQLite.")
             try:
-                # Fallback to SQLite
                 sqlite_url = os.getenv("SQLITE_URL", "sqlite:///algotrader.db")
                 self.engine = create_engine(sqlite_url, echo=False)
                 Base.metadata.create_all(self.engine)
@@ -302,7 +391,7 @@ class DatabaseManager:
                 context=error_context,
                 original_exception=e
             )
-    
+
     def _get_session(self):
         if self.session is None:
             Session = sessionmaker(bind=self.engine)
@@ -411,15 +500,14 @@ class DatabaseManager:
         def _add_signal():
             if not self.session:
                 raise DatabaseConnectionException("Database session not initialized")
-
             signal_model = SignalModel(
                 symbol=signal.symbol,
                 interval=signal.interval,
                 signal_type=signal.signal_type,
                 score=signal.score,
-                indicators=json.dumps(signal.indicators),  # ✅ store JSON as text
+                indicators=json.dumps(signal.indicators),
                 strategy=signal.strategy,
-                side=signal.side.upper(),  # ✅ normalize side
+                side=signal.side.upper(),
                 sl=signal.sl,
                 tp=signal.tp,
                 trail=signal.trail,
@@ -430,7 +518,6 @@ class DatabaseManager:
                 market=signal.market,
                 created_at=signal.created_at or datetime.now(timezone.utc)
             )
-
             self.session.add(signal_model)
             return True
 
@@ -442,7 +529,6 @@ class DatabaseManager:
             )()
             logger.info(f"✅ Signal added for {signal.symbol}")
             return result
-
         except DatabaseException:
             logger.error(f"❌ Failed to add signal for {signal.symbol}")
             raise
@@ -450,17 +536,13 @@ class DatabaseManager:
             logger.error(f"🔥 Unexpected error adding signal for {signal.symbol}: {e}")
             return False
 
-        
     def add_trade(self, trade: Dict) -> bool:
         if not self.session:
             raise DatabaseConnectionException("Database session not initialized")
-
-        # 🔑 Force conversion BEFORE wrapper
         if isinstance(trade.get("timestamp"), str):
             trade["timestamp"] = parser.isoparse(trade["timestamp"])
         elif trade.get("timestamp") is None:
             trade["timestamp"] = datetime.now(timezone.utc)
-
         if isinstance(trade.get("closed_at"), str):
             trade["closed_at"] = parser.isoparse(trade["closed_at"])
 
@@ -483,8 +565,8 @@ class DatabaseManager:
                 score=trade.get('score'),
                 strategy=trade.get('strategy', 'Manual'),
                 leverage=trade.get('leverage', 10),
-                timestamp=trade['timestamp'],     # ✅ already datetime
-                closed_at=trade.get('closed_at')  # ✅ datetime or None
+                timestamp=trade['timestamp'],
+                closed_at=trade.get('closed_at')
             )    
             self._get_session().add(trade_model)
             return True
@@ -499,7 +581,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Unexpected error adding trade for {trade['symbol']}: {e}")
             return False
-    
 
     def update_wallet_balance(self, wallet_balance: WalletBalance) -> bool:
         def _update_wallet_balance():
@@ -581,6 +662,74 @@ class DatabaseManager:
             logger.error(f"Error getting wallet balance for {trading_mode}: {e}")
             return None
 
+    def validate_license(self, license_key: str, hostname: Optional[str] = None, mac: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Validate a license key using the external license server.
+        
+        Args:
+            license_key (str): The license key to validate.
+            hostname (str, optional): The hostname of the machine.
+            mac (str, optional): The MAC address of the machine.
+        
+        Returns:
+            dict: Response containing 'valid', 'message', 'tier', and 'expiration_date'.
+        """
+        try:
+            result = validate_license(license_key, hostname, mac)
+            logger.info(f"License validation for {license_key}: {result['message']}")
+            if result["valid"]:
+                result["formatted_expiration_date"] = format_expiration_date(result.get("expiration_date"))
+            return result
+        except Exception as e:
+            logger.error(f"Error validating license {license_key}: {e}")
+            return {"valid": False, "message": f"License validation failed: {str(e)}", "tier": None, "expiration_date": None}
+
+    def get_licenses(self, limit: int = 100) -> List[License]:
+        """
+        Retrieve a list of licenses from the database.
+        
+        Args:
+            limit (int): Maximum number of licenses to retrieve.
+        
+        Returns:
+            List[License]: List of License objects.
+        """
+        try:
+            def _get_licenses():
+                if not self.session:
+                    raise DatabaseConnectionException("Database session not initialized")
+                licenses = self.session.query(LicenseModel).order_by(
+                    LicenseModel.created_at.desc()
+                ).limit(limit).all()
+                return [l.to_license() for l in licenses]
+            return self._execute_with_retry(_get_licenses, "get_licenses")
+        except Exception as e:
+            logger.error(f"Error getting licenses: {e}")
+            return []
+
+    def get_license_logs(self, limit: int = 100) -> List[LicenseLog]:
+        """
+        Retrieve a list of license logs from the database.
+        
+        Args:
+            limit (int): Maximum number of license logs to retrieve.
+        
+        Returns:
+            List[LicenseLog]: List of LicenseLog objects.
+        """
+        try:
+            def _get_license_logs():
+                if not self.session:
+                    raise DatabaseConnectionException("Database session not initialized")
+                logs = self.session.query(LicenseLogModel).order_by(
+                    LicenseLogModel.event_time.desc()
+                ).limit(limit).all()
+                return [log.to_license_log() for log in logs]
+            return self._execute_with_retry(_get_license_logs, "get_license_logs")
+        except Exception as e:
+            logger.error(f"Error getting license logs: {e}")
+            return []
+
     def migrate_capital_json_to_db(self, capital_file_path: str = "capital.json") -> bool:
         try:
             if not os.path.exists(capital_file_path):
@@ -610,7 +759,6 @@ class DatabaseManager:
             with open(capital_file_path, "r") as f:
                 capital_data = json.load(f)
 
-            # Migrate virtual balance
             if "virtual" in capital_data:
                 v = capital_data["virtual"]
                 virtual_balance = WalletBalance(
@@ -625,7 +773,6 @@ class DatabaseManager:
                 self.update_wallet_balance(virtual_balance)
                 logger.info("Virtual balance migrated to database")
 
-            # Migrate real balance  
             if "real" in capital_data:
                 r = capital_data["real"]
                 real_balance = WalletBalance(
@@ -648,7 +795,6 @@ class DatabaseManager:
             return False
 
     def get_all_wallet_balances(self) -> Dict[str, WalletBalance]:
-        """Get all wallet balances as a dictionary"""
         if not self.session:
             logger.error("Database session not initialized")
             return {}
@@ -660,7 +806,6 @@ class DatabaseManager:
             return {}
 
     def save_setting(self, key: str, value: str) -> bool:
-        """Save a setting to the database"""
         def _save_setting_operation():
             if not self.session:
                 raise DatabaseConnectionException("Database session not initialized")
@@ -685,7 +830,6 @@ class DatabaseManager:
             return False
 
     def get_setting(self, key: str) -> Optional[str]:
-        """Retrieve a setting from the database"""
         def _get_setting_operation():
             if not self.session:
                 raise DatabaseConnectionException("Database session not initialized")
@@ -704,7 +848,6 @@ class DatabaseManager:
             return None
 
     def close(self):
-        """Close database connection"""
         try:
             if self.session:
                 self.session.close()
@@ -715,14 +858,12 @@ class DatabaseManager:
             logger.error(f"Failed to close database connection: {str(e)}")
 
     def get_connection_stats(self) -> Dict[str, Any]:
-        """Get database connection statistics"""
         stats = {
             'pool_status': 'unknown',
             'checked_out': 0,
             'overflow': 0,
             'pool_size': 0
         }
-        
         try:
             if self.engine and hasattr(self.engine, 'pool'):
                 pool = self.engine.pool
@@ -734,7 +875,6 @@ class DatabaseManager:
                 })
         except Exception as e:
             stats['error'] = str(e)
-            
         return stats
 
 # Global database manager instance

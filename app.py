@@ -6,6 +6,7 @@ from datetime import datetime
 from db import db_manager
 from logging_config import get_logger
 from bybit_client import BybitClient
+from check_license import validate_license  # Import validate_license
 
 # Logging using centralized system
 logger = get_logger(__name__)
@@ -29,6 +30,10 @@ if "bybit_client" not in st.session_state:
     st.session_state.bybit_client = None
 if "engine" not in st.session_state:
     st.session_state.engine = None
+if "license_valid" not in st.session_state:
+    st.session_state.license_valid = False
+if "license_key" not in st.session_state:
+    st.session_state.license_key = None
 
 # --- Initialize trading engine ---
 def initialize_engine():
@@ -171,7 +176,76 @@ def get_wallet_balance() -> dict:
             st.warning("Real available balance is low or zero. Deposit funds on Bybit.")
     return balance_data
 
+# --- Validate License ---
+def validate_user_license():
+    """
+    Validate the user's license key, prompting for a new key if none exists or if invalid.
+    Returns True if the license is valid, False otherwise.
+    """
+    # Check for saved license key in the database
+    saved_license_key = db_manager.get_setting("license_key")
+    if saved_license_key and st.session_state.license_key != saved_license_key:
+        st.session_state.license_key = saved_license_key
+
+    # If no license key in session state, prompt for one
+    if not st.session_state.license_key:
+        st.warning("Please enter a valid license key to access AlgoTrader Pro.")
+        with st.form("license_form"):
+            license_key_input = st.text_input("License Key", placeholder="e.g., 123e4567-e89b-12d3-a456-426614174000")
+            submitted = st.form_submit_button("Validate License")
+            if submitted:
+                if not license_key_input:
+                    st.error("Please enter a license key.")
+                    return False
+                license_result = db_manager.validate_license(license_key_input)
+                if license_result["valid"]:
+                    st.session_state.license_valid = True
+                    st.session_state.license_key = license_key_input
+                    db_manager.save_setting("license_key", license_key_input)
+                    st.success(f"License validated successfully! Tier: {license_result['tier']}, Expires: {license_result['formatted_expiration_date']}")
+                    logger.info(f"License validated: {license_key_input}, Tier: {license_result['tier']}")
+                    st.rerun()
+                else:
+                    st.error(f"Invalid license key: {license_result['message']}")
+                    logger.error(f"License validation failed: {license_result['message']}")
+                    return False
+        return False
+
+    # Validate existing license key
+    license_result = db_manager.validate_license(st.session_state.license_key)
+    if license_result["valid"]:
+        st.session_state.license_valid = True
+        logger.info(f"License {st.session_state.license_key} is valid: Tier={license_result['tier']}")
+        return True
+    else:
+        st.error(f"License is invalid: {license_result['message']}. Please enter a new license key.")
+        logger.error(f"License validation failed for {st.session_state.license_key}: {license_result['message']}")
+        with st.form("license_form"):
+            license_key_input = st.text_input("New License Key", placeholder="e.g., 123e4567-e89b-12d3-a456-426614174000")
+            submitted = st.form_submit_button("Validate New License")
+            if submitted:
+                if not license_key_input:
+                    st.error("Please enter a license key.")
+                    return False
+                new_license_result = db_manager.validate_license(license_key_input)
+                if new_license_result["valid"]:
+                    st.session_state.license_valid = True
+                    st.session_state.license_key = license_key_input
+                    db_manager.save_setting("license_key", license_key_input)
+                    st.success(f"License validated successfully! Tier: {new_license_result['tier']}, Expires: {new_license_result['formatted_expiration_date']}")
+                    logger.info(f"New license validated: {license_key_input}, Tier: {new_license_result['tier']}")
+                    st.rerun()
+                else:
+                    st.error(f"Invalid license key: {new_license_result['message']}")
+                    logger.error(f"New license validation failed: {new_license_result['message']}")
+                    return False
+        return False
+
 def main():
+    # Validate license before proceeding
+    if not validate_user_license():
+        return  # Stop execution if license is invalid
+
     initialize_engine()
     # Load saved trading mode from DB
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
@@ -222,6 +296,13 @@ def main():
         api_status = "✅ Connected" if st.session_state.bybit_client and st.session_state.bybit_client.is_connected() else "❌ Disconnected"
         st.markdown(f"**API Status:** {api_status}")
 
+        # --- License Info ---
+        st.divider()
+        license_info = db_manager.validate_license(st.session_state.license_key)
+        st.markdown(f"**License Status:** {'✅ Valid' if license_info['valid'] else '❌ Invalid'}")
+        st.markdown(f"**License Tier:** {license_info.get('tier', 'N/A')}")
+        st.markdown(f"**Expires:** {license_info.get('formatted_expiration_date', 'N/A')}")
+
         st.divider()
 
         # --- Lower Section: Page Navigation ---
@@ -268,7 +349,6 @@ def main():
                 st.session_state.automated_trader.stop()
             st.success("All automated trading stopped and cache cleared")
             logger.info("Emergency stop triggered, cache cleared")
-
 
     # --- Main dashboard ---
     try:
