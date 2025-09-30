@@ -24,7 +24,7 @@ class TradingEngine:
             # Position safety limits
             self.max_position_size = self.settings.get("MAX_POSITION_SIZE", 10000.0)  # USDT
             self.max_open_positions = self.settings.get("MAX_OPEN_POSITIONS", 10)
-            self.max_daily_loss = self.settings.get("MAX_DAILY_LOSS", 1000.0)  # USDT
+            self.max_daily_loss = self.settings.get("MAX_DAILY_LOSS", 100.0)  # USDT
             self.max_risk_per_trade = self.settings.get("MAX_RISK_PER_TRADE", 0.05)  # 5%
             
             # Trading state management
@@ -210,32 +210,97 @@ class TradingEngine:
             "XRPUSDT", "BNBUSDT", "AVAXUSDT"
         ])
 
-    def calculate_position_size(self, symbol: str, entry_price: float, 
-                              risk_percent: Optional[float] = None, leverage: Optional[int] = None) -> float:
-        """Calculate position size based on risk management"""
+    def get_symbol_info(self, symbol: str) -> Dict:
+        """Get symbol information (e.g., lot size)"""
         try:
+            result = self.client._make_request("GET", "/v5/market/instruments-info", {
+                "category": "linear",
+                "symbol": symbol
+            })
+            if result and "list" in result and result["list"]:
+                return result["list"][0]
+            return {}
+        except Exception as e:
+            logger.error(f"Error getting symbol info for {symbol}: {e}")
+            return {}
+    
+    def calculate_position_size(
+        self,
+        symbol: str,
+        entry_price: float,
+        risk_percent: Optional[float] = None,
+        leverage: Optional[int] = None,
+        available_balance: Optional[float] = None
+    ) -> float:
+        """Calculate position size based on risk, available balance, leverage, and symbol rules."""
+        try:
+            import math
+
+            # --- Determine risk & leverage ---
             risk_pct = risk_percent or self.settings.get("RISK_PCT", 0.01)
             lev = leverage or self.settings.get("LEVERAGE", 10)
-            
-            # Load current balance from database
-            wallet_balance = self.db.get_wallet_balance("virtual")
+
+            # --- Get wallet balance ---
+            mode = "real" if self.db.get_setting("trading_mode") == "real" else "virtual"
+            wallet_balance = self.db.get_wallet_balance(mode)
             if not wallet_balance:
-                # Fallback: migrate if no database wallet exists
                 self.db.migrate_capital_json_to_db()
-                wallet_balance = self.db.get_wallet_balance("virtual")
-            
-            # Use virtual balance by default
-            balance = wallet_balance.available if wallet_balance else 100.0
-            
-            # Calculate position size
-            risk_amount = balance * risk_pct
+                wallet_balance = self.db.get_wallet_balance(mode)
+
+            balance = available_balance if available_balance is not None else (wallet_balance.available if wallet_balance else 100.0)
+            if balance <= 0:
+                logger.warning(f"Cannot calculate position size for {symbol}: Available balance is {balance}")
+                return 0.0
+
+            # --- Risk-based position sizing ---
+            risk_amount = max(balance * risk_pct, 1.0)  # enforce at least $1 risk
             position_value = risk_amount * lev
             position_size = position_value / entry_price
-            
-            return round(position_size, 6)
+
+            # --- Symbol trading rules ---
+            symbol_info = self.get_symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"No symbol info for {symbol}")
+                return 0.0
+
+            lot_size_filter = symbol_info.get("lotSizeFilter", {})
+            min_qty = float(lot_size_filter.get("minOrderQty", 0))
+            qty_step = float(lot_size_filter.get("qtyStep", 0))
+
+            # --- Enforce minimum quantity safely ---
+            if min_qty > 0 and position_size < min_qty:
+                min_position_value = min_qty * entry_price
+                min_margin_required = min_position_value / lev
+                if min_margin_required > balance:
+                    # Try to allocate at least a fraction of min_qty if balance is very small
+                    fraction = balance * lev / entry_price
+                    if fraction >= qty_step:
+                        position_size = max(fraction, qty_step)
+                        logger.info(f"Adjusted tiny balance to position size {position_size} for {symbol}")
+                    else:
+                        logger.warning(
+                            f"Skipping {symbol}: required margin {min_margin_required:.2f}, available {balance:.2f}"
+                        )
+                        return 0.0
+                else:
+                    position_size = min_qty
+                    logger.info(f"Adjusted position size up to minimum {min_qty} for {symbol}")
+
+            # --- Align to quantity step ---
+            if qty_step > 0:
+                steps = math.floor(position_size / qty_step)
+                position_size = steps * qty_step
+                # Ensure still >= min_qty
+                if min_qty > 0 and position_size < min_qty:
+                    position_size = min_qty
+
+            # --- Return safe rounded value ---
+            return round(position_size, 6) if position_size > 0 else 0.0
+
         except Exception as e:
-            logger.error(f"Error calculating position size: {e}")
-            return 0.01
+            logger.error(f"Error calculating position size for {symbol}: {e}", exc_info=True)
+            return 0.0
+
 
     def calculate_virtual_pnl(self, trade: Dict) -> float:
         """Calculate unrealized PnL for virtual trades"""
@@ -398,7 +463,7 @@ class TradingEngine:
                 logger.error("Bybit client not initialized. Check API credentials in .env")
                 return False
 
-            # Attempt to ensure client is connected
+            # Ensure client connection
             if not self.client.is_connected():
                 logger.warning("Bybit client not connected. Attempting to reconnect...")
                 try:
@@ -411,7 +476,7 @@ class TradingEngine:
                     logger.error(f"Reconnection failed: {e}", exc_info=True)
                     return False
 
-            # Fetch raw response to access top-level fields
+            # Fetch balance from Bybit
             result = self.client._make_request(
                 "GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"}
             )
@@ -422,26 +487,39 @@ class TradingEngine:
 
             wallet = result["list"][0]
 
-            # Use top-level fields for accurate balances (strings converted to float)
-            total_equity = float(wallet.get("totalEquity", "0") or 0)
-            total_available = float(wallet.get("totalAvailableBalance", "0") or 0)
-            used = total_equity - total_available
+            # Total equity (net assets)
+            total_equity = float(wallet.get("totalEquity") or 0.0)
 
-            # Optional: Warning if balances are zero
-            if total_available == 0:
-                logger.warning("Total available balance is 0. This may indicate no funds or an API issue.")
-
-            # Coin-specific check for USDT (for logging/validation only)
+            # Look for USDT balance
             coins = wallet.get("coin", [])
-            usdt_coin = next((coin for coin in coins if coin.get("coin") == "USDT"), None)
-            if not usdt_coin:
-                logger.warning("No USDT coin data found in Bybit response. Using total balances.")
+            usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
 
-            # Get existing start_balance from DB
+            if usdt_coin:
+                # Use walletBalance (available to trade/withdraw)
+                total_available = float(usdt_coin.get("walletBalance") or 0.0)
+            else:
+                total_available = total_equity  # fallback if USDT not found
+
+            # Recalculate used accurately
+            used = max(total_equity - total_available, 0.0)
+            if used < 1e-6:  # suppress tiny floating point noise
+                used = 0.0
+
+            if total_available == 0 and total_equity > 0:
+                logger.warning(
+                    "Available balance is 0 while equity > 0. "
+                    "Funds may be locked in margin, open positions, or collateral disabled in Bybit."
+                )
+
+            # Preserve start balance from DB
             existing_balance: Optional[DBWalletBalance] = self.db.get_wallet_balance("real")
-            start_balance = existing_balance.start_balance if existing_balance and existing_balance.start_balance > 0 else total_equity
+            start_balance = (
+                existing_balance.start_balance
+                if existing_balance and existing_balance.start_balance > 0
+                else total_equity
+            )
 
-            # Create WalletBalance
+            # Build wallet balance model
             wallet_balance = DBWalletBalance(
                 trading_mode="real",
                 capital=total_equity,
@@ -453,10 +531,12 @@ class TradingEngine:
                 id=existing_balance.id if existing_balance else None,
             )
 
-            # Update database
-            success = self.db.update_wallet_balance(wallet_balance)
-            if success:
-                logger.info(f"✅ Real balance synced with Bybit: Capital=${total_equity:.2f}, Available=${total_available:.2f}, Used=${used:.2f}")
+            # Save to DB
+            if self.db.update_wallet_balance(wallet_balance):
+                logger.info(
+                    f"✅ Real balance synced with Bybit: Capital=${total_equity:.2f}, "
+                    f"Available=${total_available:.2f}, Used=${used:.2f}"
+                )
                 return True
             else:
                 logger.error("Failed to update wallet balance in database")
@@ -465,7 +545,7 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"❌ Error syncing real balance: {e}", exc_info=True)
             return False
-         
+
     def execute_virtual_trade(self, signal: Dict, trading_mode: str = "virtual") -> bool:
         """Execute a virtual trade based on a signal"""
         try:
@@ -474,7 +554,7 @@ class TradingEngine:
                 logger.error("Symbol is required for executing trade")
                 return False
                 
-            side = signal.get("side", "Buy")
+            side = signal.get("side", "Buy").upper()  # Normalize to uppercase
             entry_price = signal.get("entry") or self.client.get_current_price(symbol)
             
             if entry_price <= 0:
@@ -495,18 +575,134 @@ class TradingEngine:
                 "status": "open",
                 "score": signal.get("score"),
                 "strategy": signal.get("strategy", "Auto"),
-                "leverage": signal.get("leverage", 10)
+                "leverage": signal.get("leverage", 10),
+                "sl": signal.get("sl"),  # Stop Loss from signal
+                "tp": signal.get("tp"),  # Take Profit from signal
+                "trail": signal.get("trail"),  # Trailing Stop from signal
+                "liquidation": signal.get("liquidation"),  # Liquidation price from signal
+                "margin_usdt": signal.get("margin_usdt")  # Margin from signal
             }
             
             # Save to database
             success = self.db.add_trade(trade_data)
             if success:
-                logger.info(f"Virtual trade executed: {symbol} {side} @ {entry_price}")
+                logger.info(
+                    f"Virtual trade executed: {symbol} {side} @ {entry_price}, "
+                    f"SL: {trade_data['sl']}, TP: {trade_data['tp']}, "
+                    f"Trail: {trade_data['trail']}, Liquidation: {trade_data['liquidation']}, "
+                    f"Margin: {trade_data['margin_usdt']} USDT"
+                )
                 return True
             return False
             
         except Exception as e:
-            logger.error(f"Error executing virtual trade: {e}")
+            logger.error(f"Error executing virtual trade: {e}", exc_info=True)
+            return False
+            
+    from datetime import datetime
+
+    async def execute_real_trade(self, signal: dict, trading_mode: str = "real") -> bool:
+        """Execute a real trade on Bybit based on a signal, with 5% SL and 25% TP."""
+        try:
+            symbol = signal.get("symbol")
+            if not symbol:
+                logger.error("Symbol is required for executing trade")
+                return False
+
+            side = signal.get("side", "Buy").upper()  # Normalize to uppercase
+            entry_price = signal.get("entry") or await self.client.get_current_price(symbol)
+            if entry_price <= 0:
+                logger.error(f"Invalid entry price for {symbol}")
+                return False
+
+            # Percentage-based SL and TP
+            sl_percent = 5   # 5% stop loss
+            tp_percent = 25  # 25% take profit
+
+            if side == "BUY":
+                stop_loss = entry_price * (1 - sl_percent / 100)
+                take_profit = entry_price * (1 + tp_percent / 100)
+            else:  # SELL
+                stop_loss = entry_price * (1 + sl_percent / 100)
+                take_profit = entry_price * (1 - tp_percent / 100)
+
+            # Calculate position size
+            position_size = self.calculate_position_size(symbol, entry_price)
+            if position_size <= 0:
+                logger.error(f"Invalid position size for {symbol}: {position_size}")
+                return False
+
+            # Place main order (without SL/TP)
+            order_response = await self.client.place_order(
+                symbol=symbol,
+                side=side,
+                qty=position_size,
+                leverage=signal.get("leverage", 10)
+            )
+
+            if not order_response.get("success", False):
+                logger.error(f"Failed to place order for {symbol}: {order_response.get('error', 'Unknown error')}")
+                return False
+
+            order_id = order_response.get("order_id", f"real_{symbol}_{int(datetime.now().timestamp())}")
+
+            # Set conditional orders for SL and TP
+            opposite_side = "Sell" if side == "BUY" else "Buy"
+
+            # Stop Loss
+            await self.client.create_conditional_order(
+                symbol=symbol,
+                side=opposite_side,
+                order_type="Stop",
+                qty=position_size,
+                stop_px=stop_loss
+            )
+
+            # Take Profit
+            await self.client.create_conditional_order(
+                symbol=symbol,
+                side=opposite_side,
+                order_type="Limit",
+                qty=position_size,
+                price=take_profit
+            )
+
+            # Prepare trade data
+            trade_data = {
+                "symbol": symbol,
+                "side": side,
+                "qty": position_size,
+                "entry_price": entry_price,
+                "order_id": order_id,
+                "virtual": trading_mode == "virtual",
+                "status": "open",
+                "score": signal.get("score"),
+                "strategy": signal.get("strategy", "Auto"),
+                "leverage": signal.get("leverage", 10),
+                "sl": stop_loss,
+                "tp": take_profit,
+                "trail": signal.get("trail"),
+                "liquidation": signal.get("liquidation"),
+                "margin_usdt": signal.get("margin_usdt")
+            }
+
+            # Save trade to database asynchronously
+            success = await self.db.add_trade(trade_data)
+            if success:
+                logger.info(
+                    f"Real trade executed: {symbol} {side} @ {entry_price}, "
+                    f"Qty: {position_size}, Order ID: {order_id}, "
+                    f"SL: {stop_loss:.2f}, TP: {take_profit:.2f}, "
+                    f"Trail: {trade_data['trail']}, Liquidation: {trade_data['liquidation']}, "
+                    f"Margin: {trade_data['margin_usdt']} USDT"
+                )
+                return True
+            else:
+                logger.error(f"Failed to save trade to database for {symbol}, Order ID: {order_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error executing real trade for {symbol}: {e}", exc_info=True)
             return False
 
     def close(self):

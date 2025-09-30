@@ -8,9 +8,6 @@ from dataclasses import dataclass
 import traceback
 from datetime import datetime
 
-# Logging using centralized system
-from logging_config import get_logger
-logger = get_logger(__name__)
 
 @dataclass
 class ErrorContext:

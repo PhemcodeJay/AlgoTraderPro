@@ -16,11 +16,12 @@ from utils import calculate_portfolio_metrics
 from signal_generator import get_usdt_symbols
 from sqlalchemy import update
 
+# Initialize database
+db = db_manager
+
 # Configure logging
-# Logging using centralized system
 from logging_config import get_logger
 logger = get_logger(__name__)
-
 
 st.set_page_config(
     page_title="Trades - AlgoTrader Pro",
@@ -56,7 +57,15 @@ def close_trade_safely(trade_id: str, virtual: bool = True):
         current_price = engine.client.get_current_price(trade.symbol)
         
         # Calculate PnL
-        pnl = engine.calculate_virtual_pnl(trade.to_dict())
+        pnl = engine.calculate_virtual_pnl(trade.to_dict()) if virtual else 0.0
+        if not virtual:
+            try:
+                positions = asyncio.run(engine.client.get_positions(symbol=trade.symbol))
+                position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
+                pnl = position.get("unrealized_pnl", 0.0) if position else 0.0
+            except Exception as e:
+                logger.warning(f"Failed to fetch real PnL for {trade.symbol}: {e}")
+                pnl = 0.0
         
         # Update trade in database
         if not db_manager.session:
@@ -111,22 +120,30 @@ def display_trade_management():
         if virtual_trades:
             for i, trade in enumerate(virtual_trades):
                 with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
-                    col_a, col_b, col_c = st.columns([2, 2, 1])
+                    current_price = engine.client.get_current_price(trade.symbol)
+                    current_pnl = engine.calculate_virtual_pnl(trade.to_dict())
+                    
+                    pnl_color = "🟢" if current_pnl > 0 else "🔴" if current_pnl < 0 else "🟡"
+                    
+                    col_a, col_b = st.columns(2)
                     
                     with col_a:
-                        st.write(f"**Quantity:** {trade.qty}")
+                        st.write(f"**Quantity:** {trade.qty:.6f}")
                         st.write(f"**Score:** {trade.score or 0:.1f}%")
+                        st.write(f"**Current Price:** ${current_price:.4f}")
+                        st.write(f"**SL:** ${trade.sl:.4f}" if trade.sl else "N/A")
+                        st.write(f"**TP:** ${trade.tp:.4f}" if trade.tp else "N/A")
                     
                     with col_b:
-                        current_pnl = engine.calculate_virtual_pnl(trade.to_dict())
-                        pnl_color = "🟢" if current_pnl > 0 else "🔴" if current_pnl < 0 else "🟡"
                         st.write(f"**Current PnL:** {pnl_color} ${current_pnl:.2f}")
                         st.write(f"**Status:** {trade.status.title()}")
+                        st.write(f"**Trail:** ${trade.trail:.4f}" if trade.trail else "N/A")
+                        st.write(f"**Liquidation:** ${trade.liquidation:.4f}" if trade.liquidation else "N/A")
+                        st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
                     
-                    with col_c:
-                        if st.button("❌ Close", key=f"close_virtual_{trade.id}"):
-                            if close_trade_safely(str(trade.id), virtual=True):
-                                st.rerun()
+                    if st.button("❌ Close", key=f"close_virtual_{trade.id}"):
+                        if close_trade_safely(str(trade.id), virtual=True):
+                            st.rerun()
         else:
             st.info("No open virtual trades")
     
@@ -137,23 +154,39 @@ def display_trade_management():
         if real_trades:
             for i, trade in enumerate(real_trades):
                 with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
-                    col_a, col_b, col_c = st.columns([2, 2, 1])
+                    current_price = engine.client.get_current_price(trade.symbol)
+                    
+                    # For real trades, fetch unrealized PnL and mark price from Bybit
+                    try:
+                        positions = asyncio.run(engine.client.get_positions(symbol=trade.symbol))
+                        position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
+                        current_pnl = position.get("unrealized_pnl", 0.0) if position else 0.0
+                        current_price = position.get("mark_price", current_price) if position else current_price
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch real position data for {trade.symbol}: {e}")
+                        current_pnl = 0.0
+                    
+                    pnl_color = "🟢" if current_pnl > 0 else "🔴" if current_pnl < 0 else "🟡"
+                    
+                    col_a, col_b = st.columns(2)
                     
                     with col_a:
-                        st.write(f"**Quantity:** {trade.qty}")
+                        st.write(f"**Quantity:** {trade.qty:.6f}")
                         st.write(f"**Score:** {trade.score or 0:.1f}%")
+                        st.write(f"**Current Price:** ${current_price:.4f}")
+                        st.write(f"**SL:** ${trade.sl:.4f}" if trade.sl else "N/A")
+                        st.write(f"**TP:** ${trade.tp:.4f}" if trade.tp else "N/A")
                     
                     with col_b:
-                        # For real trades, PnL calculation might be different
-                        current_pnl = trade.pnl or 0
-                        pnl_color = "🟢" if current_pnl > 0 else "🔴" if current_pnl < 0 else "🟡"
                         st.write(f"**Current PnL:** {pnl_color} ${current_pnl:.2f}")
                         st.write(f"**Status:** {trade.status.title()}")
+                        st.write(f"**Trail:** ${trade.trail:.4f}" if trade.trail else "N/A")
+                        st.write(f"**Liquidation:** ${trade.liquidation:.4f}" if trade.liquidation else "N/A")
+                        st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
                     
-                    with col_c:
-                        if st.button("❌ Close", key=f"close_real_{trade.id}"):
-                            if close_trade_safely(str(trade.id), virtual=False):
-                                st.rerun()
+                    if st.button("❌ Close", key=f"close_real_{trade.id}"):
+                        if close_trade_safely(str(trade.id), virtual=False):
+                            st.rerun()
         else:
             st.info("No open real trades")
 
@@ -170,17 +203,15 @@ def display_manual_trading():
         symbol = st.selectbox("Symbol", symbols, key="manual_symbol")
         side = st.selectbox("Side", ["Buy", "Sell"], key="manual_side")
         qty = st.number_input("Quantity", min_value=0.001, value=0.01, key="manual_qty")
-        
-    with col2:
         order_type = st.selectbox("Order Type", ["Market", "Limit"], key="manual_order_type")
         price = st.number_input("Price (for Limit orders)", min_value=0.0, key="manual_price") if order_type == "Limit" else None
-        leverage = st.number_input("Leverage", min_value=1, max_value=100, value=10, key="manual_leverage")
     
-    # Advanced options
-    with st.expander("🔧 Advanced Options"):
+    with col2:
+        leverage = st.number_input("Leverage", min_value=1, max_value=100, value=10, key="manual_leverage")
         stop_loss = st.number_input("Stop Loss Price", min_value=0.0, key="manual_sl")
         take_profit = st.number_input("Take Profit Price", min_value=0.0, key="manual_tp")
-        
+        trail = st.number_input("Trailing Stop Price", min_value=0.0, key="manual_trail")
+        margin_usdt = st.number_input("Margin (USDT)", min_value=0.0, value=5.0, key="manual_margin")
         trading_mode = st.selectbox("Execution Mode", ["virtual", "real"], key="manual_mode")
     
     if st.button("🚀 Place Order", type="primary"):
@@ -197,6 +228,16 @@ def display_manual_trading():
                 st.error("Invalid entry price")
                 return
             
+            # Calculate trail and liquidation if not provided
+            trail_value = trail if trail > 0 else (
+                abs(take_profit - entry_price) / 2 if take_profit > 0 else 0.0
+            )
+            liquidation_value = (
+                entry_price * (1 - 0.9 / leverage) if side == "Buy"
+                else entry_price * (1 + 0.9 / leverage)
+            ) if leverage > 0 else 0.0
+            margin_value = margin_usdt if margin_usdt > 0 else (entry_price * qty) / leverage
+            
             # Create trade data
             trade_data = {
                 "symbol": symbol,
@@ -207,7 +248,12 @@ def display_manual_trading():
                 "virtual": trading_mode == "virtual",
                 "status": "open",
                 "strategy": "Manual",
-                "leverage": leverage
+                "leverage": leverage,
+                "sl": stop_loss if stop_loss > 0 else None,
+                "tp": take_profit if take_profit > 0 else None,
+                "trail": trail_value if trail_value > 0 else None,
+                "liquidation": liquidation_value if liquidation_value > 0 else None,
+                "margin_usdt": margin_value if margin_value > 0 else None
             }
             
             # Add to database
@@ -218,12 +264,27 @@ def display_manual_trading():
                 
                 # Update balance for virtual trades
                 if trading_mode == "virtual":
-                    margin_used = (entry_price * qty) / leverage
-                    engine.update_virtual_balances(-margin_used, "virtual")  # Reserve margin
+                    margin_used = margin_value or (entry_price * qty) / leverage
+                    engine.update_virtual_balances(-margin_used, "virtual")
+                
+                # Execute real trade if necessary
+                if trading_mode == "real":
+                    success = asyncio.run(engine.execute_real_trade(trade_data))
+                    if not success:
+                        st.error("❌ Failed to execute real trade on Bybit")
+                        # Rollback DB entry
+                        session = db_manager._get_session()  # Call the method, don't just reference it
+                        session.execute(
+                                update(TradeModel)
+                                .where(TradeModel.order_id == trade_data["order_id"])
+                                .values(status="failed")
+                            )
+                        session.commit()
+                        return
                 
                 st.rerun()
             else:
-                st.error("❌ Failed to place order")
+                st.error("❌ Failed to place order in database")
                 
         except Exception as e:
             st.error(f"Order placement error: {e}")
@@ -335,7 +396,6 @@ def display_automation_tab():
         
         with perf_col3:
             total_pnl = performance.get("total_pnl", 0)
-            delta_color = "normal" if total_pnl == 0 else ("inverse" if total_pnl > 0 else "off")
             st.metric("Total PnL", f"${total_pnl:.2f}")
         
         with perf_col4:
@@ -388,13 +448,42 @@ def main():
             st.metric("Open Virtual", open_virtual)
             st.metric("Open Real", open_real)
             
-            # Load balance
-            with open("capital.json", "r") as f:
-                capital = json.load(f)
+            # Load balance from DB
+            if current_mode == "virtual":
+                wallet_balance = db.get_wallet_balance("virtual")
+                capital_val = wallet_balance.capital if wallet_balance else 100.0
+                available_val = wallet_balance.available if wallet_balance else 100.0
+            else:
+                try:
+                    result = engine.client._make_request(
+                        "GET",
+                        "/v5/account/wallet-balance",
+                        {"accountType": "UNIFIED"}
+                    )
+                    if result and "list" in result and result["list"]:
+                        wallet = result["list"][0]
+                        capital_val = float(wallet.get("totalEquity", 0.0))
+                        coins = wallet.get("coin", [])
+                        usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
+                        available_val = float(usdt_coin.get("walletBalance", 0.0)) if usdt_coin else capital_val
+                    else:
+                        capital_val = available_val = 0.0
+                except Exception as e:
+                    logger.error(f"Failed to fetch real balance from Bybit: {e}")
+                    capital_val = available_val = 0.0
             
-            balance = capital.get(current_mode, {}).get("available", 0)
-            st.metric("Available Balance", f"${balance:.2f}")
+            available_val = max(available_val, 0.0)
+            used_val = max(capital_val - available_val, 0.0)
             
+            if current_mode == "virtual":
+                st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
+                st.metric("💻 Virtual Available", f"${available_val:.2f}")
+                st.metric("💻 Virtual Used", f"${used_val:.2f}")
+            else:
+                st.metric("🏦 Real Capital", f"${capital_val:.2f}")
+                st.metric("🏦 Real Available", f"${available_val:.2f}")
+                st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
+        
         except Exception as e:
             st.error(f"Error loading stats: {e}")
         
@@ -441,6 +530,11 @@ def main():
                     "Entry": f"${trade.entry_price:.4f}",
                     "Exit": f"${trade.exit_price:.4f}" if trade.exit_price else "N/A",
                     "Qty": f"{trade.qty:.6f}",
+                    "SL": f"${trade.sl:.4f}" if trade.sl else "N/A",
+                    "TP": f"${trade.tp:.4f}" if trade.tp else "N/A",
+                    "Trail": f"${trade.trail:.4f}" if trade.trail else "N/A",
+                    "Liquidation": f"${trade.liquidation:.4f}" if trade.liquidation else "N/A",
+                    "Margin": f"${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A",
                     "PnL": f"${pnl:.2f}",
                     "Mode": "Virtual" if trade.virtual else "Real",
                     "Strategy": trade.strategy or "Manual",

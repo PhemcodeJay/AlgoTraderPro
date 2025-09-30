@@ -29,15 +29,19 @@ class RateLimitInfo:
     minute_start: float = 0
     minute_count: int = 0
 
-
 class BybitClient:
     def __init__(self):
-        self.api_key = os.getenv("BYBIT_API_KEY", "")
-        self.api_secret = os.getenv("BYBIT_API_SECRET", "")
-        self.testnet = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
-        
-        self.base_url = "https://api-testnet.bybit.com" if self.testnet else "https://api.bybit.com"
-        self.ws_url = "wss://stream-testnet.bybit.com" if self.testnet else "wss://stream.bybit.com"
+        self.api_key: str = os.getenv("BYBIT_API_KEY", "")
+        self.api_secret: str = os.getenv("BYBIT_API_SECRET", "")
+        self.account_type: str = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
+
+        # Mainnet only
+        self.base_url: str = "https://api.bybit.com"
+        self.ws_url: str = "wss://stream.bybit.com"
+
+        # Optional sanity check
+        if os.getenv("BYBIT_MAINNET", "true").lower() != "true":
+            raise ValueError("Mainnet only mode is enabled. Please set BYBIT_MAINNET=true")
         
         # Connection and session management
         self.session: Optional[requests.Session] = None
@@ -73,7 +77,7 @@ class BybitClient:
         # Start background event loop for WebSocket
         self._start_background_loop()
         
-        logger.info(f"BybitClient initialized - Environment: {'testnet' if self.testnet else 'mainnet'}")
+        logger.info(f"BybitClient initialized - Environment: mainnet - Account Type: {self.account_type}")
     
     def _initialize_session(self):
         """Initialize HTTP session with proper configuration"""
@@ -89,9 +93,6 @@ class BybitClient:
             
             self.session.mount('https://', adapter)
             self.session.mount('http://', adapter)
-            
-            # Configure session defaults (timeouts are passed to individual requests)
-            # Note: Session objects don't have a timeout attribute; timeouts are per-request
             
             logger.info("HTTP session initialized with connection pooling")
             
@@ -193,8 +194,8 @@ class BybitClient:
         
         # Map specific error codes to exceptions
         if ret_code == 10001:
-            raise APIAuthenticationException(
-                f"Invalid API key or signature: {ret_msg}",
+            raise APIDataException(
+                f"Request parameter error: {ret_msg}",
                 context=create_error_context(module=__name__, function='_handle_api_error')
             )
         elif ret_code == 10002:
@@ -213,12 +214,22 @@ class BybitClient:
                 f"Invalid signature: {ret_msg}",
                 context=create_error_context(module=__name__, function='_handle_api_error')
             )
+        elif ret_code == 100028:
+            raise APIException(
+                f"Operation forbidden for unified account: {ret_msg}. Use cross margin mode.",
+                error_code=str(ret_code),
+                context=create_error_context(
+                    module=__name__,
+                    function='_handle_api_error',
+                    extra_data={'endpoint': endpoint, 'ret_code': ret_code}
+                )
+            )
         else:
             raise APIException(
                 f"API Error (code {ret_code}): {ret_msg}",
                 error_code=str(ret_code),
                 context=create_error_context(
-                    module=__name__, 
+                    module=__name__,
                     function='_handle_api_error',
                     extra_data={'endpoint': endpoint, 'ret_code': ret_code}
                 )
@@ -411,6 +422,10 @@ class BybitClient:
                 extra_data={'endpoint': endpoint, 'max_retries': self.recovery_strategy.max_retries}
             )
         )
+    
+    async def _make_request_async(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict:
+        """Async wrapper around _make_request using asyncio.to_thread"""
+        return await asyncio.to_thread(self._make_request, method, endpoint, params)
 
     def is_connected(self) -> bool:
         """Check if client is connected and authenticated"""
@@ -439,7 +454,8 @@ class BybitClient:
                 "API connection test successful",
                 extra={
                     'endpoint': '/v5/market/time',
-                    'environment': 'testnet' if self.testnet else 'mainnet'
+                    'environment': 'mainnet',
+                    'account_type': self.account_type
                 }
             )
             return True
@@ -448,7 +464,11 @@ class BybitClient:
             self._connected = False
             logger.error(
                 f"API authentication failed during connection test: {str(e)}",
-                extra={'error_type': 'authentication', 'testnet': self.testnet}
+                extra={
+                    'error_type': 'authentication',
+                    'environment': 'mainnet',
+                    'account_type': self.account_type
+                }
             )
             return False
             
@@ -480,7 +500,8 @@ class BybitClient:
         """Get comprehensive connection health information"""
         health_info = {
             'connected': self._connected,
-            'environment': 'testnet' if self.testnet else 'mainnet',
+            'environment': 'mainnet',
+            'account_type': self.account_type,
             'api_configured': bool(self.api_key and self.api_secret),
             'last_successful_request': self.last_successful_request.isoformat() if self.last_successful_request else None,
             'consecutive_errors': self.consecutive_errors,
@@ -496,7 +517,7 @@ class BybitClient:
                 'current_minute_count': self.rate_limit.minute_count
             }
         }
-        
+
         # Determine overall health status
         if not health_info['api_configured']:
             health_info['status'] = 'unconfigured'
@@ -606,47 +627,94 @@ class BybitClient:
             logger.error(f"Error getting klines for {symbol}: {e}")
             return []
 
-    async def place_order(self, symbol: str, side: str, order_type: str, qty: float, 
-                         price: Optional[float] = None, stop_loss: Optional[float] = None,
-                         take_profit: Optional[float] = None) -> Dict:
-        """Place a trading order"""
+    async def place_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        leverage: Optional[int] = 10,
+        mode: str = "CROSS"  # Default to CROSS for unified accounts
+    ) -> Dict:
+        """
+        Place a market trading order with leverage, cross margin mode for unified accounts,
+        automatically calculates TP (25% from entry) and SL (5% from entry).
+        """
         try:
+            leverage = leverage or 10
+
+            # Determine margin mode for unified/non-unified accounts
+            if self.account_type == "UNIFIED":
+                mode = "CROSS"
+                logger.info(f"Unified account detected, using CROSS margin mode for {symbol}")
+                loop = asyncio.get_running_loop()
+            else:
+                trade_mode = 1 if mode.upper() == "ISOLATED" else 0
+                lev_params = {
+                    "category": "linear",
+                    "symbol": symbol,
+                    "tradeMode": trade_mode,
+                    "buyLeverage": str(leverage),
+                    "sellLeverage": str(leverage)
+                }
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
+
+            # Get current price to calculate SL/TP
+            entry_price = self.get_current_price(symbol)
+
+            # Calculate stop loss and take profit
+            side_lower = side.lower()
+            if side_lower == "buy":
+                stop_loss = entry_price * 0.95  # 5% below entry
+                take_profit = entry_price * 1.25  # 25% above entry
+            elif side_lower == "sell":
+                stop_loss = entry_price * 1.05  # 5% above entry
+                take_profit = entry_price * 0.75  # 25% below entry
+            else:
+                raise ValueError("side must be 'buy' or 'sell'")
+
+            # Build order params
             params = {
                 "category": "linear",
                 "symbol": symbol,
                 "side": side.title(),
-                "orderType": "Market" if order_type.lower() == "market" else "Limit",
+                "orderType": "Market",
                 "qty": str(qty),
-                "timeInForce": "GTC"
+                "timeInForce": "IOC",  # Immediate or Cancel for market orders
+                "stopLoss": str(stop_loss),
+                "takeProfit": str(take_profit)
             }
-            
-            if price and order_type.lower() == "limit":
-                params["price"] = str(price)
-            
-            if stop_loss:
-                params["stopLoss"] = str(stop_loss)
-            
-            if take_profit:
-                params["takeProfit"] = str(take_profit)
 
-            result = self._make_request("POST", "/v5/order/create", params)
-            
+            # Place order
+            result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
+
             if result:
                 return {
                     "order_id": result.get("orderId"),
                     "symbol": symbol,
+                    "accountType": self.account_type,
                     "side": side,
                     "qty": qty,
-                    "price": price or self.get_current_price(symbol),
+                    "price": entry_price,
                     "status": "pending",
                     "timestamp": datetime.now(),
-                    "virtual": False
+                    "virtual": False,
+                    "leverage": leverage,
+                    "stopLoss": str(stop_loss),
+                    "takeProfit": str(take_profit),
+                    "margin_mode": mode.upper()
                 }
             return {}
-            
+
+        except APIException as e:
+            if e.error_code == "100028":
+                logger.warning(f"Unified account error for {symbol}: {e}. Using cross margin mode.")
+                return await self.place_order(symbol, side, qty, leverage, mode="CROSS")
+            logger.error(f"Error placing order for {symbol}: {e}")
+            return {"error": str(e)}
         except Exception as e:
-            logger.error(f"Error placing order: {e}")
-            return {}
+            logger.error(f"Unexpected error placing order for {symbol}: {e}")
+            return {"error": str(e)}
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel an order"""
@@ -688,17 +756,17 @@ class BybitClient:
             logger.error(f"Error getting open orders: {e}")
             return []
 
-    def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
-        """Get current positions"""
+    async def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
+        """Get current positions asynchronously"""
         try:
             params = {"category": "linear"}
             if symbol:
                 params["symbol"] = symbol
-                
-            result = self._make_request("GET", "/v5/position/list", params)
-            
+
+            result = await self._make_request_async("GET", "/v5/position/list", params)
+
             if result and "list" in result:
-                positions = []
+                positions: List[Dict] = []
                 for pos in result["list"]:
                     size = float(pos.get("size", 0))
                     if size > 0:  # Only active positions
@@ -709,7 +777,7 @@ class BybitClient:
                             "entry_price": float(pos.get("avgPrice", 0)),
                             "mark_price": float(pos.get("markPrice", 0)),
                             "unrealized_pnl": float(pos.get("unrealisedPnl", 0)),
-                            "leverage": float(pos.get("leverage", 1))
+                            "leverage": float(pos.get("leverage", 10)),
                         })
                 return positions
             return []

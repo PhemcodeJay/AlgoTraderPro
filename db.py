@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from dateutil import parser 
 from typing import List, Dict, Any, Optional, Callable, Union
 from dataclasses import dataclass, asdict, field
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy import create_engine, Integer, String, Float, DateTime, Boolean, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Mapped, mapped_column
@@ -67,10 +68,15 @@ class Trade:
     virtual: bool = True
     status: str = "open"
     exit_price: Optional[float] = None
+    sl: Optional[float] = None
+    tp: Optional[float] = None
     pnl: Optional[float] = None
     score: Optional[float] = None
-    strategy: str = "Manual"
+    strategy: str = "Auto"
     leverage: int = 10
+    trail: Optional[float] = None
+    liquidation: Optional[float] = None
+    margin_usdt: Optional[float] = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at: Optional[datetime] = None
     id: Union[str, None] = None
@@ -114,7 +120,11 @@ class WalletBalance:
 class SignalModel(Base):
     __tablename__ = 'signals'
     
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4  # 👈 auto-generate UUID
+    )
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
     interval: Mapped[str] = mapped_column(String(10), nullable=False)
     signal_type: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -134,7 +144,7 @@ class SignalModel(Base):
 
     def to_signal(self) -> Signal:
         return Signal(
-            id=str(self.id) if self.id is not None else None,  # ✅ Cast int → str
+            id=str(self.id) if self.id else None, # ✅ Cast int → str
             symbol=self.symbol,
             interval=self.interval,
             signal_type=self.signal_type,
@@ -164,10 +174,15 @@ class TradeModel(Base):
     order_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     virtual: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(20), default="open")
+    sl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    trail: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    liquidation: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    margin_usdt: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tp: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    strategy: Mapped[str] = mapped_column(String(20), default="Manual")
+    strategy: Mapped[str] = mapped_column(String(20), default="Auto")
     leverage: Mapped[int] = mapped_column(Integer, default=10)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -183,7 +198,12 @@ class TradeModel(Base):
             virtual=self.virtual,
             status=self.status,
             exit_price=self.exit_price,
+            sl=self.sl,
+            tp=self.tp,
             pnl=self.pnl,
+            trail=self.trail,
+            liquidation=self.liquidation,
+            margin_usdt=self.margin_usdt,
             score=self.score,
             strategy=self.strategy,
             leverage=self.leverage,
@@ -232,18 +252,51 @@ class DatabaseManager:
 
     def _initialize_db(self):
         try:
-            database_url = os.getenv("DATABASE_URL", "sqlite:///algotrader.db")
-            self.engine = create_engine(database_url, echo=False)
+            # === PostgreSQL Configuration ===
+            db_host = os.getenv("DB_HOST", "localhost")
+            db_port = os.getenv("DB_PORT", 5432)
+            db_name = os.getenv("DB_NAME", "Algotrader")
+            db_user = os.getenv("DB_USER", "postgres")
+            db_password = os.getenv("DB_PASSWORD", "1234")
+
+            # Construct PostgreSQL URL
+            postgres_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+
+            # Try connecting to PostgreSQL
+            self.engine = create_engine(postgres_url, echo=False)
             Base.metadata.create_all(self.engine)
             Session = sessionmaker(bind=self.engine)
             self.session = Session()
-            logger.info("Database initialized successfully")
+            logger.info("PostgreSQL database initialized successfully")
+
+        except OperationalError as pg_err:
+            logger.warning(f"PostgreSQL connection failed: {pg_err}. Falling back to SQLite.")
+            try:
+                # Fallback to SQLite
+                sqlite_url = os.getenv("SQLITE_URL", "sqlite:///algotrader.db")
+                self.engine = create_engine(sqlite_url, echo=False)
+                Base.metadata.create_all(self.engine)
+                Session = sessionmaker(bind=self.engine)
+                self.session = Session()
+                logger.info("SQLite database initialized successfully")
+            except Exception as sqlite_err:
+                error_context = create_error_context(
+                    module=__name__,
+                    function='_initialize_db'
+                )
+                logger.error(f"Failed to initialize SQLite database: {sqlite_err}")
+                raise DatabaseConnectionException(
+                    f"Database initialization failed: {sqlite_err}",
+                    context=error_context,
+                    original_exception=sqlite_err
+                )
+
         except Exception as e:
             error_context = create_error_context(
                 module=__name__,
                 function='_initialize_db'
             )
-            logger.error(f"Failed to initialize database: {e}")
+            logger.error(f"Unexpected error during database initialization: {e}")
             raise DatabaseConnectionException(
                 f"Database initialization failed: {e}",
                 context=error_context,
@@ -358,14 +411,15 @@ class DatabaseManager:
         def _add_signal():
             if not self.session:
                 raise DatabaseConnectionException("Database session not initialized")
+
             signal_model = SignalModel(
                 symbol=signal.symbol,
                 interval=signal.interval,
                 signal_type=signal.signal_type,
                 score=signal.score,
-                indicators=json.dumps(signal.indicators),
+                indicators=json.dumps(signal.indicators),  # ✅ store JSON as text
                 strategy=signal.strategy,
-                side=signal.side,
+                side=signal.side.upper(),  # ✅ normalize side
                 sl=signal.sl,
                 tp=signal.tp,
                 trail=signal.trail,
@@ -376,20 +430,27 @@ class DatabaseManager:
                 market=signal.market,
                 created_at=signal.created_at or datetime.now(timezone.utc)
             )
+
             self.session.add(signal_model)
             return True
 
         try:
-            result = self._safe_transaction(_add_signal, operation_type="INSERT", table="signals")()
-            logger.info(f"Signal added for {signal.symbol}")
+            result = self._safe_transaction(
+                _add_signal,
+                operation_type="INSERT",
+                table="signals"
+            )()
+            logger.info(f"✅ Signal added for {signal.symbol}")
             return result
+
         except DatabaseException:
-            logger.error(f"Failed to add signal for {signal.symbol}")
+            logger.error(f"❌ Failed to add signal for {signal.symbol}")
             raise
         except Exception as e:
-            logger.error(f"Unexpected error adding signal for {signal.symbol}: {e}")
+            logger.error(f"🔥 Unexpected error adding signal for {signal.symbol}: {e}")
             return False
-    
+
+        
     def add_trade(self, trade: Dict) -> bool:
         if not self.session:
             raise DatabaseConnectionException("Database session not initialized")
@@ -413,7 +474,12 @@ class DatabaseManager:
                 virtual=trade.get('virtual', True),
                 status=trade.get('status', 'open'),
                 exit_price=trade.get('exit_price'),
+                sl=trade.get('sl'),
+                tp=trade.get('tp'),
                 pnl=trade.get('pnl'),
+                trail=trade.get('trail'),
+                liquidation=trade.get('liquidation'),
+                margin_usdt=trade.get('margin_usdt'),
                 score=trade.get('score'),
                 strategy=trade.get('strategy', 'Manual'),
                 leverage=trade.get('leverage', 10),
@@ -521,10 +587,10 @@ class DatabaseManager:
                 logger.warning(f"Capital file {capital_file_path} not found, initializing default balances")
                 default_virtual = WalletBalance(
                     trading_mode="virtual",
-                    capital=1000.0,
-                    available=1000.0,
+                    capital=100.0,
+                    available=100.0,
                     used=0.0,
-                    start_balance=1000.0,
+                    start_balance=100.0,
                     currency="USDT",
                     updated_at=datetime.now(timezone.utc),
                 )
@@ -549,10 +615,10 @@ class DatabaseManager:
                 v = capital_data["virtual"]
                 virtual_balance = WalletBalance(
                     trading_mode="virtual",
-                    capital=float(v.get("capital", 1000.0)),
-                    available=float(v.get("available", 1000.0)),
+                    capital=float(v.get("capital", 100.0)),
+                    available=float(v.get("available", 100.0)),
                     used=float(v.get("used", 0.0)),
-                    start_balance=float(v.get("start_balance", 1000.0)),
+                    start_balance=float(v.get("start_balance", 100.0)),
                     currency=v.get("currency", "USDT"),
                     updated_at=datetime.now(timezone.utc),
                 )

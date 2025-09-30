@@ -8,7 +8,6 @@ from logging_config import get_logger
 from bybit_client import BybitClient
 
 # Logging using centralized system
-from logging_config import get_logger
 logger = get_logger(__name__)
 
 # Configure Streamlit page
@@ -55,6 +54,50 @@ def initialize_bybit():
             st.warning("Bybit client connection failed. Check API keys.")
             logger.error("Bybit client connection test failed")
 
+# --- Helper: does DB already have any REAL trades? ---
+def db_has_any_trade(mode: str = "real") -> bool:
+    """
+    Return True if the DB already contains at least one trade for the given mode.
+    Tries several common DB methods and fails closed (False) without raising.
+    """
+    try:
+        db = st.session_state.engine.db if st.session_state.engine else None
+        if not db:
+            return False
+
+        # Try a few likely APIs, quietly skipping if missing
+        try:
+            return (db.get_trade_count(mode) or 0) > 0
+        except Exception:
+            pass
+        try:
+            return (db.count_trades(mode) or 0) > 0
+        except Exception:
+            pass
+        try:
+            return bool(db.has_trades(mode))
+        except Exception:
+            pass
+        try:
+            return db.get_last_trade(mode) is not None
+        except Exception:
+            pass
+        try:
+            trades = db.get_trades(mode=mode, limit=1)
+            return bool(trades)
+        except Exception:
+            pass
+        try:
+            trades = db.get_trades(mode)
+            return bool(trades)
+        except Exception:
+            pass
+
+        return False
+    except Exception as e:
+        logger.error(f"db_has_any_trade check failed: {e}", exc_info=True)
+        return False
+
 # --- Fetch wallet balance ---
 def get_wallet_balance() -> dict:
     """
@@ -87,7 +130,7 @@ def get_wallet_balance() -> dict:
             initialize_bybit()
             client = st.session_state.bybit_client
             if client and client.is_connected():
-                # Sync real balance with Bybit
+                # Sync real balance with Bybit (safe to do regardless of trades)
                 st.session_state.engine.sync_real_balance()
                 wallet = st.session_state.engine.db.get_wallet_balance("real")
                 if wallet:
@@ -96,7 +139,10 @@ def get_wallet_balance() -> dict:
                         "available": getattr(wallet, "available", default_real["available"]),
                         "used": getattr(wallet, "used", default_real["used"])
                     }
-                    logger.info(f"Fetched real wallet balance after sync: capital=${balance_data['capital']:.2f}, available=${balance_data['available']:.2f}, used=${balance_data['used']:.2f}")
+                    logger.info(
+                        f"Fetched real wallet balance after sync: capital=${balance_data['capital']:.2f}, "
+                        f"available=${balance_data['available']:.2f}, used=${balance_data['used']:.2f}"
+                    )
                 else:
                     logger.warning("Failed to retrieve real balance after sync")
                     st.error("❌ Failed to retrieve real balance. Check Bybit account or API permissions.")
@@ -121,34 +167,13 @@ def get_wallet_balance() -> dict:
 
     # Conditional messaging for real balance
     if mode == "real":
-        if balance_data["available"] == 0.0 and balance_data["capital"] > 0.0:
-            st.info("Real available balance is $0.00. Funds may be in use (e.g., open positions).")
-        elif balance_data["available"] == 0.0 and balance_data["capital"] == 0.0 and st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
-            st.warning("No funds available in Bybit account. Verify account balance or API permissions.")
-
+        if balance_data["available"] <= 0:
+            st.warning("Real available balance is low or zero. Deposit funds on Bybit.")
     return balance_data
 
-# --- Main App ---
 def main():
-    # Custom CSS
-    st.markdown("""
-    <style>
-    .main-header { background: linear-gradient(135deg, #1e1e2f 0%, #2a2a4a 100%); padding:2rem; border-radius:10px; text-align:center; margin-bottom:2rem; border:2px solid #00ff88;}
-    </style>
-    """, unsafe_allow_html=True)
-
-    # Header
-    st.markdown(f"""
-    <div class="main-header">
-        <h1 style="color:#00ff88; margin:0; font-size:3rem;">🚀 AlgoTrader Pro</h1>
-        <p style="color:#888; margin:0; font-size:1.2rem;">Advanced Cryptocurrency Trading Platform</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if not initialize_engine():
-        st.stop()
-
-    # Load saved trading mode from database if available
+    initialize_engine()
+    # Load saved trading mode from DB
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
         saved_mode = st.session_state.engine.db.get_setting("trading_mode")
         st.session_state.trading_mode = saved_mode if saved_mode in ["virtual", "real"] else "virtual"
@@ -156,79 +181,94 @@ def main():
 
     # --- Sidebar ---
     with st.sidebar:
-        st.markdown("### 🎛️ Navigation")
+        st.markdown("### 🎛️ Trading Controls")
 
-        # Mode selector
+        # --- Mode selector ---
         mode_options = ["Virtual", "Real"]
-        selected_mode = st.selectbox(
-            "Trading Mode",
-            mode_options,
-            index=0 if st.session_state.trading_mode == "virtual" else 1
-        )
+        selected_mode_index = 0 if st.session_state.trading_mode == "virtual" else 1
+        selected_mode = st.selectbox("Trading Mode", mode_options, index=selected_mode_index)
 
-        # Update session state and persist to DB if changed
+        confirm_real = False
         if selected_mode.lower() != st.session_state.trading_mode:
-            st.session_state.trading_mode = selected_mode.lower()
-            st.session_state.engine.db.save_setting("trading_mode", st.session_state.trading_mode)
-            # Clear cached balance for the new mode
-            st.session_state.wallet_cache.clear()
-            logger.info(f"Switched to {st.session_state.trading_mode} mode, cleared cache")
-            # Sync real balance if switching to real mode
-            if st.session_state.trading_mode == "real":
-                initialize_bybit()
-                if st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
-                    st.session_state.engine.sync_real_balance()
-                    logger.info("Real balance synced after mode switch")
-            st.rerun()
+            if selected_mode.lower() == "real":
+                confirm_real = st.checkbox("Confirm: I understand this enables LIVE trading on Bybit")
+                if not confirm_real:
+                    st.warning("Must confirm to switch to real mode.")
+            if selected_mode.lower() != "real" or confirm_real:
+                st.session_state.trading_mode = selected_mode.lower()
+                st.session_state.engine.db.save_setting("trading_mode", st.session_state.trading_mode)
+                st.session_state.wallet_cache.clear()
+                logger.info(f"Switched to {st.session_state.trading_mode} mode, cleared cache")
 
-        # Status
+                if st.session_state.trading_mode == "real":
+                    initialize_bybit()
+                    if st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
+                        st.session_state.engine.sync_real_balance()
+                        if db_has_any_trade("real"):
+                            st.session_state.engine.sync_real_trades()
+                            logger.info("Real trades synced after mode switch (DB already had trades).")
+                        else:
+                            logger.info("Skipped real trade sync: no existing real trades in DB yet.")
+                            st.info("Live mode enabled. Trade sync will start after the first real trade exists in the database.")
+                st.rerun()
+
+        # --- Engine & API status ---
         engine_status = "🟢 Online" if st.session_state.engine_initialized else "🔴 Offline"
         st.markdown(f"**Engine Status:** {engine_status}")
         mode_color = "🟢" if st.session_state.trading_mode == "virtual" else "🟡"
         st.markdown(f"**Trading Mode:** {mode_color} {st.session_state.trading_mode.title()}")
 
-        # API Connection Status
         initialize_bybit()
         api_status = "✅ Connected" if st.session_state.bybit_client and st.session_state.bybit_client.is_connected() else "❌ Disconnected"
         st.markdown(f"**API Status:** {api_status}")
 
         st.divider()
 
-        # Pages
+        # --- Lower Section: Page Navigation ---
+        st.markdown("### 📂 Pages")
         pages = {
-            "📊 Dashboard": "pages/dashboard.py",
-            "🎯 Signals": "pages/signals.py",
-            "📈 Trades": "pages/trades.py",
-            "📊 Performance": "pages/performance.py",
-            "⚙️ Settings": "pages/settings.py"
+            "📊 Dashboard": "dashboard",
+            "🎯 Signals": "signals",
+            "📈 Trades": "trades",
+            "📊 Performance": "performance",
+            "⚙️ Settings": "settings"
         }
 
-        for name, path in pages.items():
-            if st.button(name):
-                st.switch_page(path)
+        # Use radio buttons for user-friendly navigation
+        if "active_page" not in st.session_state:
+            st.session_state.active_page = "📊 Dashboard"
 
+        selected_page = st.radio("Navigate", list(pages.keys()), index=list(pages.keys()).index(st.session_state.active_page))
+        st.session_state.active_page = selected_page
+
+        # --- Wallet Balance ---
         st.divider()
+        balance = get_wallet_balance()
+        current_mode = st.session_state.trading_mode
+        capital_val = balance["capital"]
+        available_val = max(balance["available"], 0.0)
+        used_val = capital_val - available_val
+        if abs(used_val) < 0.01:
+            used_val = 0.0
 
-        # Display wallet balance
-        balance_data = get_wallet_balance()
-        if st.session_state.trading_mode == "virtual":
-            st.metric(f"Virtual Balance", f"${balance_data['available']:.2f}")
+        if current_mode == "virtual":
+            st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
+            st.metric("💻 Virtual Available", f"${available_val:.2f}")
+            st.metric("💻 Virtual Used", f"${used_val:.2f}")
         else:
-            st.metric(f"Real Capital", f"${balance_data['capital']:.2f}")
-            st.metric(f"Real Available", f"${balance_data['available']:.2f}")
-            st.metric(f"Used Margin", f"${balance_data['used']:.2f}")
+            st.metric("🏦 Real Capital", f"${capital_val:.2f}")
+            st.metric("🏦 Real Available", f"${available_val:.2f}")
+            st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
 
-        # Optional: show last updated timestamp
-        st.markdown(
-            f"<small style='color:#888;'>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small>",
-            unsafe_allow_html=True
-        )
-
-        # Emergency Stop
+        # --- Emergency Stop ---
+        st.divider()
         if st.button("🛑 Emergency Stop"):
             st.session_state.wallet_cache.clear()
+            if "automated_trader" in st.session_state:
+                st.session_state.automated_trader.stop()
             st.success("All automated trading stopped and cache cleared")
             logger.info("Emergency stop triggered, cache cleared")
+
 
     # --- Main dashboard ---
     try:

@@ -16,26 +16,44 @@ logger = get_logger(__name__)
 tz_utc3 = timezone(timedelta(hours=3))
 
 def normalize_signal(signal: Any) -> Dict:
+    """
+    Normalize a trading signal into a standard dictionary format.
+    Automatically calculates SL (5%) and TP (25%) if not provided.
+    """
     if isinstance(signal, dict):
-        return signal
-    return {
-        "symbol": getattr(signal, "symbol", "N/A"),
-        "interval": getattr(signal, "interval", "N/A"),
-        "signal_type": getattr(signal, "signal_type", "N/A"),
-        "score": getattr(signal, "score", 0.0),
-        "indicators": getattr(signal, "indicators", {}),
-        "strategy": getattr(signal, "strategy", "Auto"),
-        "side": getattr(signal, "side", "Buy"),
-        "sl": getattr(signal, "sl", None),
-        "tp": getattr(signal, "tp", None),
-        "trail": getattr(signal, "trail", None),
-        "liquidation": getattr(signal, "liquidation", None),
-        "leverage": getattr(signal, "leverage", 10),
-        "margin_usdt": getattr(signal, "margin_usdt", None),
-        "entry": getattr(signal, "entry", None),
-        "market": getattr(signal, "market", None),
-        "created_at": getattr(signal, "created_at", None)
-    }
+        signal_dict = signal.copy()
+    else:
+        signal_dict = {
+            "symbol": getattr(signal, "symbol", "N/A"),
+            "interval": getattr(signal, "interval", "N/A"),
+            "signal_type": getattr(signal, "signal_type", "N/A"),
+            "score": getattr(signal, "score", 0.0),
+            "indicators": getattr(signal, "indicators", {}),
+            "strategy": getattr(signal, "strategy", "Auto"),
+            "side": getattr(signal, "side", "Buy"),
+            "sl": getattr(signal, "sl", None),
+            "tp": getattr(signal, "tp", None),
+            "trail": getattr(signal, "trail", None),
+            "liquidation": getattr(signal, "liquidation", None),
+            "leverage": getattr(signal, "leverage", 10),
+            "margin_usdt": getattr(signal, "margin_usdt", None),
+            "entry": getattr(signal, "entry", None),
+            "market": getattr(signal, "market", None),
+            "created_at": getattr(signal, "created_at", None)
+        }
+
+    # Automatically calculate SL and TP if missing and entry price exists
+    entry_price = signal_dict.get("entry")
+    side = signal_dict.get("side", "Buy").lower()
+
+    if entry_price is not None:
+        if signal_dict.get("sl") is None:
+            signal_dict["sl"] = entry_price * (0.95 if side == "buy" else 1.05)
+        if signal_dict.get("tp") is None:
+            signal_dict["tp"] = entry_price * (1.25 if side == "buy" else 0.75)
+
+    return signal_dict
+
 
 def format_price_safe(value: Optional[float]) -> str:
     try:
