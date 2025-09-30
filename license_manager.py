@@ -15,8 +15,10 @@ logger = get_logger(__name__)
 # Load environment variables
 load_dotenv()
 
+
 # Configure the Render server URL
-RENDER_SERVER_URL = os.getenv("RENDER_SERVER_URL", "https://localhost:8000")
+RENDER_SERVER_URL = os.getenv("RENDER_SERVER_URL", "http://localhost:8000")
+USE_LOCAL_VALIDATION = os.getenv("USE_LOCAL_VALIDATION", "false").lower() == "true"
 
 # PostgreSQL configuration
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -222,7 +224,12 @@ def validate_license(license_key, hostname=None, mac=None):
         return response.json()
     except requests.RequestException as e:
         logger.error(f"Error validating license {license_key}: {e}")
-        return {"valid": False, "message": f"Error connecting to server: {str(e)}", "tier": None, "expiration_date": None}
+        return {
+            "valid": False,
+            "message": "Error connecting to license server. Please try again later.",
+            "tier": None,
+            "expiration_date": None
+        }
 
 # Helper function to format expiration date (exportable)
 def format_expiration_date(expiration_str):
@@ -272,7 +279,7 @@ def check_license():
                 placeholder="e.g., 123e4567-e89b-12d3-a456-426614174000",
                 help="Enter a valid license key to access this page."
             )
-            submitted = st.form_submit_button("Validate License")
+            submitted = st.form_submit_button("Submit License")
             if submitted:
                 if not license_key_input:
                     st.error("Please enter a license key.")
