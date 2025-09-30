@@ -599,98 +599,113 @@ class TradingEngine:
             logger.error(f"Error executing virtual trade: {e}", exc_info=True)
             return False
             
-    async def execute_real_trade(self, signal: Dict, trading_mode: str = "real") -> bool:
-        """Execute a real trade on Bybit based on a signal"""
-        try:
-            symbol = signal.get("symbol")
-            if not symbol:
-                logger.error("Symbol is required for executing trade")
-                return False
-                
-            side = signal.get("side", "Buy").upper()  # Normalize to uppercase
-            entry_price = signal.get("entry") or self.client.get_current_price(symbol)
-            
-            if entry_price <= 0:
-                logger.error(f"Invalid entry price for {symbol}")
-                return False
-            
-            # Validate stop_loss and take_profit
-            stop_loss = signal.get("sl")
-            take_profit = signal.get("tp")
-            if stop_loss is None or take_profit is None:
-                logger.error(f"Stop loss and take profit are required for {symbol}")
-                return False
-            try:
-                stop_loss = float(stop_loss)
-                take_profit = float(take_profit)
-                if stop_loss <= 0 or take_profit <= 0:
-                    logger.error(f"Invalid stop loss ({stop_loss}) or take profit ({take_profit}) for {symbol}")
-                    return False
-            except (ValueError, TypeError):
-                logger.error(f"Stop loss ({stop_loss}) or take profit ({take_profit}) must be valid numbers for {symbol}")
-                return False
-            
-            # Calculate position size
-            position_size = self.calculate_position_size(symbol, entry_price)
-            if position_size <= 0:
-                logger.error(f"Invalid position size for {symbol}: {position_size}")
-                return False
-            
-            # Place order via Bybit API
-            order_response = await self.client.place_order(
-                symbol=symbol,
-                side=side,
-                qty=position_size,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                leverage=signal.get("leverage", 10)
-            )
-            
-            if not order_response.get("success", False):
-                logger.error(f"Failed to place order for {symbol}: {order_response.get('error', 'Unknown error')}")
-                return False
-            
-            # Extract order details
-            order_id = order_response.get("order_id", f"real_{symbol}_{int(datetime.now().timestamp())}")
-            
-            # Create trade record
-            trade_data = {
-                "symbol": symbol,
-                "side": side,
-                "qty": position_size,
-                "entry_price": entry_price,
-                "order_id": order_id,
-                "virtual": trading_mode == "virtual",  # False for real trades
-                "status": "open",
-                "score": signal.get("score"),
-                "strategy": signal.get("strategy", "Auto"),
-                "leverage": signal.get("leverage", 10),
-                "sl": stop_loss,  # Stop Loss from signal
-                "tp": take_profit,  # Take Profit from signal
-                "trail": signal.get("trail"),  # Trailing Stop from signal
-                "liquidation": signal.get("liquidation"),  # Liquidation price from signal
-                "margin_usdt": signal.get("margin_usdt")  # Margin from signal
-            }
-            
-            # Save to database
-            success = self.db.add_trade(trade_data)
-            if success:
-                logger.info(
-                    f"Real trade executed: {symbol} {side} @ {entry_price}, "
-                    f"Qty: {position_size}, Order ID: {order_id}, "
-                    f"SL: {trade_data['sl']}, TP: {trade_data['tp']}, "
-                    f"Trail: {trade_data['trail']}, Liquidation: {trade_data['liquidation']}, "
-                    f"Margin: {trade_data['margin_usdt']} USDT"
-                )
-                return True
-            else:
-                logger.error(f"Failed to save trade to database for {symbol}, Order ID: {order_id}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error executing real trade for {symbol}: {e}", exc_info=True)
+    from datetime import datetime
+
+async def execute_real_trade(self, signal: dict, trading_mode: str = "real") -> bool:
+    """Execute a real trade on Bybit based on a signal, with 5% SL and 25% TP."""
+    try:
+        symbol = signal.get("symbol")
+        if not symbol:
+            logger.error("Symbol is required for executing trade")
             return False
-    
+
+        side = signal.get("side", "Buy").upper()  # Normalize to uppercase
+        entry_price = signal.get("entry") or await self.client.get_current_price(symbol)
+        if entry_price <= 0:
+            logger.error(f"Invalid entry price for {symbol}")
+            return False
+
+        # Percentage-based SL and TP
+        sl_percent = 5   # 5% stop loss
+        tp_percent = 25  # 25% take profit
+
+        if side == "BUY":
+            stop_loss = entry_price * (1 - sl_percent / 100)
+            take_profit = entry_price * (1 + tp_percent / 100)
+        else:  # SELL
+            stop_loss = entry_price * (1 + sl_percent / 100)
+            take_profit = entry_price * (1 - tp_percent / 100)
+
+        # Calculate position size
+        position_size = self.calculate_position_size(symbol, entry_price)
+        if position_size <= 0:
+            logger.error(f"Invalid position size for {symbol}: {position_size}")
+            return False
+
+        # Place main order (without SL/TP)
+        order_response = await self.client.place_order(
+            symbol=symbol,
+            side=side,
+            qty=position_size,
+            leverage=signal.get("leverage", 10)
+        )
+
+        if not order_response.get("success", False):
+            logger.error(f"Failed to place order for {symbol}: {order_response.get('error', 'Unknown error')}")
+            return False
+
+        order_id = order_response.get("order_id", f"real_{symbol}_{int(datetime.now().timestamp())}")
+
+        # Set conditional orders for SL and TP
+        opposite_side = "Sell" if side == "BUY" else "Buy"
+
+        # Stop Loss
+        await self.client.create_conditional_order(
+            symbol=symbol,
+            side=opposite_side,
+            order_type="Stop",
+            qty=position_size,
+            stop_px=stop_loss
+        )
+
+        # Take Profit
+        await self.client.create_conditional_order(
+            symbol=symbol,
+            side=opposite_side,
+            order_type="Limit",
+            qty=position_size,
+            price=take_profit
+        )
+
+        # Prepare trade data
+        trade_data = {
+            "symbol": symbol,
+            "side": side,
+            "qty": position_size,
+            "entry_price": entry_price,
+            "order_id": order_id,
+            "virtual": trading_mode == "virtual",
+            "status": "open",
+            "score": signal.get("score"),
+            "strategy": signal.get("strategy", "Auto"),
+            "leverage": signal.get("leverage", 10),
+            "sl": stop_loss,
+            "tp": take_profit,
+            "trail": signal.get("trail"),
+            "liquidation": signal.get("liquidation"),
+            "margin_usdt": signal.get("margin_usdt")
+        }
+
+        # Save trade to database asynchronously
+        success = await self.db.add_trade(trade_data)
+        if success:
+            logger.info(
+                f"Real trade executed: {symbol} {side} @ {entry_price}, "
+                f"Qty: {position_size}, Order ID: {order_id}, "
+                f"SL: {stop_loss:.2f}, TP: {take_profit:.2f}, "
+                f"Trail: {trade_data['trail']}, Liquidation: {trade_data['liquidation']}, "
+                f"Margin: {trade_data['margin_usdt']} USDT"
+            )
+            return True
+        else:
+            logger.error(f"Failed to save trade to database for {symbol}, Order ID: {order_id}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error executing real trade for {symbol}: {e}", exc_info=True)
+        return False
+
+
     def close(self):
         """Clean up resources"""
         try:
