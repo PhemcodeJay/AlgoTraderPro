@@ -7,6 +7,8 @@ import sys
 import os
 import json
 from datetime import datetime, timezone
+from check_license import check_license
+check_license()
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

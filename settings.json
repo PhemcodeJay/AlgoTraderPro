@@ -30,5 +30,8 @@
   "RSI_OVERBOUGHT": 70,
   "MIN_VOLUME": 1000000,
   "MIN_ATR_PCT": 0.5,
-  "MAX_SPREAD_PCT": 0.1
+  "MAX_SPREAD_PCT": 0.1,
+  "LICENSE_KEY": null,
+  "USE_LOCAL_VALIDATION": true,
+  "RENDER_SERVER_URL": "http://localhost:8000"
 }

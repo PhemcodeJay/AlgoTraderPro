@@ -6,6 +6,8 @@ import numpy as np
 import sys
 import os
 from datetime import datetime, timedelta
+from check_license import check_license
+check_license()
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
