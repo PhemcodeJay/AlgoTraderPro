@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv, set_key
 from check_license import validate_license, format_expiration_date  # Import license validation functions
 
@@ -105,7 +105,7 @@ def save_settings(settings: Dict[str, Any]) -> bool:
         logger.error(f"Error saving settings: {e}")
         return False
 
-def validate_license_key(license_key: str, hostname: str = None, mac: str = None) -> Dict[str, Any]:
+def validate_license_key(license_key: str, hostname: Optional[str] = None, mac: Optional[str] = None) -> Dict[str, Any]:
     """
     Validate a license key using the external license server.
     
@@ -118,7 +118,13 @@ def validate_license_key(license_key: str, hostname: str = None, mac: str = None
         dict: Response containing 'valid', 'message', 'tier', 'expiration_date', and 'formatted_expiration_date'.
     """
     try:
-        result = validate_license(license_key, hostname, mac)
+        # Only pass hostname and mac if they are not None to satisfy type checking
+        kwargs = {}
+        if hostname is not None:
+            kwargs["hostname"] = hostname
+        if mac is not None:
+            kwargs["mac"] = mac
+        result = validate_license(license_key, **kwargs)
         if result["valid"]:
             result["formatted_expiration_date"] = format_expiration_date(result.get("expiration_date"))
             logger.info(f"License validated: {license_key}, Tier: {result['tier']}, Expires: {result['formatted_expiration_date']}")
