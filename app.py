@@ -181,16 +181,13 @@ def main():
 
     # --- Sidebar ---
     with st.sidebar:
-        st.markdown("### 🎛️ Navigation")
+        st.markdown("### 🎛️ Trading Controls")
 
-        # Mode selector with confirmation for real mode
+        # --- Mode selector ---
         mode_options = ["Virtual", "Real"]
         selected_mode_index = 0 if st.session_state.trading_mode == "virtual" else 1
-        selected_mode = st.selectbox(
-            "Trading Mode",
-            mode_options,
-            index=selected_mode_index
-        )
+        selected_mode = st.selectbox("Trading Mode", mode_options, index=selected_mode_index)
+
         confirm_real = False
         if selected_mode.lower() != st.session_state.trading_mode:
             if selected_mode.lower() == "real":
@@ -203,14 +200,10 @@ def main():
                 st.session_state.wallet_cache.clear()
                 logger.info(f"Switched to {st.session_state.trading_mode} mode, cleared cache")
 
-                # Sync if switching to real mode
                 if st.session_state.trading_mode == "real":
                     initialize_bybit()
                     if st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
-                        # Always safe to sync balances
                         st.session_state.engine.sync_real_balance()
-
-                        # NEW: Only sync real trades if there is already at least one trade in DB
                         if db_has_any_trade("real"):
                             st.session_state.engine.sync_real_trades()
                             logger.info("Real trades synced after mode switch (DB already had trades).")
@@ -219,36 +212,38 @@ def main():
                             st.info("Live mode enabled. Trade sync will start after the first real trade exists in the database.")
                 st.rerun()
 
-        # Status
+        # --- Engine & API status ---
         engine_status = "🟢 Online" if st.session_state.engine_initialized else "🔴 Offline"
         st.markdown(f"**Engine Status:** {engine_status}")
         mode_color = "🟢" if st.session_state.trading_mode == "virtual" else "🟡"
         st.markdown(f"**Trading Mode:** {mode_color} {st.session_state.trading_mode.title()}")
 
-        # API Connection Status
         initialize_bybit()
         api_status = "✅ Connected" if st.session_state.bybit_client and st.session_state.bybit_client.is_connected() else "❌ Disconnected"
         st.markdown(f"**API Status:** {api_status}")
 
         st.divider()
 
-        # Pages
+        # --- Lower Section: Page Navigation ---
+        st.markdown("### 📂 Pages")
         pages = {
-            "📊 Dashboard": "pages/dashboard.py",
-            "🎯 Signals": "pages/signals.py",
-            "📈 Trades": "pages/trades.py",
-            "📊 Performance": "pages/performance.py",
-            "⚙️ Settings": "pages/settings.py"
+            "📊 Dashboard": "dashboard",
+            "🎯 Signals": "signals",
+            "📈 Trades": "trades",
+            "📊 Performance": "performance",
+            "⚙️ Settings": "settings"
         }
 
-        for name, path in pages.items():
-            if st.button(name):
-                st.switch_page(path)
+        # Use radio buttons for user-friendly navigation
+        if "active_page" not in st.session_state:
+            st.session_state.active_page = "📊 Dashboard"
 
+        selected_page = st.radio("Navigate", list(pages.keys()), index=list(pages.keys()).index(st.session_state.active_page))
+        st.session_state.active_page = selected_page
+
+        # --- Wallet Balance ---
         st.divider()
-
-        # Wallet Balance
-        balance = get_wallet_balance()  # Use fixed function
+        balance = get_wallet_balance()
         current_mode = st.session_state.trading_mode
         capital_val = balance["capital"]
         available_val = max(balance["available"], 0.0)
@@ -265,19 +260,15 @@ def main():
             st.metric("🏦 Real Available", f"${available_val:.2f}")
             st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
 
-        # Last updated
-        st.markdown(
-            f"<small style='color:#888;'>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small>",
-            unsafe_allow_html=True
-        )
-
-        # Emergency Stop - Fixed: Also stop automated trader if running
+        # --- Emergency Stop ---
+        st.divider()
         if st.button("🛑 Emergency Stop"):
             st.session_state.wallet_cache.clear()
-            if "automated_trader" in st.session_state:  # Assume initialized elsewhere; add if needed
+            if "automated_trader" in st.session_state:
                 st.session_state.automated_trader.stop()
             st.success("All automated trading stopped and cache cleared")
             logger.info("Emergency stop triggered, cache cleared")
+
 
     # --- Main dashboard ---
     try:
