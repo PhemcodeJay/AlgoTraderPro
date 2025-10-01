@@ -666,12 +666,12 @@ class BybitClient:
             side_lower = side.lower()
 
             if side_lower == "buy":
-                stop_loss = -5   # -5% (below entry)
-                take_profit = 25 # +25% (above entry)
+                stop_loss = entry_price * (1 - 0.05)   # 5% below entry
+                take_profit = entry_price * (1 + 0.25) # 25% above entry
 
             elif side_lower == "sell":
-                stop_loss = 5    # +5% (above entry)
-                take_profit = -25 # -25% (below entry)
+                stop_loss = entry_price * (1 + 0.05)   # 5% above entry
+                take_profit = entry_price * (1 - 0.25) # 25% below entry
 
             else:
                 raise ValueError("side must be 'buy' or 'sell'")
@@ -685,8 +685,8 @@ class BybitClient:
                 "orderType": "Market",
                 "qty": str(qty),
                 "timeInForce": "IOC",  # Immediate or Cancel for market orders
-                "stopLoss": str(stop_loss),
-                "takeProfit": str(take_profit)
+                "stopLoss": str(round(stop_loss, 2)),
+                "takeProfit": str(round(take_profit, 2))
             }
 
             # Place order
