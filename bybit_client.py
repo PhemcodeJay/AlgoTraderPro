@@ -659,27 +659,19 @@ class BybitClient:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
-            # Get current price
-            entry_price = float(self.get_current_price(symbol))
+            # Get current price to calculate SL/TP
+            entry_price = self.get_current_price(symbol)
+
+            # Calculate stop loss and take profit
             side_lower = side.lower()
-
-            # Define ROI targets
-            sl_roi = -0.05   # -5% loss
-            tp_roi = 0.25    # +25% profit
-
-            # Calculate SL/TP from ROI
             if side_lower == "buy":
-                stop_loss = entry_price * (1 + sl_roi)  # entry reduced by 5%
-                take_profit = entry_price * (1 + tp_roi)  # entry increased by 25%
-
+                stop_loss = entry_price * 0.95  # 5% below entry
+                take_profit = entry_price * 1.25  # 25% above entry
             elif side_lower == "sell":
-                stop_loss = entry_price * (1 - sl_roi)  # entry increased by 5%
-                take_profit = entry_price * (1 - tp_roi)  # entry reduced by 25%
-
+                stop_loss = entry_price * 1.05  # 5% above entry
+                take_profit = entry_price * 0.75  # 25% below entry
             else:
                 raise ValueError("side must be 'buy' or 'sell'")
-            stop_loss = round(stop_loss, 2)
-            take_profit = round(take_profit, 2)
 
             # Build order params
             params = {
