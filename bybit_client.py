@@ -632,21 +632,23 @@ class BybitClient:
         symbol: str,
         side: str,
         qty: float,
-        leverage: Optional[int] = 10,
-        mode: str = "CROSS"  # Default to CROSS for unified accounts
-    ) -> Dict:
+        leverage: int = 10,
+        mode: str = "CROSS"
+    ) -> dict:
         """
-        Place a market trading order with leverage, cross margin mode for unified accounts,
-        automatically calculates TP (25% from entry) and SL (5% from entry).
+        Place a market order on Bybit (USDT Perp Futures).
+        - Auto-calculates 5% SL & 25% TP
+        - Respects tick size and lot size filters
         """
+
         try:
             leverage = leverage or 10
+            loop = asyncio.get_running_loop()
 
-            # Determine margin mode for unified/non-unified accounts
+            # --- Margin mode / leverage handling ---
             if self.account_type == "UNIFIED":
                 mode = "CROSS"
-                logger.info(f"Unified account detected, using CROSS margin mode for {symbol}")
-                loop = asyncio.get_running_loop()
+                logger.info(f"Unified account detected → Using CROSS margin for {symbol}")
             else:
                 trade_mode = 1 if mode.upper() == "ISOLATED" else 0
                 lev_params = {
@@ -656,41 +658,56 @@ class BybitClient:
                     "buyLeverage": str(leverage),
                     "sellLeverage": str(leverage)
                 }
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
+                await loop.run_in_executor(
+                    None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params
+                )
 
-            # Get current price to calculate SL/TP
-            entry_price = self.get_current_price(symbol)
+            # --- Get instrument precision filters ---
+            instrument = await loop.run_in_executor(
+                None, self._make_request, "GET", "/v5/market/instruments-info", {"category": "linear", "symbol": symbol}
+            )
+            info = instrument["result"]["list"][0]
+            lot_size = float(info["lotSizeFilter"]["qtyStep"])      # min qty step
+            tick_size = float(info["priceFilter"]["tickSize"])      # price step
 
-            # Calculate stop loss and take profit
+            # --- Get current price ---
+            entry_price = float(self.get_current_price(symbol))
             side_lower = side.lower()
 
+            # --- Calculate SL & TP ---
             if side_lower == "buy":
-                stop_loss = entry_price * (1 - 0.05)   # 5% below entry
-                take_profit = entry_price * (1 + 0.25) # 25% above entry
-
+                stop_loss = entry_price * 0.95
+                take_profit = entry_price * 1.25
             elif side_lower == "sell":
-                stop_loss = entry_price * (1 + 0.05)   # 5% above entry
-                take_profit = entry_price * (1 - 0.25) # 25% below entry
-
+                stop_loss = entry_price * 1.05
+                take_profit = entry_price * 0.75
             else:
                 raise ValueError("side must be 'buy' or 'sell'")
 
+            # --- Round to Bybit precision ---
+            def adjust(value, step):
+                return str(round(round(value / step) * step, 8))  # round safely
 
-            # Build order params
+            qty_adj = adjust(qty, lot_size)
+            sl_adj = adjust(stop_loss, tick_size)
+            tp_adj = adjust(take_profit, tick_size)
+
+            # --- Build order params ---
             params = {
                 "category": "linear",
                 "symbol": symbol,
                 "side": side.title(),
                 "orderType": "Market",
-                "qty": str(qty),
-                "timeInForce": "IOC",  # Immediate or Cancel for market orders
-                "stopLoss": str(round(stop_loss, 2)),
-                "takeProfit": str(round(take_profit, 2))
+                "qty": qty_adj,
+                "timeInForce": "IOC",
+                "stopLoss": sl_adj,
+                "takeProfit": tp_adj
             }
 
-            # Place order
-            result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
+            # --- Send order ---
+            result = await loop.run_in_executor(
+                None, self._make_request, "POST", "/v5/order/create", params
+            )
 
             if result:
                 return {
@@ -698,26 +715,20 @@ class BybitClient:
                     "symbol": symbol,
                     "accountType": self.account_type,
                     "side": side,
-                    "qty": qty,
+                    "qty": qty_adj,
                     "price": entry_price,
                     "status": "pending",
                     "timestamp": datetime.now(),
                     "virtual": False,
                     "leverage": leverage,
-                    "stopLoss": str(stop_loss),
-                    "takeProfit": str(take_profit),
+                    "stopLoss": sl_adj,
+                    "takeProfit": tp_adj,
                     "margin_mode": mode.upper()
                 }
             return {}
 
-        except APIException as e:
-            if e.error_code == "100028":
-                logger.warning(f"Unified account error for {symbol}: {e}. Using cross margin mode.")
-                return await self.place_order(symbol, side, qty, leverage, mode="CROSS")
-            logger.error(f"Error placing order for {symbol}: {e}")
-            return {"error": str(e)}
         except Exception as e:
-            logger.error(f"Unexpected error placing order for {symbol}: {e}")
+            logger.error(f"Error placing order: {e}")
             return {"error": str(e)}
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
