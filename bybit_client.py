@@ -678,6 +678,8 @@ class BybitClient:
 
             else:
                 raise ValueError("side must be 'buy' or 'sell'")
+            stop_loss = round(stop_loss, 2)
+            take_profit = round(take_profit, 2)
 
             # Build order params
             params = {
