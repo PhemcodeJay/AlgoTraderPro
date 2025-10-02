@@ -124,7 +124,7 @@ class BybitClient:
             logger.error(f"Failed to start background loop: {e}")
 
     def _generate_signature(self, params: str, timestamp: str) -> str:
-        """ producing: Generate API signature"""
+        """Generate API signature"""
         param_str = timestamp + self.api_key + "5000" + params
         return hmac.new(
             self.api_secret.encode('utf-8'),
@@ -133,7 +133,7 @@ class BybitClient:
         ).hexdigest()
 
     def _get_headers(self, params: str = "") -> Dict[str, str]:
-        """ producing: Get authenticated headers"""
+        """Get authenticated headers"""
         timestamp = str(int(time.time() * 1000))
         signature = self._generate_signature(params, timestamp)
         
@@ -147,7 +147,7 @@ class BybitClient:
         }
 
     def _check_rate_limit(self) -> bool:
-        """ checking: Check and enforce rate limits"""
+        """Check and enforce rate limits"""
         with self.rate_limit_lock:
             now = time.time()
             
@@ -179,7 +179,7 @@ class BybitClient:
             return True
     
     def _validate_api_credentials(self) -> bool:
-        """ validating: Validate API credentials are present"""
+        """Validate API credentials are present"""
         if not self.api_key or not self.api_secret:
             raise APIAuthenticationException(
                 "API credentials not configured. Please set BYBIT_API_KEY and BYBIT_API_SECRET environment variables.",
@@ -188,7 +188,7 @@ class BybitClient:
         return True
     
     def _handle_api_error(self, response_data: Dict, endpoint: str) -> None:
-        """ handling: Handle API error responses"""
+        """Handle API error responses"""
         ret_code = response_data.get("retCode", -1)
         ret_msg = response_data.get("retMsg", "Unknown error")
         
@@ -236,7 +236,7 @@ class BybitClient:
             )
     
     def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict:
-        """ making: Make authenticated API request with comprehensive error handling"""
+        """Make authenticated API request with comprehensive error handling"""
         # Validate credentials
         self._validate_api_credentials()
         
@@ -424,11 +424,11 @@ class BybitClient:
         )
     
     async def _make_request_async(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict:
-        """ async wrapper: Async wrapper around _make_request using asyncio.to_thread"""
+        """Async wrapper around _make_request using asyncio.to_thread"""
         return await asyncio.to_thread(self._make_request, method, endpoint, params)
 
     def is_connected(self) -> bool:
-        """ checking: Check if client is connected and authenticated"""
+        """Check if client is connected and authenticated"""
         if not self._connected:
             # Attempt to verify connection if not connected
             try:
@@ -439,7 +439,7 @@ class BybitClient:
         return self._connected and bool(self.api_key and self.api_secret)
     
     def _test_connection(self) -> bool:
-        """ testing: Test API connection with comprehensive error handling"""
+        """Test API connection with comprehensive error handling"""
         try:
             if not self.api_key or not self.api_secret:
                 logger.error("API credentials missing in .env")
@@ -451,7 +451,7 @@ class BybitClient:
             self._connected = True
             
             logger.info(
-                f"API connection test successful",
+                "API connection test successful",
                 extra={
                     'endpoint': '/v5/market/time',
                     'environment': 'mainnet',
@@ -497,7 +497,7 @@ class BybitClient:
             return False
     
     def get_connection_health(self) -> Dict[str, Any]:
-        """ retrieving: Get comprehensive connection health information"""
+        """Get comprehensive connection health information"""
         health_info = {
             'connected': self._connected,
             'environment': 'mainnet',
@@ -535,7 +535,7 @@ class BybitClient:
         from db import WalletBalance
     def get_account_balance(self) -> "Dict[str, 'WalletBalance']":  # note the quotes around WalletBalance
         from db import WalletBalance
-        """ retrieving: Get account wallet balance as WalletBalance objects keyed by coin symbol"""
+        """Get account wallet balance as WalletBalance objects keyed by coin symbol"""
         try:
             result = self._make_request(
                 "GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"}
@@ -573,7 +573,7 @@ class BybitClient:
             return {}
 
     def get_current_price(self, symbol: str) -> float:
-        """ retrieving: Get current market price for symbol"""
+        """Get current market price for symbol"""
         try:
             # Try cache first
             if symbol in self._price_cache:
@@ -597,11 +597,11 @@ class BybitClient:
             return 0.0
 
     def get_current_over_price(self, symbol: str) -> float:
-        """ retrieving: Alias for get_current_price for backward compatibility"""
+        """Alias for get_current_price for backward compatibility"""
         return self.get_current_price(symbol)
 
     def get_klines(self, symbol: str, interval: str, limit: int = 100) -> List[Dict]:
-        """ retrieving: Get historical kline/candlestick data"""
+        """Get historical kline/candlestick data"""
         try:
             result = self._make_request("GET", "/v5/market/kline", {
                 "category": "linear",
@@ -637,36 +637,16 @@ class BybitClient:
     ) -> Dict:
         """
         Place a market trading order with leverage, cross margin mode for unified accounts,
-        and TP/SL based on ROI percentages (25% TP ROI, -5% SL ROI).
-
-        Args:
-            symbol (str): Trading pair (e.g., 'BTCUSDT').
-            side (str): 'buy' or 'sell'.
-            qty (float): Order quantity in base currency.
-            leverage (Optional[int]): Leverage multiplier (default: 10).
-            mode (str): Margin mode ('CROSS' or 'ISOLATED', default: 'CROSS').
-
-        Returns:
-            Dict: Order details or error information.
+        automatically calculates TP (25% from entry) and SL (5% from entry).
         """
         try:
             leverage = leverage or 10
-            if leverage <= 0:
-                raise ValueError("Leverage must be positive")
 
-            # Validate side
-            side_lower = side.lower()
-            if side_lower not in ["buy", "sell"]:
-                raise ValueError("side must be 'buy' or 'sell'")
-
-            # Validate quantity
-            if qty <= 0:
-                raise ValueError("Quantity must be positive")
-
-            # Determine margin mode
+            # Determine margin mode for unified/non-unified accounts
             if self.account_type == "UNIFIED":
                 mode = "CROSS"
                 logger.info(f"Unified account detected, using CROSS margin mode for {symbol}")
+                loop = asyncio.get_running_loop()
             else:
                 trade_mode = 1 if mode.upper() == "ISOLATED" else 0
                 lev_params = {
@@ -676,37 +656,22 @@ class BybitClient:
                     "buyLeverage": str(leverage),
                     "sellLeverage": str(leverage)
                 }
-                await asyncio.get_running_loop().run_in_executor(
-                    None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params
-                )
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
-            # Get current price (try cache first)
-            entry_price = None
-            if symbol in self._price_cache:
-                cache_time, price = self._price_cache[symbol]
-                if time.time() - cache_time < 10:  # 10-second cache
-                    entry_price = price
-            if not entry_price:
-                entry_price = self.get_current_price(symbol)
-            if entry_price <= 0:
-                raise APIDataException(f"Invalid entry price for {symbol}: {entry_price}")
+            # Get current price to calculate SL/TP
+            entry_price = self.get_current_price(symbol)
 
-            # Calculate stop loss and take profit (ROI-based: 25% TP ROI, -5% SL ROI)
-            tp_roi_pct = 25.0  # 25% TP ROI
-            sl_roi_pct = -5.0  # -5% SL ROI
-            tp_movement_pct = tp_roi_pct / 100 / leverage  # e.g., 25% / 10x = 2.5% price move
-            sl_movement_pct = 5 / 100 / leverage  # e.g., 5% / 10x = 0.5% price move
-
+            # Calculate stop loss and take profit
+            side_lower = side.lower()
             if side_lower == "buy":
-                take_profit = entry_price * (1 + tp_movement_pct)  # e.g., +2.5%
-                stop_loss = entry_price * (1 - sl_movement_pct)    # e.g., -0.5%
-            else:  # sell
-                take_profit = entry_price * (1 - tp_movement_pct)  # e.g., -2.5%
-                stop_loss = entry_price * (1 + sl_movement_pct)    # e.g., +0.5%
-
-            # Validate TP/SL
-            if take_profit <= 0 or stop_loss <= 0:
-                raise APIDataException(f"Invalid TP ({-take_profit}) or SL ({stop_loss}) for {symbol}")
+                stop_loss = entry_price * 0.95  # 5% below entry
+                take_profit = entry_price * 1.25  # 25% above entry
+            elif side_lower == "sell":
+                stop_loss = entry_price * 1.05  # 5% above entry
+                take_profit = entry_price * 0.75  # 25% below entry
+            else:
+                raise ValueError("side must be 'buy' or 'sell'")
 
             # Build order params
             params = {
@@ -715,23 +680,15 @@ class BybitClient:
                 "side": side.title(),
                 "orderType": "Market",
                 "qty": str(qty),
-                "timeInForce": "IOC",  # Immediate or Cancel
-                "stopLoss": str(round(stop_loss, 2)),
-                "takeProfit": str(round(take_profit, 2)),
-                "tpTriggerBy": "LastPrice",
-                "slTriggerBy": "LastPrice"
+                "timeInForce": "IOC",  # Immediate or Cancel for market orders
+                "stopLoss": str(stop_loss),
+                "takeProfit": str(take_profit)
             }
 
             # Place order
-            result = await asyncio.get_running_loop().run_in_executor(
-                None, self._make_request, "POST", "/v5/order/create", params
-            )
+            result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
 
             if result:
-                logger.info(
-                    f"Order placed: {symbol}, {side}, qty={qty}, leverage={leverage}, "
-                    f"TP={take_profit:.2f} ({tp_roi_pct}% ROI), SL={stop_loss:.2f} ({sl_roi_pct}% ROI)"
-                )
                 return {
                     "order_id": result.get("orderId"),
                     "symbol": symbol,
@@ -743,15 +700,15 @@ class BybitClient:
                     "timestamp": datetime.now(),
                     "virtual": False,
                     "leverage": leverage,
-                    "stopLoss": str(round(stop_loss, 2)),
-                    "takeProfit": str(round(take_profit, 2)),
+                    "stopLoss": str(stop_loss),
+                    "takeProfit": str(take_profit),
                     "margin_mode": mode.upper()
                 }
             return {}
 
         except APIException as e:
             if e.error_code == "100028":
-                logger.warning(f"Unified account error for {symbol}: {e}. Retrying with CROSS margin mode.")
+                logger.warning(f"Unified account error for {symbol}: {e}. Using cross margin mode.")
                 return await self.place_order(symbol, side, qty, leverage, mode="CROSS")
             logger.error(f"Error placing order for {symbol}: {e}")
             return {"error": str(e)}
@@ -760,7 +717,7 @@ class BybitClient:
             return {"error": str(e)}
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
-        """ canceling: Cancel an order"""
+        """Cancel an order"""
         try:
             result = self._make_request("POST", "/v5/order/cancel", {
                 "category": "linear",
@@ -773,7 +730,7 @@ class BybitClient:
             return False
 
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
-        """ retrieving: Get open orders"""
+        """Get open orders"""
         try:
             params = {"category": "linear"}
             if symbol:
@@ -800,7 +757,7 @@ class BybitClient:
             return []
 
     async def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
-        """ retrieving: Get current positions asynchronously"""
+        """Get current positions asynchronously"""
         try:
             params = {"category": "linear"}
             if symbol:
@@ -829,7 +786,7 @@ class BybitClient:
             return []
 
     async def start_websocket(self, symbols: List[str]):
-        """ starting: Start WebSocket connection for real-time data"""
+        """Start WebSocket connection for real-time data"""
         try:
             if not self.loop:
                 logger.error("Event loop not available")
@@ -870,12 +827,10 @@ class BybitClient:
             logger.error(f"Failed to start WebSocket: {e}")
 
     def close(self):
-        """ closing: Close connections and cleanup"""
+        """Close connections and cleanup"""
         try:
             if self.ws_connection and self.loop:
                 asyncio.run_coroutine_threadsafe(self.ws_connection.close(), self.loop)
-            if self.session:
-                self.session.close()
             if self.loop:
                 self.loop.call_soon_threadsafe(self.loop.stop)
             logger.info("Bybit client closed")
