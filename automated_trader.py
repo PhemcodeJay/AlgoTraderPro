@@ -375,8 +375,8 @@ class AutomatedTrader:
                         symbol=trade.symbol,
                         side=close_side,
                         qty=trade.qty,
-                        stopLoss=0.0,
-                        takeProfit=0.0,
+                        stopLoss=0.0, # type: ignore
+                        takeProfit=0.0, # type: ignore
                         leverage=trade.leverage,
                         mode="CROSS"  # Ensure cross margin mode
                     )
@@ -395,8 +395,8 @@ class AutomatedTrader:
                             symbol=trade.symbol,
                             side=close_side,
                             qty=trade.qty,
-                            stopLoss=0.0,
-                            takeProfit=0.0,
+                            stopLoss=0.0, # type: ignore
+                            takeProfit=0.0, # type: ignore
                             leverage=trade.leverage,
                             mode="CROSS"
                         )
