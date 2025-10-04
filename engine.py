@@ -301,7 +301,6 @@ class TradingEngine:
             logger.error(f"Error calculating position size for {symbol}: {e}", exc_info=True)
             return 0.0
 
-
     def calculate_virtual_pnl(self, trade: Dict) -> float:
         """Calculate unrealized PnL for virtual trades"""
         try:
@@ -636,11 +635,11 @@ class TradingEngine:
                 side=side,
                 qty=position_size,
                 leverage=signal.get("leverage", 10),
-                stoploss=str(sl), # type: ignore
-                takeProfit=str(tp) # type: ignore
+                stopLoss=sl,
+                takeProfit=tp
             )
 
-            if not order_response.get("success", False):
+            if not order_response.get("success", False) and "order_id" not in order_response:
                 logger.error(f"Failed to place order for {symbol}: {order_response.get('error', 'Unknown error')}")
                 return False
 
