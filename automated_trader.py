@@ -361,11 +361,11 @@ class AutomatedTrader:
             tp_percent = 50   # Take profit percentage
 
             if trade.side.lower() == "buy":
-                stopLoss = entry_price * (1 - sl_percent / 100)
-                takeProfit = entry_price * (1 + tp_percent / 100)
+                stopLoss = entry_price * (1 - sl_percent / 10)
+                takeProfit = entry_price * (1 + tp_percent / 10)
             elif trade.side.lower() == "sell":
-                stopLoss = entry_price * (1 + sl_percent / 100)
-                takeProfit = entry_price * (1 - tp_percent / 100)
+                stopLoss = entry_price * (1 + sl_percent / 10)
+                takeProfit = entry_price * (1 - tp_percent / 10)
             else:
                 raise ValueError("side must be 'buy' or 'sell'")
             if trading_mode == "real":

@@ -617,11 +617,11 @@ class TradingEngine:
             tp_percent = 50  # Take Profit: 50% above entry for buy, below entry for sell
 
             if side.lower() == "buy":
-                sl = entry_price * (1 - sl_percent / 100)  # Stop Loss 10% below entry
-                tp = entry_price * (1 + tp_percent / 100)  # Take Profit 50% above entry
+                sl = entry_price * (1 - sl_percent / 10)  # Stop Loss 10% below entry
+                tp = entry_price * (1 + tp_percent / 10)  # Take Profit 50% above entry
             else:
-                sl = entry_price * (1 + sl_percent / 100)  # Stop Loss 10% above entry
-                tp = entry_price * (1 - tp_percent / 100)  # Take Profit 50% below entry
+                sl = entry_price * (1 + sl_percent / 10)  # Stop Loss 10% above entry
+                tp = entry_price * (1 - tp_percent / 10)  # Take Profit 50% below entry
 
             # Calculate position size
             position_size = self.calculate_position_size(symbol, entry_price)
