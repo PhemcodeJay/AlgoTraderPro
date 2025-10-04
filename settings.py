@@ -22,7 +22,7 @@ def load_settings() -> Dict[str, Any]:
         "ENTRY_BUFFER_PCT": float(os.getenv("ENTRY_BUFFER_PCT", 0.002)),
         "SYMBOLS": ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "AVAXUSDT"],
         "USE_WEBSOCKET": True,
-        "MAX_POSITIONS": 5,
+        "MAX_POSITIONS": 10,
         "MIN_SIGNAL_SCORE": 60
     }
 

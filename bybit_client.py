@@ -663,13 +663,18 @@ class BybitClient:
             entry_price = self.get_current_price(symbol)
 
             # Calculate stop loss and take profit
+            # Define configurable risk/reward percentages
+            sl_percent = 10   # Stop loss percentage
+            tp_percent = 50   # Take profit percentage
+
             side_lower = side.lower()
+
             if side_lower == "buy":
-                stop_loss = entry_price * 0.95  # 5% below entry
-                take_profit = entry_price * 1.25  # 25% above entry
+                stop_loss = entry_price * (1 - sl_percent / 100)
+                take_profit = entry_price * (1 + tp_percent / 100)
             elif side_lower == "sell":
-                stop_loss = entry_price * 1.05  # 5% above entry
-                take_profit = entry_price * 0.75  # 25% below entry
+                stop_loss = entry_price * (1 + sl_percent / 100)
+                take_profit = entry_price * (1 - tp_percent / 100)
             else:
                 raise ValueError("side must be 'buy' or 'sell'")
 
