@@ -314,7 +314,7 @@ def display_automation_tab():
     
     with status_col2:
         current_positions = status.get("current_positions", 0)
-        max_positions = status.get("max_positions", 5)
+        max_positions = status.get("max_positions", 10)
         st.metric("Positions", f"{current_positions}/{max_positions}")
     
     with status_col3:
@@ -334,7 +334,7 @@ def display_automation_tab():
     
     with settings_col2:
         new_scan_interval = st.number_input("Scan Interval (minutes)", 1, 60, int(scan_interval), key="auto_interval")
-        min_signal_score = st.number_input("Min Signal Score", 50, 90, 65, key="auto_min_score")
+        min_signal_score = st.number_input("Min Signal Score", 40, 90, 50, key="auto_min_score")
     
     # Control buttons
     control_col1, control_col2, control_col3 = st.columns(3)
