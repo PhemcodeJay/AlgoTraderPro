@@ -613,8 +613,8 @@ class TradingEngine:
                 return False
 
             # Percentage-based SL and TP
-            sl_percent = 10  # Stop Loss: 10% below entry for buy, above entry for sell
-            tp_percent = 50  # Take Profit: 50% above entry for buy, below entry for sell
+            sl_percent = 1  # Stop Loss: 10% below entry for buy, above entry for sell
+            tp_percent = 5  # Take Profit: 50% above entry for buy, below entry for sell
 
             if side.lower() == "buy":
                 sl = entry_price * (1 - sl_percent / 10)  # Stop Loss 10% below entry

@@ -357,8 +357,8 @@ class AutomatedTrader:
             entry_price = self.client.get_current_price(trade.symbol)
 
             # Define configurable risk/reward percentages
-            sl_percent = 10   # Stop loss percentage
-            tp_percent = 50   # Take profit percentage
+            sl_percent = 1   # Stop loss percentage
+            tp_percent = 5   # Take profit percentage
 
             if trade.side.lower() == "buy":
                 stopLoss = entry_price * (1 - sl_percent / 10)
