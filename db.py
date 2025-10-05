@@ -659,68 +659,49 @@ class DatabaseManager:
             logger.error(f"Error getting all wallet balances: {e}")
             return {}
 
-    def save_setting(self, key: str, value: str, mode: Optional[str] = None) -> bool:
-        """
-        Save a setting to the database, optionally scoped to trading mode ('real' or 'virtual').
-        """
+    def save_setting(self, key: str, value: str) -> bool:
+        """Save a setting to the database"""
         def _save_setting_operation():
             if not self.session:
                 raise DatabaseConnectionException("Database session not initialized")
-
-            # Append mode to key if provided (e.g., 'risk_level_virtual')
-            full_key = f"{key}_{mode.lower()}" if mode else key
-
-            setting = self.session.query(SettingsModel).filter(SettingsModel.key == full_key).first()
+            setting = self.session.query(SettingsModel).filter(SettingsModel.key == key).first()
             if setting:
                 setting.value = value
                 setting.updated_at = datetime.now(timezone.utc)
             else:
-                setting = SettingsModel(key=full_key, value=value, updated_at=datetime.now(timezone.utc))
+                setting = SettingsModel(key=key, value=value, updated_at=datetime.now(timezone.utc))
                 self.session.add(setting)
             return True
 
         try:
             result = self._safe_transaction(_save_setting_operation, operation_type="UPSERT", table="settings")()
-            logger.info(f"Saved setting {key} (mode={mode or 'global'}) with value {value}")
+            logger.info(f"Saved setting {key} with value {value}")
             return result
         except DatabaseException:
-            logger.error(f"Database exception saving setting {key} (mode={mode})")
+            logger.error(f"Database exception saving setting {key}")
             raise
         except Exception as e:
             logger.error(f"Unexpected error saving setting {key}: {str(e)}")
             return False
 
-
-    def get_setting(self, key: str, mode: Optional[str] = None) -> Optional[str]:
-        """
-        Retrieve a setting from the database, optionally scoped to trading mode ('real' or 'virtual').
-        """
+    def get_setting(self, key: str) -> Optional[str]:
+        """Retrieve a setting from the database"""
         def _get_setting_operation():
             if not self.session:
                 raise DatabaseConnectionException("Database session not initialized")
-
-            # Try mode-specific key first
-            if mode:
-                mode_key = f"{key}_{mode.lower()}"
-                setting = self.session.query(SettingsModel).filter(SettingsModel.key == mode_key).first()
-                if setting:
-                    return setting.value
-
-            # Fallback to global key
             setting = self.session.query(SettingsModel).filter(SettingsModel.key == key).first()
             return setting.value if setting else None
 
         try:
-            result = self._execute_with_retry(_get_setting_operation, f"get_setting_{key}_{mode or 'global'}")
-            logger.info(f"Retrieved setting {key} (mode={mode or 'global'}): {result}")
+            result = self._execute_with_retry(_get_setting_operation, f"get_setting_{key}")
+            logger.info(f"Retrieved setting {key}: {result}")
             return result
         except DatabaseException:
-            logger.error(f"Failed to get setting {key} (mode={mode})")
+            logger.error(f"Failed to get setting {key}")
             raise
         except Exception as e:
             logger.error(f"Unexpected error getting setting {key}: {str(e)}")
             return None
-
 
     def close(self):
         """Close database connection"""

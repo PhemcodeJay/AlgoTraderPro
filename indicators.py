@@ -194,10 +194,9 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         
         # Moving averages
         sma_20 = sma(closes, 20)
-        sma_200 = sma(closes, 200)
-        ema_9 = ema(closes, 9)
-        ema_21 = ema(closes, 21)
-
+        sma_50 = sma(closes, 50)
+        ema_20 = ema(closes, 20)
+        
         # Momentum indicators
         rsi_14 = rsi(closes, 14)
         macd_data = macd(closes)
@@ -221,8 +220,8 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         
         # Trend analysis
         trend_score = 0
-        if len(sma_20) > 1 and len(sma_200) > 1:
-            if sma_20[-1] > sma_200[-1]:
+        if len(sma_20) > 1 and len(sma_50) > 1:
+            if sma_20[-1] > sma_50[-1]:
                 trend_score += 1
             if closes[-1] > sma_20[-1]:
                 trend_score += 1
@@ -232,9 +231,8 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         return {
             "price": current_price,
             "sma_20": sma_20[-1] if sma_20 else current_price,
-            "sma_200": sma_200[-1] if sma_200 else current_price,
-            "ema_21": ema_21[-1] if ema_21 else current_price,
-            "ema_9": ema_9[-1] if ema_9 else current_price,
+            "sma_50": sma_50[-1] if sma_50 else current_price,
+            "ema_20": ema_20[-1] if ema_20 else current_price,
             "rsi": current_rsi,
             "macd": current_macd,
             "macd_signal": current_signal,

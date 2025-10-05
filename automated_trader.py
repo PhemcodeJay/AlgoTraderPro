@@ -353,21 +353,6 @@ class AutomatedTrader:
                 pnl = positions[0].get("unrealisedPnl", 0.0) if positions else 0.0
 
             # For real mode, place closing order (reverse side market order)
-            # Get current price to calculate SL/TP
-            entry_price = self.client.get_current_price(trade.symbol)
-
-            # Define configurable risk/reward percentages
-            sl_percent = 1   # Stop loss percentage
-            tp_percent = 5   # Take profit percentage
-
-            if trade.side.lower() == "buy":
-                stopLoss = entry_price * (1 - sl_percent / 10)
-                takeProfit = entry_price * (1 + tp_percent / 10)
-            elif trade.side.lower() == "sell":
-                stopLoss = entry_price * (1 + sl_percent / 10)
-                takeProfit = entry_price * (1 - tp_percent / 10)
-            else:
-                raise ValueError("side must be 'buy' or 'sell'")
             if trading_mode == "real":
                 close_side = "Sell" if trade.side.upper() in ["BUY", "LONG"] else "Buy"
                 try:
@@ -375,8 +360,8 @@ class AutomatedTrader:
                         symbol=trade.symbol,
                         side=close_side,
                         qty=trade.qty,
-                        stopLoss=0.0,
-                        takeProfit=0.0,
+                        stop_loss=0.0,
+                        take_profit=0.0,
                         leverage=trade.leverage,
                         mode="CROSS"  # Ensure cross margin mode
                     )
@@ -395,8 +380,8 @@ class AutomatedTrader:
                             symbol=trade.symbol,
                             side=close_side,
                             qty=trade.qty,
-                            stopLoss=0.0,
-                            takeProfit=0.0,
+                            stop_loss=0.0,
+                            take_profit=0.0,
                             leverage=trade.leverage,
                             mode="CROSS"
                         )

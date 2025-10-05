@@ -633,13 +633,11 @@ class BybitClient:
         side: str,
         qty: float,
         leverage: Optional[int] = 10,
-        mode: str = "CROSS",  # Default to CROSS for unified accounts
-        stopLoss: Optional[float] = None,
-        takeProfit: Optional[float] = None
+        mode: str = "CROSS"  # Default to CROSS for unified accounts
     ) -> Dict:
         """
         Place a market trading order with leverage, cross margin mode for unified accounts,
-        and optional stop loss and take profit.
+        automatically calculates TP (25% from entry) and SL (5% from entry).
         """
         try:
             leverage = leverage or 10
@@ -661,10 +659,19 @@ class BybitClient:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
-            # Get current price to calculate SL/TP if not provided
+            # Get current price to calculate SL/TP
             entry_price = self.get_current_price(symbol)
-            if entry_price <= 0:
-                raise ValueError(f"Invalid entry price for {symbol}: {entry_price}")
+
+            # Calculate stop loss and take profit
+            side_lower = side.lower()
+            if side_lower == "buy":
+                stop_loss = entry_price * 0.95  # 5% below entry
+                take_profit = entry_price * 1.25  # 25% above entry
+            elif side_lower == "sell":
+                stop_loss = entry_price * 1.05  # 5% above entry
+                take_profit = entry_price * 0.75  # 25% below entry
+            else:
+                raise ValueError("side must be 'buy' or 'sell'")
 
             # Build order params
             params = {
@@ -674,13 +681,9 @@ class BybitClient:
                 "orderType": "Market",
                 "qty": str(qty),
                 "timeInForce": "IOC",  # Immediate or Cancel for market orders
+                "stopLoss": str(stop_loss),
+                "takeProfit": str(take_profit)
             }
-
-            # Add stop loss and take profit if provided
-            if stopLoss is not None:
-                params["stopLoss"] = str(round(float(stopLoss), 6))
-            if takeProfit is not None:
-                params["takeProfit"] = str(round(float(takeProfit), 6))
 
             # Place order
             result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
@@ -697,8 +700,8 @@ class BybitClient:
                     "timestamp": datetime.now(),
                     "virtual": False,
                     "leverage": leverage,
-                    "stopLoss": str(stopLoss) if stopLoss is not None else None,
-                    "takeProfit": str(takeProfit) if takeProfit is not None else None,
+                    "stopLoss": str(stop_loss),
+                    "takeProfit": str(take_profit),
                     "margin_mode": mode.upper()
                 }
             return {}
@@ -706,7 +709,7 @@ class BybitClient:
         except APIException as e:
             if e.error_code == "100028":
                 logger.warning(f"Unified account error for {symbol}: {e}. Using cross margin mode.")
-                return await self.place_order(symbol, side, qty, leverage, mode="CROSS", stopLoss=stopLoss, takeProfit=takeProfit)
+                return await self.place_order(symbol, side, qty, leverage, mode="CROSS")
             logger.error(f"Error placing order for {symbol}: {e}")
             return {"error": str(e)}
         except Exception as e:

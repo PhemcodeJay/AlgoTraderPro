@@ -301,6 +301,7 @@ class TradingEngine:
             logger.error(f"Error calculating position size for {symbol}: {e}", exc_info=True)
             return 0.0
 
+
     def calculate_virtual_pnl(self, trade: Dict) -> float:
         """Calculate unrealized PnL for virtual trades"""
         try:
@@ -598,101 +599,110 @@ class TradingEngine:
             logger.error(f"Error executing virtual trade: {e}", exc_info=True)
             return False
             
-    async def execute_real_trade(self, signal: Dict, trading_mode: str = "real") -> bool:
-        """
-        Execute a real trade on Bybit and store it in the database.
-        - Creates a market order
-        - Sets SL/TP automatically (10% SL, 50% TP by default)
-        - Saves all trade info to DB
-        - Syncs wallet after trade
-        """
+    from datetime import datetime
+
+    async def execute_real_trade(self, signal: dict, trading_mode: str = "real") -> bool:
+        """Execute a real trade on Bybit based on a signal, with 5% SL and 25% TP."""
         try:
             symbol = signal.get("symbol")
             if not symbol:
-                logger.error("Symbol is required to execute trade")
+                logger.error("Symbol is required for executing trade")
                 return False
 
-            side = signal.get("side", "BUY").upper()
-            leverage = signal.get("leverage", 10)
-
-            # Get live price
-            entry_price = signal.get("entry") or self.client.get_current_price(symbol)
+            side = signal.get("side", "Buy").upper()  # Normalize to uppercase
+            entry_price = signal.get("entry") or await self.client.get_current_price(symbol)
             if entry_price <= 0:
                 logger.error(f"Invalid entry price for {symbol}")
                 return False
 
-            # === Define risk parameters ===
-            sl_percent = signal.get("sl_percent", 10.0)
-            tp_percent = signal.get("tp_percent", 50.0)
+            # Percentage-based SL and TP
+            sl_percent = 5   # 5% stop loss
+            tp_percent = 25  # 25% take profit
 
             if side == "BUY":
-                sl = round(entry_price * (1 - sl_percent / 100), 2)
-                tp = round(entry_price * (1 + tp_percent / 100), 2)
-            else:
-                sl = round(entry_price * (1 + sl_percent / 100), 2)
-                tp = round(entry_price * (1 - tp_percent / 100), 2)
+                stop_loss = entry_price * (1 - sl_percent / 100)
+                take_profit = entry_price * (1 + tp_percent / 100)
+            else:  # SELL
+                stop_loss = entry_price * (1 + sl_percent / 100)
+                take_profit = entry_price * (1 - tp_percent / 100)
 
-            # === Calculate position size ===
+            # Calculate position size
             position_size = self.calculate_position_size(symbol, entry_price)
             if position_size <= 0:
-                logger.warning(f"Skipped {symbol}: invalid position size {position_size}")
+                logger.error(f"Invalid position size for {symbol}: {position_size}")
                 return False
 
-            # === Place the market order on Bybit ===
-            logger.info(f"Placing real {side} order for {symbol}: qty={position_size}, leverage={leverage}")
+            # Place main order (without SL/TP)
             order_response = await self.client.place_order(
                 symbol=symbol,
                 side=side,
                 qty=position_size,
-                orderType="Market",
-                leverage=leverage,
-                stopLoss=sl,
-                takeProfit=tp,
-                timeInForce="GoodTillCancel"
+                leverage=signal.get("leverage", 10)
             )
 
-            # === Validate order response ===
-            if not order_response or "result" not in order_response:
-                logger.error(f"Bybit order response missing result: {order_response}")
+            if not order_response.get("success", False):
+                logger.error(f"Failed to place order for {symbol}: {order_response.get('error', 'Unknown error')}")
                 return False
 
-            result = order_response["result"]
-            order_id = result.get("orderId") or f"real_{symbol}_{int(datetime.now().timestamp())}"
+            order_id = order_response.get("order_id", f"real_{symbol}_{int(datetime.now().timestamp())}")
 
-            # === Prepare and save trade record ===
+            # Set conditional orders for SL and TP
+            opposite_side = "Sell" if side == "BUY" else "Buy"
+
+            # Stop Loss
+            await self.client.create_conditional_order(
+                symbol=symbol,
+                side=opposite_side,
+                order_type="Stop",
+                qty=position_size,
+                stop_px=stop_loss
+            )
+
+            # Take Profit
+            await self.client.create_conditional_order(
+                symbol=symbol,
+                side=opposite_side,
+                order_type="Limit",
+                qty=position_size,
+                price=take_profit
+            )
+
+            # Prepare trade data
             trade_data = {
                 "symbol": symbol,
                 "side": side,
                 "qty": position_size,
                 "entry_price": entry_price,
                 "order_id": order_id,
-                "virtual": False,
+                "virtual": trading_mode == "real",
                 "status": "open",
+                "score": signal.get("score"),
                 "strategy": signal.get("strategy", "Auto"),
-                "score": signal.get("score", None),
-                "leverage": leverage,
-                "sl": sl,
-                "tp": tp,
+                "leverage": signal.get("leverage", 10),
+                "sl": stop_loss,
+                "tp": take_profit,
                 "trail": signal.get("trail"),
                 "liquidation": signal.get("liquidation"),
-                "margin_usdt": signal.get("margin_usdt"),
+                "margin_usdt": signal.get("margin_usdt")
             }
 
-            if self.db.add_trade(trade_data):
+            # Save trade to database asynchronously
+            success = await self.db.add_trade(trade_data)
+            if success:
                 logger.info(
-                    f"✅ Real trade executed & saved: {symbol} {side} {position_size} @ {entry_price} | "
-                    f"SL={sl}, TP={tp}, ID={order_id}"
+                    f"Real trade executed: {symbol} {side} @ {entry_price}, "
+                    f"Qty: {position_size}, Order ID: {order_id}, "
+                    f"SL: {stop_loss:.2f}, TP: {take_profit:.2f}, "
+                    f"Trail: {trade_data['trail']}, Liquidation: {trade_data['liquidation']}, "
+                    f"Margin: {trade_data['margin_usdt']} USDT"
                 )
+                return True
             else:
-                logger.error(f"❌ Trade executed but failed to save in DB for {symbol}")
+                logger.error(f"Failed to save trade to database for {symbol}, Order ID: {order_id}")
                 return False
 
-            # === Sync balance after order ===
-            self.sync_real_balance()
-            return True
-
         except Exception as e:
-            logger.error(f"❌ Error executing real trade for {signal.get('symbol', '?')}: {e}", exc_info=True)
+            logger.error(f"Error executing real trade for {symbol}: {e}", exc_info=True)
             return False
 
     def close(self):
