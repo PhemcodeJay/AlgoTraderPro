@@ -67,20 +67,18 @@ def enhance_signal(analysis: Dict[str, Any]) -> Any:
     risk_reward = 2
 
     # Trade parameters
-    sl_percent = 1  # Stop Loss: 10% below entry for buy, above entry for sell
-    tp_percent = 5   # Take Profit: 50% above entry for buy, below entry for sell
+    # Percentage-based SL and TP
+    sl_percent = 10.0    # Stop Loss: 10% below entry for buy, above entry for sell
+    tp_percent = 50.0    # Take Profit: 50% above entry for buy, below entry for sell
 
     if side.lower() == "buy":
-        sl = price * (1 - sl_percent / 10)   # Stop Loss 10% below entry
-        tp = price * (1 + tp_percent / 10)   # Take Profit 50% above entry
-        liq = price * (1 - 0.9 / leverage)    # Liquidation formula remains the same
+        sl = price * (1 - sl_percent / 100)  # Stop Loss 10% below entry
+        tp = price * (1 + tp_percent / 100)  # Take Profit 50% above entry
+        liq = price * (1 - 0.9 / leverage)  # Liquidation formula for buy
     else:
-        sl = price * (1 + sl_percent / 10)   # Stop Loss 10% above entry
-        tp = price * (1 - tp_percent / 10)   # Take Profit 50% below entry
-        liq = price * (1 + 0.9 / leverage)    # Liquidation formula for short
-
-    print(f"SL: {sl}, TP: {tp}, LIQ: {liq}")
-
+        sl = price * (1 + sl_percent / 100)  # Stop Loss 10% above entry
+        tp = price * (1 - tp_percent / 100)  # Take Profit 50% below entry
+        liq = price * (1 + 0.9 / leverage)  # Liquidation formula for short
 
     trail = atr
     margin_usdt = 2.0
