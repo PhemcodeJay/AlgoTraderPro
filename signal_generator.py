@@ -67,8 +67,8 @@ def enhance_signal(analysis: Dict[str, Any]) -> Any:
     risk_reward = 2
 
     # Trade parameters
-    sl_percent = 5    # Stop Loss: 5% below entry for buy, above entry for sell
-    tp_percent = 25   # Take Profit: 25% above entry for buy, below entry for sell
+    sl_percent = 0.1    # Stop Loss: 10% below entry for buy, above entry for sell
+    tp_percent = 0.5   # Take Profit: 50% above entry for buy, below entry for sell
 
     if side.lower() == "buy":
         sl = price * (1 - sl_percent / 100)   # Stop Loss 5% below entry

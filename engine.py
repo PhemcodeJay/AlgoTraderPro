@@ -616,8 +616,8 @@ class TradingEngine:
                 return False
 
             # Percentage-based SL and TP
-            sl_percent = 5   # 5% stop loss
-            tp_percent = 25  # 25% take profit
+            sl_percent = 0.1   # 10% stop loss
+            tp_percent = 0.5  # 50% take profit
 
             if side == "BUY":
                 stop_loss = entry_price * (1 - sl_percent / 100)
