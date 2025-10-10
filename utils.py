@@ -15,45 +15,94 @@ logger = get_logger(__name__)
 
 tz_utc3 = timezone(timedelta(hours=3))
 
+def calculate_sl_tp(signal_dict: Dict[str, Any], sl_percent: float = 0.1, tp_percent: float = 0.5) -> Dict[str, Any]:
+    """
+    Calculate stop-loss (SL) and take-profit (TP) for a trading signal if missing.
+    SL is set to 10% below/above entry price for buy/sell orders.
+    TP is set to 50% above/below entry price for buy/sell orders.
+    
+    Args:
+        signal_dict: Dictionary containing signal data (e.g., entry, side, sl, tp).
+        sl_percent: Percentage for stop-loss (default 0.1 for 10%).
+        tp_percent: Percentage for take-profit (default 0.5 for 50%).
+    
+    Returns:
+        Updated signal dictionary with SL and TP values.
+    """
+    try:
+        # Validate and extract entry price
+        entry_price = signal_dict.get("entry")
+        if entry_price is None or not isinstance(entry_price, (int, float)) or entry_price <= 0:
+            logger.error(f"Invalid entry price: {entry_price}. Skipping SL/TP calculation.")
+            return signal_dict
+
+        # Normalize side to match execute_real_trade (uppercase)
+        side = signal_dict.get("side", "Buy").title()
+        if side not in ["Buy", "Sell"]:
+            logger.warning(f"Invalid side: {side}. Defaulting to 'Buy'.")
+            side = "Buy"
+            signal_dict["side"] = side
+
+        # Calculate SL and TP if missing
+        if signal_dict.get("sl") is None:
+            sl = entry_price * (1 - sl_percent if side == "Buy" else 1 + sl_percent)
+            signal_dict["sl"] = round(sl, 4)
+            logger.info(f"Calculated SL for {side} order: {signal_dict['sl']:.4f}")
+
+        if signal_dict.get("tp") is None:
+            tp = entry_price * (1 + tp_percent if side == "Buy" else 1 - tp_percent)
+            signal_dict["tp"] = round(tp, 4)
+            logger.info(f"Calculated TP for {side} order: {signal_dict['tp']:.4f}")
+
+        return signal_dict
+
+    except Exception as e:
+        logger.error(f"Error calculating SL/TP for signal {signal_dict}: {e}", exc_info=True)
+        return signal_dict
+
 def normalize_signal(signal: Any) -> Dict:
     """
     Normalize a trading signal into a standard dictionary format.
-    Automatically calculates SL (5%) and TP (25%) if not provided.
+    Automatically calculates SL (10%) and TP (50%) if not provided.
     """
-    if isinstance(signal, dict):
-        signal_dict = signal.copy()
-    else:
-        signal_dict = {
-            "symbol": getattr(signal, "symbol", "N/A"),
-            "interval": getattr(signal, "interval", "N/A"),
-            "signal_type": getattr(signal, "signal_type", "N/A"),
-            "score": getattr(signal, "score", 0.0),
-            "indicators": getattr(signal, "indicators", {}),
-            "strategy": getattr(signal, "strategy", "Auto"),
-            "side": getattr(signal, "side", "Buy"),
-            "sl": getattr(signal, "sl", None),
-            "tp": getattr(signal, "tp", None),
-            "trail": getattr(signal, "trail", None),
-            "liquidation": getattr(signal, "liquidation", None),
-            "leverage": getattr(signal, "leverage", 10),
-            "margin_usdt": getattr(signal, "margin_usdt", None),
-            "entry": getattr(signal, "entry", None),
-            "market": getattr(signal, "market", None),
-            "created_at": getattr(signal, "created_at", None)
-        }
+    try:
+        if isinstance(signal, dict):
+            signal_dict = signal.copy()
+        else:
+            signal_dict = {
+                "symbol": getattr(signal, "symbol", "N/A"),
+                "interval": getattr(signal, "interval", "N/A"),
+                "signal_type": getattr(signal, "signal_type", "N/A"),
+                "score": getattr(signal, "score", 0.0),
+                "indicators": getattr(signal, "indicators", {}),
+                "strategy": getattr(signal, "strategy", "Auto"),
+                "side": getattr(signal, "side", "Buy"),
+                "sl": getattr(signal, "sl", None),
+                "tp": getattr(signal, "tp", None),
+                "trail": getattr(signal, "trail", None),
+                "liquidation": getattr(signal, "liquidation", None),
+                "leverage": getattr(signal, "leverage", 10),
+                "margin_usdt": getattr(signal, "margin_usdt", None),
+                "entry": getattr(signal, "entry", None),
+                "market": getattr(signal, "market", None),
+                "created_at": getattr(signal, "created_at", None)
+            }
 
-    # Automatically calculate SL and TP if missing and entry price exists
-    entry_price = signal_dict.get("entry")
-    side = signal_dict.get("side", "Buy").lower()
+        # Ensure side is in title case for consistency
+        signal_dict["side"] = signal_dict.get("side", "Buy").title()
+        if signal_dict["side"] not in ["Buy", "Sell"]:
+            logger.warning(f"Invalid side in signal: {signal_dict['side']}. Defaulting to 'Buy'.")
+            signal_dict["side"] = "Buy"
 
-    if entry_price is not None:
-        if signal_dict.get("sl") is None:
-            signal_dict["sl"] = entry_price * (0.95 if side == "buy" else 1.05)
-        if signal_dict.get("tp") is None:
-            signal_dict["tp"] = entry_price * (1.25 if side == "buy" else 0.75)
+        # Calculate SL (10%) and TP (50%) if missing
+        signal_dict = calculate_sl_tp(signal_dict, sl_percent=0.1, tp_percent=0.5)
 
-    return signal_dict
+        logger.debug(f"Normalized signal: {signal_dict}")
+        return signal_dict
 
+    except Exception as e:
+        logger.error(f"Error normalizing signal: {e}", exc_info=True)
+        return signal_dict
 
 def format_price_safe(value: Optional[float]) -> str:
     try:

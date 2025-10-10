@@ -131,56 +131,28 @@ def display_signal_details(signal):
 async def execute_real_trade(engine, signal):
     """Execute a real trade based on a signal"""
     try:
+        # Validate signal data
         symbol = signal.get("symbol")
-        if not isinstance(symbol, str):
+        if not isinstance(symbol, str) or not symbol:
             logger.error("Symbol must be a non-empty string")
             return False
         
         side = signal.get("side", "Buy")
-        entry_price = signal.get("entry")
-        if not entry_price:
-            entry_price = await engine.client.get_current_price(symbol)
-        if entry_price <= 0:
-            logger.error(f"Invalid entry price for {symbol}")
+        if side not in ["Buy", "Sell"]:
+            logger.error(f"Invalid side for {symbol}: {side}")
             return False
-        
-        position_size = engine.calculate_position_size(symbol, entry_price)
-        trade_data = {
-            "symbol": symbol,
-            "side": side,
-            "qty": position_size,
-            "entry_price": entry_price,
-            "order_id": f"real_{symbol}_{int(datetime.now().timestamp())}",
-            "virtual": False,
-            "status": "open",
-            "score": float(str(signal.get("score", "0%")).replace("%", "")),
-            "strategy": signal.get("strategy", "Auto"),
-            "leverage": signal.get("leverage", 10),
-            "sl": float(signal.get("sl", 0)),
-            "tp": float(signal.get("tp", 0)),
-            "trail": float(signal.get("trail", 0)),
-            "liquidation": float(signal.get("liquidation", 0)),
-            "margin_usdt": float(signal.get("margin_usdt", 0))
-        }
-        order_result = await engine.client.place_order(
-            symbol=symbol,
-            side=side,
-            qty=trade_data["qty"],
-            price=entry_price,
-            stop_loss=trade_data["sl"],
-            take_profit=trade_data["tp"],
-            leverage=trade_data["leverage"],
-            mode="ISOLATED"
-        )
-        if order_result.get("success"):
-            engine.db.add_trade(trade_data)
-            engine.sync_real_balance()
+
+        # Use TradingEngine's execute_real_trade method
+        success = await engine.execute_real_trade(signal, trading_mode="real")
+        if success:
+            logger.info(f"Real trade executed successfully for {symbol}")
             return True
         else:
-            logger.error(f"Real trade failed: {order_result.get('error', 'Unknown error')}")
+            logger.error(f"Failed to execute real trade for {symbol}")
             return False
+
     except Exception as e:
-        logger.error(f"Error executing real trade: {e}")
+        logger.error(f"Error executing real trade for {symbol}: {e}", exc_info=True)
         return False
 
 def main():
@@ -204,6 +176,9 @@ def main():
     
     if 'signal_generation_in_progress' not in st.session_state:
         st.session_state.signal_generation_in_progress = False
+    
+    if 'real_trade_status' not in st.session_state:
+        st.session_state.real_trade_status = None
     
     # Sidebar controls
     with st.sidebar:
@@ -274,6 +249,9 @@ def main():
             finally:
                 st.session_state.signal_generation_in_progress = False
     
+    # Initialize TradingEngine
+    engine = TradingEngine()
+    
     # Main content tabs
     tab1, tab2, tab3, tab4 = st.tabs(["🆕 Generated Signals", "💾 Database Signals", "🔍 Single Symbol Analysis", "🤖 ML Signal Filter"])
     
@@ -321,7 +299,6 @@ def main():
                     else:
                         st.error("Failed to generate chart for selected signal.")
 
-                    engine = TradingEngine()
                     col1, col2 = st.columns(2)
                     with col1:
                         if st.button("📈 Execute Virtual Trade"):
@@ -343,17 +320,31 @@ def main():
                                     if not engine.is_trading_enabled():
                                         st.error("Trading disabled or emergency stop active")
                                     else:
-                                        success = asyncio.run(execute_real_trade(engine, selected_signal))
-                                        if success:
-                                            st.success(f"✅ Real trade executed for {selected_signal.get('symbol', 'N/A')}")
-                                        else:
-                                            st.error("❌ Failed to execute real trade")
+                                        # Schedule async task
+                                        task = asyncio.create_task(execute_real_trade(engine, selected_signal))
+                                        st.session_state.real_trade_status = task
+                                        st.success(f"✅ Real trade execution initiated for {selected_signal.get('symbol', 'N/A')}")
                                 except Exception as e:
-                                    st.error(f"Error executing real trade: {e}")
+                                    st.error(f"Error initiating real trade: {e}")
+                                    logger.error(f"Real trade initiation error: {e}")
             else:
                 st.warning("No valid signals available to display.")
         else:
             st.info("🎯 Click 'Generate New Signals' to start analyzing the markets!")
+
+        # Check real trade status
+        if st.session_state.real_trade_status:
+            try:
+                if st.session_state.real_trade_status.done():
+                    success = st.session_state.real_trade_status.result()
+                    if success:
+                        st.success("✅ Real trade executed successfully")
+                    else:
+                        st.error("❌ Real trade execution failed")
+                    st.session_state.real_trade_status = None
+            except Exception as e:
+                st.error(f"Error checking real trade status: {e}")
+                st.session_state.real_trade_status = None
 
     with tab2:
         st.subheader("💾 Historical Signals from Database")
@@ -460,7 +451,6 @@ def main():
                 st.info("Select a symbol and click 'Analyze Symbol' to see detailed analysis")
         
         trade_col1, trade_col2 = st.columns(2)
-        engine = TradingEngine()
         with trade_col1:
             virtual_disabled = 'single_analysis' not in st.session_state
             if st.button("💻 Execute Virtual Trade", disabled=virtual_disabled):
@@ -482,13 +472,27 @@ def main():
                         st.error("Trading is disabled or emergency stop is active. Cannot execute trade.")
                     else:
                         signal = st.session_state['single_analysis']
-                        success = asyncio.run(execute_real_trade(engine, signal))
-                        if success:
-                            st.success(f"✅ Real trade executed for {signal.get('symbol', 'N/A')}")
-                        else:
-                            st.error("❌ Failed to execute real trade")
+                        # Schedule async task
+                        task = asyncio.create_task(execute_real_trade(engine, signal))
+                        st.session_state.real_trade_status = task
+                        st.success(f"✅ Real trade execution initiated for {signal.get('symbol', 'N/A')}")
                 except Exception as e:
                     st.error(f"Real trade error: {e}")
+                    logger.error(f"Real trade initiation error: {e}")
+
+        # Check real trade status
+        if st.session_state.real_trade_status:
+            try:
+                if st.session_state.real_trade_status.done():
+                    success = st.session_state.real_trade_status.result()
+                    if success:
+                        st.success("✅ Real trade executed successfully")
+                    else:
+                        st.error("❌ Real trade execution failed")
+                    st.session_state.real_trade_status = None
+            except Exception as e:
+                st.error(f"Error checking real trade status: {e}")
+                st.session_state.real_trade_status = None
 
     with tab4:
         st.subheader("🤖 ML-Powered Signal Filtering")

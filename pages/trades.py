@@ -40,8 +40,8 @@ def get_automated_trader():
     engine = get_engine()
     return AutomatedTrader(engine, engine.client)
 
-def close_trade_safely(trade_id: str, virtual: bool = True):
-    """Close a trade with proper error handling"""
+async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
+    """Close a trade with proper error handling, including closing real trades on Bybit."""
     try:
         engine = get_engine()
         
@@ -53,23 +53,51 @@ def close_trade_safely(trade_id: str, virtual: bool = True):
             st.error(f"Trade {trade_id} not found")
             return False
         
-        # Get current price for PnL calculation
+        # Initialize variables
         current_price = engine.client.get_current_price(trade.symbol)
+        pnl = 0.0
         
-        # Calculate PnL
-        pnl = engine.calculate_virtual_pnl(trade.to_dict()) if virtual else 0.0
+        # Handle real trades
         if not virtual:
             try:
-                positions = asyncio.run(engine.client.get_positions(symbol=trade.symbol))
+                # Fetch position data
+                positions = await engine.client.get_positions(symbol=trade.symbol)
                 position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
-                pnl = position.get("unrealized_pnl", 0.0) if position else 0.0
+                
+                if position:
+                    # Close position on Bybit
+                    close_side = "Sell" if trade.side.upper() == "BUY" else "Buy"
+                    close_response = await engine.client.place_order(
+                        symbol=trade.symbol,
+                        side=close_side,
+                        qty=trade.qty,
+                        leverage=trade.leverage or 10,
+                        mode="CROSS"
+                    )
+                    
+                    if "error" in close_response or not close_response.get("order_id"):
+                        st.error(f"Failed to close position for {trade.symbol}: {close_response.get('error', 'Unknown error')}")
+                        logger.error(f"Failed to close position for {trade.symbol}: {close_response}")
+                        return False
+                    
+                    # Use Bybit's unrealized PnL and mark price
+                    pnl = float(position.get("unrealized_pnl", 0.0))
+                    current_price = float(position.get("mark_price", current_price))
+                else:
+                    st.warning(f"No active position found for {trade.symbol}. Marking trade as closed.")
+                    pnl = 0.0
             except Exception as e:
-                logger.warning(f"Failed to fetch real PnL for {trade.symbol}: {e}")
-                pnl = 0.0
+                st.error(f"Failed to fetch/close position for {trade.symbol}: {e}")
+                logger.error(f"Failed to fetch/close position for {trade.symbol}: {e}", exc_info=True)
+                return False
+        else:
+            # Virtual trade: Calculate PnL
+            pnl = engine.calculate_virtual_pnl(trade.to_dict())
         
         # Update trade in database
         if not db_manager.session:
             logger.error("Database session not initialized")
+            st.error("Database session not initialized")
             return False
         
         try:
@@ -88,7 +116,8 @@ def close_trade_safely(trade_id: str, virtual: bool = True):
         except Exception as e:
             db_manager.session.rollback()
             logger.error(f"Database error updating trade {trade.order_id}: {e}", exc_info=True)
-            success = False
+            st.error(f"Database error updating trade: {e}")
+            return False
         
         if success:
             # Update virtual balance if it's a virtual trade
@@ -106,8 +135,8 @@ def close_trade_safely(trade_id: str, virtual: bool = True):
         logger.error(f"Error closing trade {trade_id}: {e}", exc_info=True)
         return False
 
-def display_trade_management():
-    """Display trade management interface"""
+async def display_trade_management():
+    """Display trade management interface for virtual and real trades."""
     engine = get_engine()
     
     # Trading mode switch
@@ -142,7 +171,7 @@ def display_trade_management():
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
                     
                     if st.button("❌ Close", key=f"close_virtual_{trade.id}"):
-                        if close_trade_safely(str(trade.id), virtual=True):
+                        if await close_trade_safely(str(trade.id), virtual=True):
                             st.rerun()
         else:
             st.info("No open virtual trades")
@@ -154,16 +183,16 @@ def display_trade_management():
         if real_trades:
             for i, trade in enumerate(real_trades):
                 with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
-                    current_price = engine.client.get_current_price(trade.symbol)
-                    
-                    # For real trades, fetch unrealized PnL and mark price from Bybit
+                    # Fetch real-time position data from Bybit
                     try:
-                        positions = asyncio.run(engine.client.get_positions(symbol=trade.symbol))
+                        positions = await engine.client.get_positions(symbol=trade.symbol)
                         position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
-                        current_pnl = position.get("unrealized_pnl", 0.0) if position else 0.0
-                        current_price = position.get("mark_price", current_price) if position else current_price
+                        current_price = float(position.get("mark_price", engine.client.get_current_price(trade.symbol))) if position else engine.client.get_current_price(trade.symbol)
+                        current_pnl = float(position.get("unrealized_pnl", 0.0)) if position else 0.0
                     except Exception as e:
                         logger.warning(f"Failed to fetch real position data for {trade.symbol}: {e}")
+                        st.warning(f"Could not fetch real-time data for {trade.symbol}. Using fallback price.")
+                        current_price = engine.client.get_current_price(trade.symbol)
                         current_pnl = 0.0
                     
                     pnl_color = "🟢" if current_pnl > 0 else "🔴" if current_pnl < 0 else "🟡"
@@ -185,7 +214,7 @@ def display_trade_management():
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
                     
                     if st.button("❌ Close", key=f"close_real_{trade.id}"):
-                        if close_trade_safely(str(trade.id), virtual=False):
+                        if await close_trade_safely(str(trade.id), virtual=False):
                             st.rerun()
         else:
             st.info("No open real trades")
@@ -269,16 +298,16 @@ def display_manual_trading():
                 
                 # Execute real trade if necessary
                 if trading_mode == "real":
-                    success = asyncio.run(engine.execute_real_trade(trade_data))
+                    success = asyncio.run(engine.execute_real_trade([trade_data]))
                     if not success:
                         st.error("❌ Failed to execute real trade on Bybit")
                         # Rollback DB entry
-                        session = db_manager._get_session()  # Call the method, don't just reference it
+                        session = db_manager._get_session()
                         session.execute(
-                                update(TradeModel)
-                                .where(TradeModel.order_id == trade_data["order_id"])
-                                .values(status="failed")
-                            )
+                            update(TradeModel)
+                            .where(TradeModel.order_id == trade_data["order_id"])
+                            .values(status="failed")
+                        )
                         session.commit()
                         return
                 
@@ -509,7 +538,8 @@ def main():
     ])
     
     with tab1:
-        display_trade_management()
+        # Run async function in Streamlit
+        asyncio.run(display_trade_management())
     
     with tab2:
         st.subheader("📜 Trading History")
@@ -537,7 +567,6 @@ def main():
                     "Margin": f"${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A",
                     "PnL": f"${pnl:.2f}",
                     "Mode": "Virtual" if trade.virtual else "Real",
-                    "Strategy": trade.strategy or "Manual",
                     "Status": "✅" if pnl > 0 else "❌" if pnl < 0 else "➖"
                 })
             

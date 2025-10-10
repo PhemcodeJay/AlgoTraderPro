@@ -158,8 +158,14 @@ class AutomatedTrader:
                     # Update last scan time
                     self.stats["last_scan"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     
-                    # Wait for next scan
-                    await asyncio.sleep(self.scan_interval)
+                    # Countdown to next scan
+                    next_scan_time = time.time() + self.scan_interval
+                    while time.time() < next_scan_time and self.is_running and not self.stop_event.is_set():
+                        remaining = int(next_scan_time - time.time())
+                        if status_container:
+                            mins, secs = divmod(remaining, 60)
+                            status_container.info(f"⏳ Next scan in {mins:02d}:{secs:02d} | Last scan: {self.stats.get('last_scan', 'Never')}")
+                        await asyncio.sleep(1)
                     
                 except Exception as e:
                     logger.error(f"Error in trading loop: {e}", exc_info=True)
@@ -206,7 +212,7 @@ class AutomatedTrader:
                     success = self.engine.execute_virtual_trade(signal_dict)
                 else:
                     try:
-                        success = await self.engine.execute_real_trade(signal_dict)
+                        success = await self.engine.execute_real_trade([signal_dict])
                         if success:
                             # Wait briefly for Bybit to process
                             await asyncio.sleep(2)
@@ -217,7 +223,7 @@ class AutomatedTrader:
                         if e.error_code == "100028":
                             logger.warning(f"Unified account error for {symbol}: {e}. Retrying with cross margin mode.")
                             signal_dict["margin_mode"] = "CROSS"  # Ensure cross margin mode
-                            success = await self.engine.execute_real_trade(signal_dict)
+                            success = await self.engine.execute_real_trade([signal_dict])
                             if success:
                                 await asyncio.sleep(2)
                                 self.engine.get_open_real_trades()
@@ -360,8 +366,6 @@ class AutomatedTrader:
                         symbol=trade.symbol,
                         side=close_side,
                         qty=trade.qty,
-                        stop_loss=0.0,
-                        take_profit=0.0,
                         leverage=trade.leverage,
                         mode="CROSS"  # Ensure cross margin mode
                     )
@@ -380,8 +384,6 @@ class AutomatedTrader:
                             symbol=trade.symbol,
                             side=close_side,
                             qty=trade.qty,
-                            stop_loss=0.0,
-                            take_profit=0.0,
                             leverage=trade.leverage,
                             mode="CROSS"
                         )

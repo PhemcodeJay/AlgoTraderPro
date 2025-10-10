@@ -29,6 +29,8 @@ if "bybit_client" not in st.session_state:
     st.session_state.bybit_client = None
 if "engine" not in st.session_state:
     st.session_state.engine = None
+if "has_real_trades" not in st.session_state:
+    st.session_state.has_real_trades = None  # Cache for db_has_any_trade
 
 # --- Initialize trading engine ---
 def initialize_engine():
@@ -46,56 +48,48 @@ def initialize_engine():
 
 # --- Initialize Bybit client ---
 def initialize_bybit():
-    if st.session_state.bybit_client is None:
-        st.session_state.bybit_client = BybitClient()
-        if st.session_state.bybit_client._test_connection():
-            logger.info("Bybit client connected successfully")
-        else:
-            st.warning("Bybit client connection failed. Check API keys.")
-            logger.error("Bybit client connection test failed")
+    if st.session_state.bybit_client is None or not st.session_state.bybit_client.is_connected():
+        try:
+            st.session_state.bybit_client = BybitClient()
+            if st.session_state.bybit_client._test_connection():
+                logger.info("Bybit client connected successfully")
+                return True
+            else:
+                st.warning("Bybit client connection failed. Check API keys in .env file.")
+                logger.error("Bybit client connection test failed")
+                st.session_state.bybit_client = None
+                return False
+        except Exception as e:
+            st.error(f"Failed to initialize Bybit client: {e}")
+            logger.error(f"Bybit client initialization failed: {e}", exc_info=True)
+            st.session_state.bybit_client = None
+            return False
+    return True
 
 # --- Helper: does DB already have any REAL trades? ---
 def db_has_any_trade(mode: str = "real") -> bool:
     """
-    Return True if the DB already contains at least one trade for the given mode.
-    Tries several common DB methods and fails closed (False) without raising.
+    Return True if the DB contains at least one trade for the given mode.
+    Uses cached result if available, otherwise queries DB.
     """
+    if mode == "real" and st.session_state.has_real_trades is not None:
+        logger.debug(f"Using cached has_real_trades: {st.session_state.has_real_trades}")
+        return st.session_state.has_real_trades
+
     try:
         db = st.session_state.engine.db if st.session_state.engine else None
         if not db:
+            logger.warning("No database access for trade check")
             return False
 
-        # Try a few likely APIs, quietly skipping if missing
-        try:
-            return (db.get_trade_count(mode) or 0) > 0
-        except Exception:
-            pass
-        try:
-            return (db.count_trades(mode) or 0) > 0
-        except Exception:
-            pass
-        try:
-            return bool(db.has_trades(mode))
-        except Exception:
-            pass
-        try:
-            return db.get_last_trade(mode) is not None
-        except Exception:
-            pass
-        try:
-            trades = db.get_trades(mode=mode, limit=1)
-            return bool(trades)
-        except Exception:
-            pass
-        try:
-            trades = db.get_trades(mode)
-            return bool(trades)
-        except Exception:
-            pass
-
-        return False
+        trades = db.get_trades(mode=mode, limit=1)
+        has_trades = bool(trades)
+        if mode == "real":
+            st.session_state.has_real_trades = has_trades
+            logger.info(f"Cached has_real_trades: {has_trades}")
+        return has_trades
     except Exception as e:
-        logger.error(f"db_has_any_trade check failed: {e}", exc_info=True)
+        logger.error(f"db_has_any_trade check failed for {mode}: {e}", exc_info=True)
         return False
 
 # --- Fetch wallet balance ---
@@ -111,14 +105,17 @@ def get_wallet_balance() -> dict:
 
     # Check cache
     if mode in st.session_state.wallet_cache:
-        logger.info(f"Returning cached {mode} balance: {st.session_state.wallet_cache[mode]}")
+        logger.debug(f"Returning cached {mode} balance: {st.session_state.wallet_cache[mode]}")
         return st.session_state.wallet_cache[mode]
 
     balance_data = default_virtual if mode == "virtual" else default_real
     try:
+        if not st.session_state.engine:
+            logger.warning("Engine not initialized for balance fetch")
+            return balance_data
+
         if mode == "virtual":
-            wallet = st.session_state.engine.db.get_wallet_balance("virtual") \
-                if st.session_state.engine else None
+            wallet = st.session_state.engine.db.get_wallet_balance("virtual")
             if wallet:
                 balance_data = {
                     "capital": getattr(wallet, "capital", default_virtual["capital"]),
@@ -127,11 +124,37 @@ def get_wallet_balance() -> dict:
                 }
                 logger.info(f"Fetched virtual wallet balance: {balance_data}")
         else:  # real mode
-            initialize_bybit()
-            client = st.session_state.bybit_client
-            if client and client.is_connected():
-                # Sync real balance with Bybit (safe to do regardless of trades)
-                st.session_state.engine.sync_real_balance()
+            if initialize_bybit() and st.session_state.bybit_client.is_connected():
+                # Sync real balance with Bybit
+                if st.session_state.engine.sync_real_balance():
+                    wallet = st.session_state.engine.db.get_wallet_balance("real")
+                    if wallet:
+                        balance_data = {
+                            "capital": getattr(wallet, "capital", default_real["capital"]),
+                            "available": getattr(wallet, "available", default_real["available"]),
+                            "used": getattr(wallet, "used", default_real["used"])
+                        }
+                        logger.info(
+                            f"Fetched real wallet balance after sync: capital=${balance_data['capital']:.2f}, "
+                            f"available=${balance_data['available']:.2f}, used=${balance_data['used']:.2f}"
+                        )
+                    else:
+                        logger.warning("Failed to retrieve real balance after sync")
+                        st.error("❌ Failed to retrieve real balance. Check Bybit account or API permissions.")
+                else:
+                    logger.warning("Real balance sync failed")
+                    st.error("❌ Real balance sync failed. Using last known balance.")
+                    wallet = st.session_state.engine.db.get_wallet_balance("real")
+                    if wallet:
+                        balance_data = {
+                            "capital": getattr(wallet, "capital", default_real["capital"]),
+                            "available": getattr(wallet, "available", default_real["available"]),
+                            "used": getattr(wallet, "used", default_real["used"])
+                        }
+                        logger.info(f"Using DB real balance: {balance_data}")
+            else:
+                logger.warning("Bybit client not connected for real balance")
+                st.warning("Bybit API not connected. Check API keys in .env file.")
                 wallet = st.session_state.engine.db.get_wallet_balance("real")
                 if wallet:
                     balance_data = {
@@ -139,26 +162,11 @@ def get_wallet_balance() -> dict:
                         "available": getattr(wallet, "available", default_real["available"]),
                         "used": getattr(wallet, "used", default_real["used"])
                     }
-                    logger.info(
-                        f"Fetched real wallet balance after sync: capital=${balance_data['capital']:.2f}, "
-                        f"available=${balance_data['available']:.2f}, used=${balance_data['used']:.2f}"
-                    )
-                else:
-                    logger.warning("Failed to retrieve real balance after sync")
-                    st.error("❌ Failed to retrieve real balance. Check Bybit account or API permissions.")
-            else:
-                wallet = st.session_state.engine.db.get_wallet_balance("real") \
-                    if st.session_state.engine else None
-                if wallet:
-                    balance_data = {
-                        "capital": getattr(wallet, "capital", default_real["capital"]),
-                        "available": getattr(wallet, "available", default_real["available"]),
-                        "used": getattr(wallet, "used", default_real["used"])
-                    }
-                    logger.warning(f"Bybit client not connected, using DB real balance: {balance_data}")
-                st.warning("Bybit API not connected. Check API keys in .env file.")
+                    logger.info(f"Using DB real balance (API disconnected): {balance_data}")
+
     except Exception as e:
         logger.error(f"Error fetching {mode} wallet: {e}", exc_info=True)
+        st.error(f"Error fetching {mode} balance: {e}")
         balance_data = default_virtual if mode == "virtual" else default_real
 
     # Cache balance for this session
@@ -166,18 +174,25 @@ def get_wallet_balance() -> dict:
     logger.info(f"Cached {mode} balance: {balance_data}")
 
     # Conditional messaging for real balance
-    if mode == "real":
-        if balance_data["available"] <= 0:
-            st.warning("Real available balance is low or zero. Deposit funds on Bybit.")
+    if mode == "real" and balance_data["available"] <= 0:
+        st.warning("Real available balance is low or zero. Deposit funds on Bybit.")
+
     return balance_data
 
 def main():
-    initialize_engine()
+    # Initialize engine
+    if not initialize_engine():
+        st.stop()
+
     # Load saved trading mode from DB
     if "trading_mode" not in st.session_state or st.session_state.trading_mode is None:
-        saved_mode = st.session_state.engine.db.get_setting("trading_mode")
-        st.session_state.trading_mode = saved_mode if saved_mode in ["virtual", "real"] else "virtual"
-        logger.info(f"Loaded trading mode from DB: {st.session_state.trading_mode}")
+        try:
+            saved_mode = st.session_state.engine.db.get_setting("trading_mode")
+            st.session_state.trading_mode = saved_mode if saved_mode in ["virtual", "real"] else "virtual"
+            logger.info(f"Loaded trading mode from DB: {st.session_state.trading_mode}")
+        except Exception as e:
+            logger.error(f"Failed to load trading mode from DB: {e}", exc_info=True)
+            st.session_state.trading_mode = "virtual"
 
     # --- Sidebar ---
     with st.sidebar:
@@ -186,30 +201,48 @@ def main():
         # --- Mode selector ---
         mode_options = ["Virtual", "Real"]
         selected_mode_index = 0 if st.session_state.trading_mode == "virtual" else 1
-        selected_mode = st.selectbox("Trading Mode", mode_options, index=selected_mode_index)
+        selected_mode = st.selectbox(
+            "Trading Mode",
+            mode_options,
+            index=selected_mode_index,
+            help="Switch between virtual (simulated) and real (live) trading. Real mode requires a connected Bybit account."
+        )
 
-        confirm_real = False
         if selected_mode.lower() != st.session_state.trading_mode:
             if selected_mode.lower() == "real":
-                confirm_real = st.checkbox("Confirm: I understand this enables LIVE trading on Bybit")
-                if not confirm_real:
-                    st.warning("Must confirm to switch to real mode.")
-            if selected_mode.lower() != "real" or confirm_real:
+                st.warning("⚠️ Real mode enables LIVE trading on Bybit. Ensure sufficient funds and valid API keys.")
+            try:
                 st.session_state.trading_mode = selected_mode.lower()
                 st.session_state.engine.db.save_setting("trading_mode", st.session_state.trading_mode)
                 st.session_state.wallet_cache.clear()
+                st.session_state.has_real_trades = None  # Reset trade cache
                 logger.info(f"Switched to {st.session_state.trading_mode} mode, cleared cache")
-
+                
                 if st.session_state.trading_mode == "real":
-                    initialize_bybit()
-                    if st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
+                    if initialize_bybit() and st.session_state.bybit_client.is_connected():
                         st.session_state.engine.sync_real_balance()
                         if db_has_any_trade("real"):
                             st.session_state.engine.sync_real_trades()
-                            logger.info("Real trades synced after mode switch (DB already had trades).")
+                            logger.info("Real trades synced after mode switch (DB has trades)")
+                            st.success("✅ Switched to real mode. Trades and balance synced.")
                         else:
-                            logger.info("Skipped real trade sync: no existing real trades in DB yet.")
-                            st.info("Live mode enabled. Trade sync will start after the first real trade exists in the database.")
+                            logger.info("Skipped real trade sync: no existing real trades in DB")
+                            st.success("✅ Switched to real mode. Ready for live trading.")
+                    else:
+                        st.error("❌ Failed to connect to Bybit API. Reverting to virtual mode.")
+                        st.session_state.trading_mode = "virtual"
+                        st.session_state.engine.db.save_setting("trading_mode", "virtual")
+                        st.session_state.wallet_cache.clear()
+                        st.session_state.has_real_trades = None
+                else:
+                    st.success(f"✅ Switched to {st.session_state.trading_mode} mode.")
+                
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to switch mode: {e}")
+                logger.error(f"Mode switch to {selected_mode.lower()} failed: {e}", exc_info=True)
+                st.session_state.trading_mode = "virtual"
+                st.session_state.engine.db.save_setting("trading_mode", "virtual")
                 st.rerun()
 
         # --- Engine & API status ---
@@ -218,7 +251,6 @@ def main():
         mode_color = "🟢" if st.session_state.trading_mode == "virtual" else "🟡"
         st.markdown(f"**Trading Mode:** {mode_color} {st.session_state.trading_mode.title()}")
 
-        initialize_bybit()
         api_status = "✅ Connected" if st.session_state.bybit_client and st.session_state.bybit_client.is_connected() else "❌ Disconnected"
         st.markdown(f"**API Status:** {api_status}")
 
@@ -239,7 +271,15 @@ def main():
             st.session_state.active_page = "📊 Dashboard"
 
         selected_page = st.radio("Navigate", list(pages.keys()), index=list(pages.keys()).index(st.session_state.active_page))
-        st.session_state.active_page = selected_page
+        if selected_page != st.session_state.active_page:
+            st.session_state.active_page = selected_page
+            page_file = pages[selected_page]
+            if page_file != "dashboard":
+                try:
+                    st.switch_page(f"pages/{page_file}.py")
+                except Exception as e:
+                    st.error(f"Failed to navigate to {page_file}: {e}")
+                    logger.error(f"Navigation to {page_file} failed: {e}", exc_info=True)
 
         # --- Wallet Balance ---
         st.divider()
@@ -247,7 +287,7 @@ def main():
         current_mode = st.session_state.trading_mode
         capital_val = balance["capital"]
         available_val = max(balance["available"], 0.0)
-        used_val = capital_val - available_val
+        used_val = max(capital_val - available_val, 0.0)
         if abs(used_val) < 0.01:
             used_val = 0.0
 
@@ -264,11 +304,17 @@ def main():
         st.divider()
         if st.button("🛑 Emergency Stop"):
             st.session_state.wallet_cache.clear()
+            st.session_state.has_real_trades = None
             if "automated_trader" in st.session_state:
-                st.session_state.automated_trader.stop()
+                try:
+                    import asyncio
+                    asyncio.run(st.session_state.automated_trader.stop())
+                    logger.info("Automated trader stopped")
+                except Exception as e:
+                    logger.error(f"Failed to stop automated trader: {e}", exc_info=True)
             st.success("All automated trading stopped and cache cleared")
             logger.info("Emergency stop triggered, cache cleared")
-
+            st.rerun()
 
     # --- Main dashboard ---
     try:

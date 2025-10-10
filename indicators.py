@@ -1,8 +1,8 @@
-import numpy as np
-import requests
 from typing import Dict, List, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+import numpy as np
+import requests
 
 # Logging using centralized system
 from logging_config import get_logger
@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 INTERVALS = ["1", "3", "5", "15", "30", "60", "120", "240", "360", "720", "D", "W"]
 ML_ENABLED = True  # Feature flag for ML filtering
 
-def get_candles(symbol: str, interval: str, limit: int = 100) -> List[Dict]:
+def get_candles(symbol: str, interval: str, limit: int = 200) -> List[Dict]:
     """Fetch candlestick data from Bybit API"""
     try:
         url = "https://api.bybit.com/v5/market/kline"
@@ -23,7 +23,8 @@ def get_candles(symbol: str, interval: str, limit: int = 100) -> List[Dict]:
             "limit": str(limit)
         }
         
-        response = requests.get(url, params=params, timeout=10)
+        # Pylance: ignore reportCallIssue for timeout parameter as it is valid in requests library
+        response = requests.get(url, params=params, timeout=10)  # type: ignore[call-arg]
         response.raise_for_status()
         data = response.json()
         
@@ -103,29 +104,43 @@ def rsi(prices: List[float], period: int = 14) -> List[float]:
         
         rsi_values.append(rsi_val)
     
-    # Pad beginning with neutral values
     while len(rsi_values) < len(prices):
         rsi_values.insert(0, 50.0)
     
     return rsi_values
 
-def macd(prices: List[float], fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, List[float]]:
-    """MACD (Moving Average Convergence Divergence)"""
-    if len(prices) < slow:
-        zero_list = [0.0] * len(prices)
-        return {"macd": zero_list, "signal": zero_list, "histogram": zero_list}
+def stochastic_rsi(prices: List[float], period: int = 14, smooth_k: int = 3, smooth_d: int = 3) -> Dict[str, List[float]]:
+    """Stochastic RSI"""
+    if len(prices) < period + 1:
+        zero_list = [50.0] * len(prices)
+        return {"stoch_rsi": zero_list, "k": zero_list, "d": zero_list}
     
-    ema_fast = ema(prices, fast)
-    ema_slow = ema(prices, slow)
+    rsi_values = rsi(prices, period)
+    stoch_rsi = []
     
-    macd_line = [fast_val - slow_val for fast_val, slow_val in zip(ema_fast, ema_slow)]
-    signal_line = ema(macd_line, signal)
-    histogram = [macd_val - sig_val for macd_val, sig_val in zip(macd_line, signal_line)]
+    for i in range(period - 1, len(rsi_values)):
+        rsi_slice = rsi_values[i-period+1:i+1]
+        if not rsi_slice:
+            stoch_rsi.append(50.0)
+            continue
+        lowest_rsi = min(rsi_slice)
+        highest_rsi = max(rsi_slice)
+        if highest_rsi == lowest_rsi:
+            stoch_rsi.append(50.0)
+        else:
+            stoch_val = 100 * (rsi_values[i] - lowest_rsi) / (highest_rsi - lowest_rsi)
+            stoch_rsi.append(stoch_val)
+    
+    while len(stoch_rsi) < len(prices):
+        stoch_rsi.insert(0, 50.0)
+    
+    k_values = sma(stoch_rsi, smooth_k)
+    d_values = sma(k_values, smooth_d)
     
     return {
-        "macd": macd_line,
-        "signal": signal_line,
-        "histogram": histogram
+        "stoch_rsi": stoch_rsi,
+        "k": k_values,
+        "d": d_values
     }
 
 def bollinger_bands(prices: List[float], period: int = 20, std_dev: float = 2) -> Dict[str, List[float]]:
@@ -155,36 +170,10 @@ def bollinger_bands(prices: List[float], period: int = 20, std_dev: float = 2) -
         "lower": lower_band
     }
 
-def atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> List[float]:
-    """Average True Range"""
-    if len(highs) < period or len(highs) != len(lows) or len(highs) != len(closes):
-        return [0.0] * len(highs)
-    
-    true_ranges = []
-    
-    for i in range(1, len(highs)):
-        tr1 = highs[i] - lows[i]
-        tr2 = abs(highs[i] - closes[i-1])
-        tr3 = abs(lows[i] - closes[i-1])
-        true_ranges.append(max(tr1, tr2, tr3))
-    
-    # Calculate ATR using SMA of true ranges
-    atr_values = [0.0]  # First value is 0
-    
-    for i in range(period, len(true_ranges) + 1):
-        atr_val = sum(true_ranges[i-period:i]) / period
-        atr_values.append(atr_val)
-    
-    # Pad to match input length
-    while len(atr_values) < len(highs):
-        atr_values.append(atr_values[-1] if atr_values else 0.0)
-    
-    return atr_values
-
 def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
-    """Calculate all technical indicators for given candles"""
+    """Calculate technical indicators (SMA 20, SMA 200, EMA 9, EMA 21, Bollinger Bands, RSI, Stochastic RSI, Volume)"""
     try:
-        if not candles or len(candles) < 20:
+        if not candles or len(candles) < 200:
             return {}
         
         closes = [c["close"] for c in candles]
@@ -194,57 +183,62 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         
         # Moving averages
         sma_20 = sma(closes, 20)
-        sma_50 = sma(closes, 50)
-        ema_20 = ema(closes, 20)
+        sma_200 = sma(closes, 200)
+        ema_9 = ema(closes, 9)
+        ema_21 = ema(closes, 21)
         
         # Momentum indicators
         rsi_14 = rsi(closes, 14)
-        macd_data = macd(closes)
+        stoch_rsi_data = stochastic_rsi(closes, period=14, smooth_k=3, smooth_d=3)
         
         # Volatility indicators
-        bb_data = bollinger_bands(closes)
-        atr_14 = atr(highs, lows, closes, 14)
+        bb_data = bollinger_bands(closes, period=20, std_dev=2)
         
         # Current values (last in arrays)
         current_price = closes[-1]
+        current_sma_20 = sma_20[-1] if sma_20 else current_price
+        current_sma_200 = sma_200[-1] if sma_200 else current_price
+        current_ema_9 = ema_9[-1] if ema_9 else current_price
+        current_ema_21 = ema_21[-1] if ema_21 else current_price
         current_rsi = rsi_14[-1] if rsi_14 else 50
-        current_macd = macd_data["macd"][-1] if macd_data["macd"] else 0
-        current_signal = macd_data["signal"][-1] if macd_data["signal"] else 0
+        current_stoch_k = stoch_rsi_data["k"][-1] if stoch_rsi_data["k"] else 50
+        current_stoch_d = stoch_rsi_data["d"][-1] if stoch_rsi_data["d"] else 50
         current_bb_upper = bb_data["upper"][-1] if bb_data["upper"] else 0
         current_bb_lower = bb_data["lower"][-1] if bb_data["lower"] else 0
-        current_atr = atr_14[-1] if atr_14 else 0
+        current_volume = volumes[-1] if volumes else 0
         
         # Volume analysis
-        avg_volume = sum(volumes[-10:]) / min(10, len(volumes)) if volumes else 0
-        volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 1
+        avg_volume = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else 0
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
         
         # Trend analysis
         trend_score = 0
-        if len(sma_20) > 1 and len(sma_50) > 1:
-            if sma_20[-1] > sma_50[-1]:
+        if len(sma_20) > 1 and len(sma_200) > 1:
+            if sma_20[-1] > sma_200[-1]:
                 trend_score += 1
             if closes[-1] > sma_20[-1]:
                 trend_score += 1
             if sma_20[-1] > sma_20[-2]:
                 trend_score += 1
+            if ema_9[-1] > ema_21[-1]:
+                trend_score += 1
         
         return {
             "price": current_price,
-            "sma_20": sma_20[-1] if sma_20 else current_price,
-            "sma_50": sma_50[-1] if sma_50 else current_price,
-            "ema_20": ema_20[-1] if ema_20 else current_price,
+            "sma_20": current_sma_20,
+            "sma_200": current_sma_200,
+            "ema_9": current_ema_9,
+            "ema_21": current_ema_21,
             "rsi": current_rsi,
-            "macd": current_macd,
-            "macd_signal": current_signal,
-            "macd_histogram": macd_data["histogram"][-1] if macd_data["histogram"] else 0,
+            "stoch_k": current_stoch_k,
+            "stoch_d": current_stoch_d,
             "bb_upper": current_bb_upper,
             "bb_lower": current_bb_lower,
             "bb_middle": bb_data["middle"][-1] if bb_data["middle"] else current_price,
-            "atr": current_atr,
-            "volume": volumes[-1] if volumes else 0,
+            "volume": current_volume,
             "volume_ratio": volume_ratio,
             "trend_score": trend_score,
-            "volatility": (current_atr / current_price * 100) if current_price > 0 else 0
+            "volatility": ((current_bb_upper - current_bb_lower) / current_price * 100) if current_price > 0 else 0
         }
         
     except Exception as e:
@@ -264,7 +258,6 @@ def get_top_symbols(limit: int = 50) -> List[str]:
         if data.get("retCode") == 0 and "result" in data:
             tickers = data["result"]["list"]
             
-            # Filter USDT pairs and sort by volume
             usdt_pairs = []
             for ticker in tickers:
                 symbol = ticker.get("symbol", "")
@@ -278,7 +271,6 @@ def get_top_symbols(limit: int = 50) -> List[str]:
                             "price": price
                         })
             
-            # Sort by volume and return top symbols
             usdt_pairs.sort(key=lambda x: x["volume"], reverse=True)
             return [pair["symbol"] for pair in usdt_pairs[:limit]]
         
@@ -288,9 +280,9 @@ def get_top_symbols(limit: int = 50) -> List[str]:
         return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
 
 def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
-    """Comprehensive analysis of a single symbol"""
+    """Comprehensive analysis of a single symbol with SL/TP (10%/50%)"""
     try:
-        candles = get_candles(symbol, interval, 100)
+        candles = get_candles(symbol, interval, 200)
         if not candles:
             return {}
         
@@ -298,31 +290,44 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
         if not indicators:
             return {}
         
-        # Generate signal score based on multiple factors
+        # Generate signal score based on indicators
         score = 0
         signals = []
+        
+        # Price vs Moving Averages
+        price = indicators.get("price", 0)
+        sma_20 = indicators.get("sma_20", price)
+        sma_200 = indicators.get("sma_200", price)
+        ema_9 = indicators.get("ema_9", price)
+        ema_21 = indicators.get("ema_21", price)
+        
+        if price > sma_200 and ema_9 > ema_21:
+            score += 20
+            signals.append("BULLISH_MA_CROSS")
+        elif price < sma_200 and ema_9 < ema_21:
+            score += 20
+            signals.append("BEARISH_MA_CROSS")
         
         # RSI signals
         rsi = indicators.get("rsi", 50)
         if rsi < 30:
-            score += 25
+            score += 20
             signals.append("RSI_OVERSOLD")
         elif rsi > 70:
-            score += 25
+            score += 20
             signals.append("RSI_OVERBOUGHT")
         
-        # MACD signals
-        macd = indicators.get("macd", 0)
-        macd_signal = indicators.get("macd_signal", 0)
-        if macd > macd_signal and indicators.get("macd_histogram", 0) > 0:
+        # Stochastic RSI signals
+        stoch_k = indicators.get("stoch_k", 50)
+        stoch_d = indicators.get("stoch_d", 50)
+        if stoch_k < 20 and stoch_k > stoch_d:
             score += 20
-            signals.append("MACD_BULLISH")
-        elif macd < macd_signal and indicators.get("macd_histogram", 0) < 0:
+            signals.append("STOCH_RSI_OVERSOLD")
+        elif stoch_k > 80 and stoch_k < stoch_d:
             score += 20
-            signals.append("MACD_BEARISH")
+            signals.append("STOCH_RSI_OVERBOUGHT")
         
         # Bollinger Bands signals
-        price = indicators.get("price", 0)
         bb_upper = indicators.get("bb_upper", 0)
         bb_lower = indicators.get("bb_lower", 0)
         if price <= bb_lower:
@@ -332,41 +337,45 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
             score += 15
             signals.append("BB_OVERBOUGHT")
         
-        # Trend signals
-        trend_score = indicators.get("trend_score", 0)
-        if trend_score >= 2:
-            score += 15
-            signals.append("TREND_BULLISH")
-        
         # Volume confirmation
         volume_ratio = indicators.get("volume_ratio", 1)
         if volume_ratio > 1.5:
             score += 10
             signals.append("VOLUME_HIGH")
         
+        # Trend confirmation
+        trend_score = indicators.get("trend_score", 0)
+        if trend_score >= 3:
+            score += 15
+            signals.append("TREND_BULLISH")
+        elif trend_score <= 1:
+            score += 15
+            signals.append("TREND_BEARISH")
+        
         # Determine signal type and side
         signal_type = "neutral"
         side = "Buy"
         
-        if "RSI_OVERSOLD" in signals or "BB_OVERSOLD" in signals:
+        if any(s in signals for s in ["RSI_OVERSOLD", "STOCH_RSI_OVERSOLD", "BB_OVERSOLD", "BULLISH_MA_CROSS"]) and "TREND_BULLISH" in signals:
             signal_type = "buy"
             side = "Buy"
-        elif "RSI_OVERBOUGHT" in signals or "BB_OVERBOUGHT" in signals:
+        elif any(s in signals for s in ["RSI_OVERBOUGHT", "STOCH_RSI_OVERBOUGHT", "BB_OVERBOUGHT", "BEARISH_MA_CROSS"]) and "TREND_BEARISH" in signals:
             signal_type = "sell"
             side = "Sell"
-        elif "MACD_BULLISH" in signals and "TREND_BULLISH" in signals:
-            signal_type = "buy"
-            side = "Buy"
-        elif "MACD_BEARISH" in signals:
-            signal_type = "sell"
-            side = "Sell"
+        
+        # Calculate SL and TP (10% and 50%)
+        sl = price * (1 - 0.1 if side == "Buy" else 1 + 0.1)
+        tp = price * (1 + 0.5 if side == "Buy" else 1 - 0.5)
         
         return {
             "symbol": symbol,
             "interval": interval,
-            "score": min(score, 100),  # Cap at 100
+            "score": min(score, 100),
             "signal_type": signal_type,
             "side": side,
+            "entry": price,
+            "sl": round(sl, 4),
+            "tp": round(tp, 4),
             "indicators": indicators,
             "signals": signals,
             "analysis_time": time.time()
@@ -377,6 +386,7 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
         return {}
 
 def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers: int = 10) -> List[Dict]:
+    """Scan multiple symbols concurrently"""
     try:
         results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -384,7 +394,7 @@ def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers:
                 executor.submit(analyze_symbol, symbol, interval): symbol
                 for symbol in symbols
             }
-            for future in as_completed(future_to_symbol, timeout=60):  # Increase to 60s
+            for future in as_completed(future_to_symbol, timeout=60):
                 symbol = future_to_symbol[future]
                 try:
                     result = future.result()
