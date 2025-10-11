@@ -198,7 +198,7 @@ def main():
                     "Take Profit (%)",
                     min_value=10.0,
                     max_value=100.0,
-                    value=float(current_settings.get("TP_PERCENT", 25.0)),
+                    value=float(current_settings.get("TP_PERCENT", 50.0)),
                     step=1.0,
                     help="Default take profit percentage"
                 )
@@ -206,7 +206,7 @@ def main():
                     "Stop Loss (%)",
                     min_value=1.0,
                     max_value=20.0,
-                    value=float(current_settings.get("SL_PERCENT", 5.0)),
+                    value=float(current_settings.get("SL_PERCENT", 10.0)),
                     step=1.0,
                     help="Default stop loss percentage"
                 )
