@@ -62,7 +62,7 @@ def enhance_signal(analysis: Dict[str, Any]) -> Any:
     price = indicators.get("price", 0)
     atr = indicators.get("atr", 0)
     side = analysis.get("side", "BUY")
-    leverage = 10
+    leverage = 15
     atr_multiplier = 2
     risk_reward = 2
 
@@ -180,7 +180,7 @@ def generate_signals(
             tp=float(enhanced.get("tp") or 0),
             trail=float(enhanced.get("trail") or 0),
             liquidation=float(enhanced.get("liquidation") or 0),
-            leverage=int(enhanced.get("leverage", 10)),
+            leverage=int(enhanced.get("leverage", 15)),
             margin_usdt=float(enhanced.get("margin_usdt") or 0),
             entry=float(enhanced.get("entry") or 0),
             market=str(enhanced.get("market", "Unknown")),
@@ -248,7 +248,7 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
     tp=float(enhanced.get("tp") or 0),
     trail=float(enhanced.get("trail") or 0),
     liquidation=float(enhanced.get("liquidation") or 0),
-    leverage=int(enhanced.get("leverage", 10)),
+    leverage=int(enhanced.get("leverage", 15)),
     margin_usdt=float(enhanced.get("margin_usdt") or 0),
     entry=float(enhanced.get("entry") or 0),
     market=str(enhanced.get("market", "Unknown")),

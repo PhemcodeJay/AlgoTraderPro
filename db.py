@@ -34,7 +34,7 @@ class Signal:
     tp: Optional[float] = None
     trail: Optional[float] = None
     liquidation: Optional[float] = None
-    leverage: int = 10
+    leverage: int = 15
     margin_usdt: Optional[float] = None
     entry: Optional[float] = None
     market: Optional[str] = None
@@ -73,7 +73,7 @@ class Trade:
     pnl: Optional[float] = None
     score: Optional[float] = None
     strategy: str = "Auto"
-    leverage: int = 10
+    leverage: int = 15
     trail: Optional[float] = None
     liquidation: Optional[float] = None
     margin_usdt: Optional[float] = None
@@ -136,7 +136,7 @@ class SignalModel(Base):
     tp: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     trail: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     liquidation: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    leverage: Mapped[int] = mapped_column(Integer, default=10)
+    leverage: Mapped[int] = mapped_column(Integer, default=15)
     margin_usdt: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     market: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
@@ -183,7 +183,7 @@ class TradeModel(Base):
     pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     strategy: Mapped[str] = mapped_column(String(20), default="Auto")
-    leverage: Mapped[int] = mapped_column(Integer, default=10)
+    leverage: Mapped[int] = mapped_column(Integer, default=15)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
@@ -482,7 +482,7 @@ class DatabaseManager:
                 margin_usdt=trade.get('margin_usdt'),
                 score=trade.get('score'),
                 strategy=trade.get('strategy', 'Manual'),
-                leverage=trade.get('leverage', 10),
+                leverage=trade.get('leverage', 15),
                 timestamp=trade['timestamp'],     # ✅ already datetime
                 closed_at=trade.get('closed_at')  # ✅ datetime or None
             )    

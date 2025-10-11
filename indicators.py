@@ -245,7 +245,7 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         logger.error(f"Error calculating indicators: {e}")
         return {}
 
-def get_top_symbols(limit: int = 50) -> List[str]:
+def get_top_symbols(limit: int = 100) -> List[str]:
     """Get top USDT trading pairs by volume"""
     try:
         url = "https://api.bybit.com/v5/market/tickers"

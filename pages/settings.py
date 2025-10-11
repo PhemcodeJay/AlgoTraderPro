@@ -171,9 +171,9 @@ def main():
                 st.markdown("### 📊 Risk Management")
                 leverage = st.number_input(
                     "Leverage",
-                    min_value=1.0,
-                    max_value=100.0,
-                    value=float(current_settings.get("LEVERAGE", 10)),
+                    min_value=10.0,
+                    max_value=150.0,
+                    value=float(current_settings.get("LEVERAGE", 15)),
                     help="Maximum leverage for trades"
                 )
                 risk_pct = st.number_input(
@@ -270,7 +270,7 @@ def main():
                 st.markdown("### ⏱️ Timing Settings")
                 scan_interval = st.number_input(
                     "Scan Interval (minutes)",
-                    min_value=1.0,
+                    min_value=15.0,
                     max_value=1440.0,
                     value=float(current_settings.get("SCAN_INTERVAL", 3600) // 60),
                     help="How often to scan for new signals"

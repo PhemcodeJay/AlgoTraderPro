@@ -239,7 +239,7 @@ class TradingEngine:
 
             # --- Determine risk & leverage ---
             risk_pct = risk_percent or self.settings.get("RISK_PCT", 0.01)
-            lev = leverage or self.settings.get("LEVERAGE", 10)
+            lev = leverage or self.settings.get("LEVERAGE", 15)
 
             # --- Get wallet balance ---
             mode = "real" if self.db.get_setting("trading_mode") == "real" else "virtual"
@@ -254,7 +254,7 @@ class TradingEngine:
                 return 0.0
 
             # --- Risk-based position sizing ---
-            risk_amount = max(balance * risk_pct, 1.0)  # enforce at least $1 risk
+            risk_amount = max(balance * risk_pct, 2.0)  # enforce at least $2 risk
             position_value = risk_amount * lev
             position_size = position_value / entry_price
 
@@ -416,10 +416,10 @@ class TradingEngine:
             if not wallet_balance:
                 default_balance = WalletBalance(
                     trading_mode=mode,
-                    capital=1000.0 if mode == "virtual" else 0.0,
-                    available=1000.0 if mode == "virtual" else 0.0,
+                    capital=100.0 if mode == "virtual" else 0.0,
+                    available=100.0 if mode == "virtual" else 0.0,
                     used=0.0,
-                    start_balance=1000.0 if mode == "virtual" else 0.0,
+                    start_balance=100.0 if mode == "virtual" else 0.0,
                     currency="USDT",
                     updated_at=datetime.utcnow(),
                 )
@@ -576,7 +576,7 @@ class TradingEngine:
                 "status": "open",
                 "score": signal.get("score"),
                 "strategy": signal.get("strategy", "Auto"),
-                "leverage": signal.get("leverage", 10),
+                "leverage": signal.get("leverage", 15),
                 "sl": signal.get("sl"),  # Stop Loss from signal
                 "tp": signal.get("tp"),  # Take Profit from signal
                 "trail": signal.get("trail"),  # Trailing Stop from signal
@@ -662,7 +662,7 @@ class TradingEngine:
                     symbol=symbol,
                     side=side,
                     qty=position_size,
-                    leverage=signal.get("leverage", 10),
+                    leverage=signal.get("leverage", 15),
                     mode="CROSS"  # Use CROSS for unified accounts
                 )
 
@@ -684,7 +684,7 @@ class TradingEngine:
                     "status": "open",
                     "score": signal.get("score"),
                     "strategy": signal.get("strategy", "Auto"),
-                    "leverage": signal.get("leverage", 10),
+                    "leverage": signal.get("leverage", 15),
                     "sl": stop_loss,
                     "tp": take_profit,
                     "trail": signal.get("trail"),

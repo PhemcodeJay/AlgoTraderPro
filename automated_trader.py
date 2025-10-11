@@ -30,7 +30,7 @@ class AutomatedTrader:
         self.top_n_signals = settings.get("TOP_N_SIGNALS", 5)
         self.max_positions = self.engine.max_open_positions
         self.risk_per_trade = self.engine.max_risk_per_trade
-        self.leverage = self.engine.settings.get("LEVERAGE", 10)
+        self.leverage = self.engine.settings.get("LEVERAGE", 15)
         
         # Statistics
         self.stats = {
@@ -181,7 +181,7 @@ class AutomatedTrader:
     async def _scan_and_trade(self, trading_mode: str):
         """Scan for signals and execute trades"""
         try:
-            symbols = get_usdt_symbols(limit=50)
+            symbols = get_usdt_symbols(limit=100)
             signals = generate_signals(symbols, interval="60", top_n=self.top_n_signals, trading_mode=trading_mode)
             self.stats["signals_generated"] += len(signals)
             

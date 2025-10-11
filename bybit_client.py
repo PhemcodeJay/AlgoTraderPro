@@ -632,7 +632,7 @@ class BybitClient:
         symbol: str,
         side: str,
         qty: float,
-        leverage: Optional[int] = 10,
+        leverage: Optional[int] = 15,
         mode: str = "CROSS"  # Default to CROSS for unified accounts
     ) -> Dict:
         """
@@ -640,7 +640,7 @@ class BybitClient:
         automatically calculates TP (25% from entry) and SL (5% from entry).
         """
         try:
-            leverage = leverage or 10
+            leverage = leverage or 15
 
             # Determine margin mode for unified/non-unified accounts
             if self.account_type == "UNIFIED":
@@ -777,7 +777,7 @@ class BybitClient:
                             "entry_price": float(pos.get("avgPrice", 0)),
                             "mark_price": float(pos.get("markPrice", 0)),
                             "unrealized_pnl": float(pos.get("unrealisedPnl", 0)),
-                            "leverage": float(pos.get("leverage", 10)),
+                            "leverage": float(pos.get("leverage", 15)),
                         })
                 return positions
             return []

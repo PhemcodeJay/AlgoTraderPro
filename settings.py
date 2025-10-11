@@ -16,7 +16,7 @@ def load_settings() -> Dict[str, Any]:
         "TP_PERCENT": 0.5,
         "SL_PERCENT": 0.1,
         "MAX_DRAWDOWN_PCT": -15.0,
-        "LEVERAGE": float(os.getenv("LEVERAGE", 10)),
+        "LEVERAGE": float(os.getenv("LEVERAGE", 15)),
         "RISK_PCT": float(os.getenv("RISK_PCT", 0.01)),
         "VIRTUAL_BALANCE": 100.0,
         "ENTRY_BUFFER_PCT": float(os.getenv("ENTRY_BUFFER_PCT", 0.002)),
