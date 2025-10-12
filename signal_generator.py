@@ -2,9 +2,9 @@ import logging
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 from indicators import scan_multiple_symbols, get_top_symbols
+from utils import normalize_signal
 from ml import MLFilter
 from notifications import send_all_notifications
-
 from db import Signal, db_manager
 
 # Logging using centralized system
@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 # Core Signal Utilities
 # -------------------------------
 
-def get_usdt_symbols(limit: int = 50) -> List[str]:
+def get_usdt_symbols(limit: int = 100) -> List[str]:
     try:
         symbols = get_top_symbols(limit)
         if not symbols:
@@ -57,37 +57,21 @@ def calculate_signal_score(analysis: Dict[str, Any]) -> float:
 
     return min(100, max(0, score))
 
-def enhance_signal(analysis: Dict[str, Any]) -> Any:
+def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
     indicators = analysis.get("indicators", {})
     price = indicators.get("price", 0)
     atr = indicators.get("atr", 0)
-    side = analysis.get("side", "BUY")
+    side = analysis.get("side", "Buy").title()
     leverage = 15
     atr_multiplier = 2
     risk_reward = 2
 
-    # Trade parameters
-    sl_percent = 0.1    # Stop Loss: 10% below entry for buy, above entry for sell
-    tp_percent = 0.5   # Take Profit: 50% above entry for buy, below entry for sell
-
-    if side.lower() == "buy":
-        sl = price * (1 - sl_percent)   # Stop Loss 10% below entry
-        tp = price * (1 + tp_percent)   # Take Profit 50% above entry
-        liq = price * (1 - 0.9 / leverage)    # Liquidation formula remains the same
-    else:
-        sl = price * (1 + sl_percent)   # Stop Loss 10% above entry
-        tp = price * (1 - tp_percent)   # Take Profit 50% below entry
-        liq = price * (1 + 0.9 / leverage)    # Liquidation formula for short
-
-    print(f"SL: {sl}, TP: {tp}, LIQ: {liq}")
-
-    trail = atr
-    margin_usdt = 2.0
-
+    # Bollinger Bands slope
     bb_upper = indicators.get("bb_upper", 0)
     bb_lower = indicators.get("bb_lower", 0)
     bb_slope = "Expanding" if bb_upper - bb_lower > price * 0.02 else "Contracting"
 
+    # Market type based on volatility
     vol = indicators.get("volatility", 0)
     if vol < 1:
         market_type = "Low Vol"
@@ -99,11 +83,8 @@ def enhance_signal(analysis: Dict[str, Any]) -> Any:
     enhanced = analysis.copy()
     enhanced.update({
         "entry": round(price, 6),
-        "sl": round(sl, 6),
-        "tp": round(tp, 6),
-        "trail": round(trail, 6),
-        "liquidation": round(liq, 6),
-        "margin_usdt": round(margin_usdt, 6),
+        "trail": round(atr, 6),
+        "margin_usdt": 2.0,
         "bb_slope": bb_slope,
         "market": market_type,
         "leverage": leverage,
@@ -111,6 +92,9 @@ def enhance_signal(analysis: Dict[str, Any]) -> Any:
         "atr_multiplier": atr_multiplier,
         "created_at": datetime.now(timezone.utc)
     })
+
+    # Normalize signal to include SL/TP
+    enhanced = normalize_signal(enhanced)
     return enhanced
 
 # -------------------------------
@@ -160,7 +144,7 @@ def generate_signals(
                 "score": s.score,
                 "indicators": s.indicators,
                 "side": s.side,
-                # … add any other fields you need
+                "entry": s.entry,
             }
             enhanced = enhance_signal(s_dict)
         else:
@@ -170,7 +154,7 @@ def generate_signals(
 
         # Save to DB
         signal_obj = Signal(
-            symbol=str(enhanced.get("symbol") or "UNKNOWN"),   # ensure str, fallback
+            symbol=str(enhanced.get("symbol") or "UNKNOWN"),
             interval=interval,
             signal_type=str(enhanced.get("signal_type", "BUY")),
             score=float(enhanced.get("score", 0)),
@@ -184,7 +168,7 @@ def generate_signals(
             margin_usdt=float(enhanced.get("margin_usdt") or 0),
             entry=float(enhanced.get("entry") or 0),
             market=str(enhanced.get("market", "Unknown")),
-            created_at=enhanced.get("created_at") or datetime.now(timezone.utc)  # always datetime
+            created_at=enhanced.get("created_at") or datetime.now(timezone.utc)
         )
 
         try:
@@ -238,22 +222,22 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
 
     # Save to DB
     signal_obj = Signal(
-    symbol=str(enhanced.get("symbol") or "UNKNOWN"),   # ensure str, fallback
-    interval=interval,
-    signal_type=str(enhanced.get("signal_type", "BUY")),
-    score=float(enhanced.get("score", 0)),
-    indicators=enhanced.get("indicators", {}),
-    side=str(enhanced.get("side", "BUY")),
-    sl=float(enhanced.get("sl") or 0),
-    tp=float(enhanced.get("tp") or 0),
-    trail=float(enhanced.get("trail") or 0),
-    liquidation=float(enhanced.get("liquidation") or 0),
-    leverage=int(enhanced.get("leverage", 15)),
-    margin_usdt=float(enhanced.get("margin_usdt") or 0),
-    entry=float(enhanced.get("entry") or 0),
-    market=str(enhanced.get("market", "Unknown")),
-    created_at=enhanced.get("created_at") or datetime.now(timezone.utc)  # always datetime
-)
+        symbol=str(enhanced.get("symbol") or "UNKNOWN"),
+        interval=interval,
+        signal_type=str(enhanced.get("signal_type", "BUY")),
+        score=float(enhanced.get("score", 0)),
+        indicators=enhanced.get("indicators", {}),
+        side=str(enhanced.get("side", "BUY")),
+        sl=float(enhanced.get("sl") or 0),
+        tp=float(enhanced.get("tp") or 0),
+        trail=float(enhanced.get("trail") or 0),
+        liquidation=float(enhanced.get("liquidation") or 0),
+        leverage=int(enhanced.get("leverage", 15)),
+        margin_usdt=float(enhanced.get("margin_usdt") or 0),
+        entry=float(enhanced.get("entry") or 0),
+        market=str(enhanced.get("market", "Unknown")),
+        created_at=enhanced.get("created_at") or datetime.now(timezone.utc)
+    )
 
     try:
         db_manager.add_signal(signal_obj)
@@ -261,7 +245,6 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
         logger.error(f"Failed to save signal {enhanced.get('symbol')} to DB: {e}")
 
     return enhanced
-
 
 # -------------------------------
 # Run Standalone

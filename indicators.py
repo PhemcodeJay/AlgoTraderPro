@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import numpy as np
 import requests
+from utils import get_symbol_precision, round_to_precision
 
 # Logging using centralized system
 from logging_config import get_logger
@@ -23,20 +24,20 @@ def get_candles(symbol: str, interval: str, limit: int = 200) -> List[Dict]:
             "limit": str(limit)
         }
         
-        # Pylance: ignore reportCallIssue for timeout parameter as it is valid in requests library
-        response = requests.get(url, params=params, timeout=10)  # type: ignore[call-arg]
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         
         if data.get("retCode") == 0 and "result" in data:
             klines = []
+            tick_size = get_symbol_precision(symbol)
             for k in data["result"]["list"]:
                 klines.append({
                     "time": int(k[0]),
-                    "open": float(k[1]),
-                    "high": float(k[2]),
-                    "low": float(k[3]),
-                    "close": float(k[4]),
+                    "open": round_to_precision(float(k[1]), tick_size),
+                    "high": round_to_precision(float(k[2]), tick_size),
+                    "low": round_to_precision(float(k[3]), tick_size),
+                    "close": round_to_precision(float(k[4]), tick_size),
                     "volume": float(k[5])
                 })
             return sorted(klines, key=lambda x: x["time"])
@@ -280,7 +281,7 @@ def get_top_symbols(limit: int = 100) -> List[str]:
         return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
 
 def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
-    """Comprehensive analysis of a single symbol with SL/TP (10%/50%)"""
+    """Comprehensive analysis of a single symbol"""
     try:
         candles = get_candles(symbol, interval, 200)
         if not candles:
@@ -306,7 +307,7 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
             signals.append("BULLISH_MA_CROSS")
         elif price < sma_200 and ema_9 < ema_21:
             score += 20
-            signals.append("BEARISH_MA_CROSS")
+            signals.append("BEARISH_MA_CRAWSS")
         
         # RSI signals
         rsi = indicators.get("rsi", 50)
@@ -363,10 +364,6 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
             signal_type = "sell"
             side = "Sell"
         
-        # Calculate SL and TP (10% and 50%)
-        sl = price * (1 - 0.1 if side == "Buy" else 1 + 0.1)
-        tp = price * (1 + 0.5 if side == "Buy" else 1 - 0.5)
-        
         return {
             "symbol": symbol,
             "interval": interval,
@@ -374,8 +371,6 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
             "signal_type": signal_type,
             "side": side,
             "entry": price,
-            "sl": round(sl, 4),
-            "tp": round(tp, 4),
             "indicators": indicators,
             "signals": signals,
             "analysis_time": time.time()
