@@ -299,7 +299,7 @@ class DatabaseManager:
                     f"Transaction error in {operation_type} on {table}: {str(e)}",
                     context=error_context,
                     original_exception=e
-                )
+                ) # type: ignore
             except Exception as e:
                 self.session.rollback()
                 logger.error(f"Unexpected error in {operation_type} on {table}: {str(e)}")
