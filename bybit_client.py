@@ -661,15 +661,17 @@ class BybitClient:
 
             # Get current price to calculate SL/TP
             entry_price = self.get_current_price(symbol)
+            if entry_price <= 0:
+                raise ValueError(f"Invalid entry price for {symbol}: {entry_price}")
 
             # Calculate stop loss and take profit
             side_lower = side.lower()
             if side_lower == "buy":
-                stop_loss = entry_price * 0.90  # 10% below entry
-                take_profit = entry_price * 1.50  # 50% above entry
+                stop_loss = entry_price * 0.95  # 5% below entry
+                take_profit = entry_price * 1.25  # 25% above entry
             elif side_lower == "sell":
-                stop_loss = entry_price * 1.10  # 10% above entry
-                take_profit = entry_price * 0.50  # 50% below entry
+                stop_loss = entry_price * 1.05  # 5% above entry
+                take_profit = entry_price * 0.75  # 25% below entry
             else:
                 raise ValueError("side must be 'buy' or 'sell'")
 
@@ -681,8 +683,8 @@ class BybitClient:
                 "orderType": "Market",
                 "qty": str(qty),
                 "timeInForce": "IOC",  # Immediate or Cancel for market orders
-                "stopLoss": str(stop_loss),
-                "takeProfit": str(take_profit)
+                "stopLoss": str(round(stop_loss, 8)),
+                "takeProfit": str(round(take_profit, 8))
             }
 
             # Place order
@@ -700,8 +702,8 @@ class BybitClient:
                     "timestamp": datetime.now(),
                     "virtual": False,
                     "leverage": leverage,
-                    "stopLoss": str(stop_loss),
-                    "takeProfit": str(take_profit),
+                    "stopLoss": str(round(stop_loss, 8)),
+                    "takeProfit": str(round(take_profit, 8)),
                     "margin_mode": mode.upper()
                 }
             return {}
