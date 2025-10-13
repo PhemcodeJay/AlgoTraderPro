@@ -297,9 +297,10 @@ class DatabaseManager:
                 )
                 raise DatabaseTransactionException(
                     f"Transaction error in {operation_type} on {table}: {str(e)}",
+                    operation=operation_type,  # Add the operation argument
                     context=error_context,
                     original_exception=e
-                ) # type: ignore
+                )
             except Exception as e:
                 self.session.rollback()
                 logger.error(f"Unexpected error in {operation_type} on {table}: {str(e)}")
@@ -380,7 +381,8 @@ class DatabaseManager:
             def _get_trade():
                 if not self.session:
                     raise DatabaseConnectionException("Database session not initialized")
-                trade = self.session.query(TradeModel).filter(TradeModel.order_id == order_id).first()
+                # Ensure order_id is a string
+                trade = self.session.query(TradeModel).filter(TradeModel.order_id == str(order_id)).first()
                 return trade.to_trade() if trade else None
             return self._execute_with_retry(_get_trade, f"get_trade_by_order_id_{order_id}")
         except Exception as e:

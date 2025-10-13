@@ -386,7 +386,7 @@ class TradingEngine:
                 qty = float(pos.get("size"))
                 entry_price = float(pos.get("avgPrice"))
                 leverage = int(float(pos.get("leverage")))
-                position_id = pos.get("positionIdx")  # Use positionIdx as order_id
+                position_id = str(pos.get("positionIdx"))  # Ensure positionIdx is a string
                 sl = float(pos.get("stopLoss") or 0)
                 tp = float(pos.get("takeProfit") or 0)
                 created_at = datetime.fromtimestamp(float(pos.get("createdTime")) / 1000, timezone.utc)
@@ -748,6 +748,24 @@ class TradingEngine:
             self._consecutive_failures += 1
             self.failed_trades += 1
             return False
+        
+    def get_closed_virtual_trades(self) -> List[Trade]:
+        """Fetch closed virtual trades from database"""
+        try:
+            trades = self.db.get_trades(limit=1000)  # Adjust limit as needed
+            return [trade for trade in trades if trade.virtual and trade.status.lower() == "closed"]
+        except Exception as e:
+            logger.error(f"Error fetching closed virtual trades: {e}", exc_info=True)
+            return []
+
+    def get_closed_real_trades(self) -> List[Trade]:
+        """Fetch closed real trades from database"""
+        try:
+            trades = self.db.get_trades(limit=1000)  # Adjust limit as needed
+            return [trade for trade in trades if not trade.virtual and trade.status.lower() == "closed"]
+        except Exception as e:
+            logger.error(f"Error fetching closed real trades: {e}", exc_info=True)
+        return []
 
     def close(self):
         """Clean up resources"""

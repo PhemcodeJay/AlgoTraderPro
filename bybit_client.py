@@ -633,11 +633,14 @@ class BybitClient:
         side: str,
         qty: float,
         leverage: Optional[int] = 15,
-        mode: str = "CROSS"  # Default to CROSS for unified accounts
+        mode: str = "CROSS",  # Default to CROSS for unified accounts
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None
     ) -> Dict:
         """
         Place a market trading order with leverage, cross margin mode for unified accounts,
-        automatically calculates TP (25% from entry) and SL (5% from entry).
+        and optional SL/TP. If SL/TP not provided, automatically calculates TP (25% from entry) 
+        and SL (5% from entry).
         """
         try:
             leverage = leverage or 15
@@ -659,21 +662,22 @@ class BybitClient:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
-            # Get current price to calculate SL/TP
+            # Get current price to calculate SL/TP if not provided
             entry_price = self.get_current_price(symbol)
             if entry_price <= 0:
                 raise ValueError(f"Invalid entry price for {symbol}: {entry_price}")
 
-            # Calculate stop loss and take profit
+            # Use provided SL/TP or calculate
             side_lower = side.lower()
-            if side_lower == "buy":
-                stop_loss = entry_price * 0.95  # 5% below entry
-                take_profit = entry_price * 1.25  # 25% above entry
-            elif side_lower == "sell":
-                stop_loss = entry_price * 1.05  # 5% above entry
-                take_profit = entry_price * 0.75  # 25% below entry
-            else:
-                raise ValueError("side must be 'buy' or 'sell'")
+            if stop_loss is None or take_profit is None:
+                if side_lower == "buy":
+                    stop_loss = entry_price * 0.95 if stop_loss is None else stop_loss  # 5% below entry
+                    take_profit = entry_price * 1.25 if take_profit is None else take_profit  # 25% above entry
+                elif side_lower == "sell":
+                    stop_loss = entry_price * 1.05 if stop_loss is None else stop_loss  # 5% above entry
+                    take_profit = entry_price * 0.75 if take_profit is None else take_profit  # 25% below entry
+                else:
+                    raise ValueError("side must be 'buy' or 'sell'")
 
             # Build order params
             params = {
@@ -683,8 +687,8 @@ class BybitClient:
                 "orderType": "Market",
                 "qty": str(qty),
                 "timeInForce": "IOC",  # Immediate or Cancel for market orders
-                "stopLoss": str(round(stop_loss, 8)),
-                "takeProfit": str(round(take_profit, 8))
+                "stopLoss": str(round(stop_loss, 8)) if stop_loss is not None else None,
+                "takeProfit": str(round(take_profit, 8)) if take_profit is not None else None
             }
 
             # Place order
@@ -702,8 +706,8 @@ class BybitClient:
                     "timestamp": datetime.now(),
                     "virtual": False,
                     "leverage": leverage,
-                    "stopLoss": str(round(stop_loss, 8)),
-                    "takeProfit": str(round(take_profit, 8)),
+                    "stopLoss": str(round(stop_loss, 8)) if stop_loss is not None else None,
+                    "takeProfit": str(round(take_profit, 8)) if take_profit is not None else None,
                     "margin_mode": mode.upper()
                 }
             return {}
@@ -711,12 +715,13 @@ class BybitClient:
         except APIException as e:
             if e.error_code == "100028":
                 logger.warning(f"Unified account error for {symbol}: {e}. Using cross margin mode.")
-                return await self.place_order(symbol, side, qty, leverage, mode="CROSS")
+                return await self.place_order(symbol, side, qty, leverage, mode="CROSS", stop_loss=stop_loss, take_profit=take_profit)
             logger.error(f"Error placing order for {symbol}: {e}")
             return {"error": str(e)}
         except Exception as e:
             logger.error(f"Unexpected error placing order for {symbol}: {e}")
             return {"error": str(e)}
+
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel an order"""
