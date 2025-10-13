@@ -3,11 +3,14 @@ Custom exception classes for AlgoTrader Pro
 Provides structured error handling with proper exception types
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from dataclasses import dataclass
 import traceback
 from datetime import datetime
+import time
+from logging_config import get_logger
 
+logger = get_logger(__name__, structured_format=True)
 
 @dataclass
 class ErrorContext:
@@ -399,6 +402,10 @@ class APIErrorRecoveryStrategy(ErrorRecoveryStrategy):
 class DatabaseErrorRecoveryStrategy(ErrorRecoveryStrategy):
     """Recovery strategy for database errors"""
     
+    def __init__(self, max_retries: int = 3, delay: float = 1.0):
+        super().__init__(max_retries, delay)
+        self.logger = get_logger(__name__, structured_format=True)
+    
     def should_retry(self, exception: Exception, attempt: int) -> bool:
         if not super().should_retry(exception, attempt):
             return False
@@ -409,3 +416,35 @@ class DatabaseErrorRecoveryStrategy(ErrorRecoveryStrategy):
         
         # Retry connection and transaction errors
         return isinstance(exception, (DatabaseConnectionException, DatabaseTransactionException))
+    
+    def execute_with_retry(self, operation: Callable, operation_name: str) -> Any:
+        """Execute operation with retry logic"""
+        attempt = 0
+        last_exception = None
+
+        while attempt < self.max_retries:
+            try:
+                return operation()
+            except (DatabaseConnectionException, DatabaseTransactionException) as e:
+                if not self.should_retry(e, attempt):
+                    raise
+                last_exception = e
+                delay = self.get_delay(attempt)
+                self.logger.warning(
+                    f"Retry {attempt + 1}/{self.max_retries} for {operation_name} "
+                    f"after {delay:.2f}s due to {str(e)}"
+                )
+                time.sleep(delay)
+                attempt += 1
+            except Exception as e:
+                raise handle_exception(e, self.logger, f"Unexpected error in {operation_name}")
+
+        raise DatabaseException(
+            f"Failed to execute {operation_name} after {self.max_retries} retries: {str(last_exception)}",
+            context=create_error_context(
+                module=__name__,
+                function="execute_with_retry",
+                extra_data={"operation_name": operation_name, "attempts": attempt}
+            ),
+            original_exception=last_exception
+        )

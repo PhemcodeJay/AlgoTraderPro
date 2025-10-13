@@ -333,7 +333,7 @@ class DatabaseManager:
                 )
                 self.session.add(signal_model)
                 return True
-            return self._safe_transaction(_add_signal, operation_type="INSERT", table="signals")
+            return self._safe_transaction(operation=_add_signal, operation_type="INSERT", table="signals")
         except DatabaseException:
             logger.error(f"Database exception adding signal for {signal.symbol}")
             raise
@@ -366,7 +366,7 @@ class DatabaseManager:
                 )
                 self.session.add(trade_model)
                 return True
-            return self._safe_transaction(_add_trade, operation_type="INSERT", table="trades")
+            return self._safe_transaction(operation=_add_trade, operation_type="INSERT", table="trades")
         except DatabaseException:
             logger.error(f"Database exception adding trade for {trade_data.get('symbol')}")
             raise
@@ -430,7 +430,7 @@ class DatabaseManager:
                     )
                     self.session.add(new_balance)
                 return True
-            return self._safe_transaction(_update_wallet_balance, operation_type="UPSERT", table="wallet_balances")
+            return self._safe_transaction(operation=_update_wallet_balance, operation_type="UPSERT", table="wallet_balances")
         except DatabaseException:
             logger.error(f"Database exception updating wallet balance for {wallet_balance.trading_mode}")
             raise
@@ -525,7 +525,7 @@ class DatabaseManager:
 
             if "real" in capital_data:
                 r = capital_data["real"]
-                real_balance = WalletBalance(
+                virtual_balance = WalletBalance(
                     trading_mode="real",
                     capital=float(r.get("capital", 0.0)),
                     available=float(r.get("available", 0.0)),
@@ -534,7 +534,7 @@ class DatabaseManager:
                     currency=r.get("currency", "USDT"),
                     updated_at=datetime.now(timezone.utc),
                 )
-                self.update_wallet_balance(real_balance)
+                self.update_wallet_balance(virtual_balance)
                 logger.info("Real balance migrated to database")
 
             logger.info("Capital.json data successfully migrated to database")
@@ -569,7 +569,7 @@ class DatabaseManager:
             return True
 
         try:
-            return self._safe_transaction(_save_setting_operation, operation_type="UPSERT", table="settings")
+            return self._safe_transaction(operation=_save_setting_operation, operation_type="UPSERT", table="settings")
         except DatabaseException:
             logger.error(f"Database exception saving setting {key}")
             raise
