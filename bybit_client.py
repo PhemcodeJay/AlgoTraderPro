@@ -207,7 +207,11 @@ class BybitClient:
             raise APIRateLimitException(
                 f"Rate limit exceeded: {ret_msg}",
                 retry_after=60,
-                context=create_error_context(module=__name__, function='_handle_api_error')
+                context=create_error_context(
+                    module=__name__,
+                    function='_handle_api_error',
+                    extra_data={'endpoint': endpoint, 'ret_code': ret_code}
+                )
             )
         elif ret_code == 10004:
             raise APIAuthenticationException(
@@ -649,7 +653,6 @@ class BybitClient:
             if self.account_type == "UNIFIED":
                 mode = "CROSS"
                 logger.info(f"Unified account detected, using CROSS margin mode for {symbol}")
-                loop = asyncio.get_running_loop()
             else:
                 trade_mode = 1 if mode.upper() == "ISOLATED" else 0
                 lev_params = {
@@ -659,8 +662,7 @@ class BybitClient:
                     "buyLeverage": str(leverage),
                     "sellLeverage": str(leverage)
                 }
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
+                await asyncio.to_thread(self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
 
             # Get current price to calculate SL/TP if not provided
             entry_price = self.get_current_price(symbol)
@@ -692,7 +694,7 @@ class BybitClient:
             }
 
             # Place order
-            result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
+            result = await asyncio.to_thread(self._make_request, "POST", "/v5/order/create", params)
 
             if result:
                 return {
@@ -722,11 +724,10 @@ class BybitClient:
             logger.error(f"Unexpected error placing order for {symbol}: {e}")
             return {"error": str(e)}
 
-
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel an order"""
         try:
-            result = self._make_request("POST", "/v5/order/cancel", {
+            result = await asyncio.to_thread(self._make_request, "POST", "/v5/order/cancel", {
                 "category": "linear",
                 "symbol": symbol,
                 "orderId": order_id

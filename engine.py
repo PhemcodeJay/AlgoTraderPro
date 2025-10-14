@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone, timedelta
+import time
 import asyncio
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
@@ -143,7 +144,7 @@ class TradingEngine:
             logger.error(f"Failed to disable trading: {str(e)}")
             return False
     
-    def emergency_stop(self, reason: str = "Emergency stop triggered") -> bool:
+    async def emergency_stop(self, reason: str = "Emergency stop triggered") -> bool:
         """Trigger emergency stop"""
         try:
             self._emergency_stop = True
@@ -159,15 +160,17 @@ class TradingEngine:
             for trade in open_trades:
                 close_side = "Sell" if trade.side.upper() in ["BUY", "LONG"] else "Buy"
                 try:
-                    close_result = asyncio.run(self.client.place_order(
+                    close_result = await self.client.place_order(
                         symbol=trade.symbol,
                         side=close_side,
                         qty=trade.qty,
                         leverage=trade.leverage,
                         mode="CROSS"
-                    ))
+                    )
                     if "error" not in close_result:
                         logger.info(f"Closed real position {trade.order_id} during emergency stop")
+                    else:
+                        logger.error(f"Failed to close position {trade.order_id}: {close_result.get('error')}")
                 except Exception as e:
                     logger.error(f"Failed to close position {trade.order_id}: {e}")
             
@@ -361,18 +364,37 @@ class TradingEngine:
             return False
 
     def get_open_real_trades(self) -> List[Trade]:
-        """Fetch and sync open real trades from Bybit to database"""
+        """Fetch and sync open real trades from Bybit to database with retry logic"""
         try:
             if not self.client.is_connected():
-                logger.error("Bybit client not connected")
-                return []
+                logger.warning("Bybit client not connected. Attempting to reconnect...")
+                try:
+                    self.client = BybitClient()
+                    if not self.client.is_connected():
+                        logger.error("Reconnection failed. Check API credentials and network.")
+                        return []
+                    logger.info("Bybit client reconnected successfully")
+                except Exception as e:
+                    logger.error(f"Reconnection failed: {e}", exc_info=True)
+                    return []
 
-            positions = self.client._make_request("GET", "/v5/position/list", {
-                "category": "linear",
-                "settleCoin": "USDT"
-            })
+            # Retry logic for API call
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    positions = self.client._make_request("GET", "/v5/position/list", {
+                        "category": "linear",
+                        "settleCoin": "USDT"
+                    })
+                    break
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt + 1}/{retries} failed to fetch positions: {e}")
+                    if attempt == retries - 1:
+                        logger.error(f"Failed to fetch positions after {retries} attempts: {e}", exc_info=True)
+                        return []
+                    time.sleep(2 ** attempt)  # Synchronous sleep for retry
 
-            if not positions or "list" not in positions:
+            if not positions or "list" not in positions or not positions["list"]:
                 logger.warning("No positions found in Bybit response")
                 return []
 
@@ -478,6 +500,8 @@ class TradingEngine:
                         self.db.session.rollback()
                         logger.error(f"Failed to close stale trade {trade.order_id}: {e}", exc_info=True)
 
+            # Sync wallet balance after trade updates
+            self.sync_real_balance()
             return open_trades
 
         except Exception as e:
@@ -499,9 +523,20 @@ class TradingEngine:
                     logger.error(f"Reconnection failed: {e}", exc_info=True)
                     return False
 
-            result = self.client._make_request(
-                "GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"}
-            )
+            # Retry logic for balance sync
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    result = self.client._make_request(
+                        "GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"}
+                    )
+                    break
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt + 1}/{retries} failed to sync balance: {e}")
+                    if attempt == retries - 1:
+                        logger.error(f"Failed to sync balance after {retries} attempts: {e}", exc_info=True)
+                        return False
+                    time.sleep(2 ** attempt)  # Synchronous sleep for retry
 
             if not result or "list" not in result or not result["list"]:
                 logger.warning("No account data in Bybit response")
@@ -618,7 +653,7 @@ class TradingEngine:
             return False
             
     async def execute_real_trade(self, signals: List[Dict], trading_mode: str = "real") -> bool:
-        """Execute multiple real trades on Bybit based on a list of signals"""
+        """Execute multiple real trades on Bybit based on a list of signals with retry logic"""
         try:
             if not self.is_trading_enabled():
                 logger.error("Trading is disabled or emergency stop is active")
@@ -628,13 +663,25 @@ class TradingEngine:
                 logger.error("Signals must be a non-empty list of dictionaries")
                 return False
 
+            if not self.client.is_connected():
+                logger.warning("Bybit client not connected. Attempting to reconnect...")
+                try:
+                    self.client = BybitClient()
+                    if not self.client.is_connected():
+                        logger.error("Reconnection failed. Check API credentials and network.")
+                        return False
+                    logger.info("Bybit client reconnected successfully")
+                except Exception as e:
+                    logger.error(f"Reconnection failed: {e}", exc_info=True)
+                    return False
+
             success_count = 0
             total_trades = len(signals)
-            
             open_trades = self.get_open_real_trades()
             current_positions = len(open_trades)
             total_position_value = sum(trade.entry_price * trade.qty for trade in open_trades)
 
+            # Process signals in a batch, respecting rate limits
             for signal in signals:
                 symbol = signal.get("symbol")
                 if not symbol or not isinstance(symbol, str):
@@ -656,7 +703,7 @@ class TradingEngine:
                 if sl is None or tp is None:
                     sl_percent = 0.1
                     tp_percent = 0.5
-                    if side == "BUY":
+                    if side in ["BUY", "LONG"]:
                         sl = round_to_precision(entry_price * (1 - sl_percent), tick_size)
                         tp = round_to_precision(entry_price * (1 + tp_percent), tick_size)
                     else:
@@ -677,19 +724,33 @@ class TradingEngine:
                     logger.warning(f"Max position size ({self.max_position_size} USDT) exceeded. Skipping trade for {symbol}")
                     continue
 
-                # Place order with SL/TP
-                order_response = await self.client.place_order(
-                    symbol=symbol,
-                    side=side,
-                    qty=position_size,
-                    leverage=signal.get("leverage", 15),
-                    mode="CROSS",
-                    stop_loss=sl,
-                    take_profit=tp
-                )
+                # Place order with retry logic
+                retries = 3
+                order_response = None
+                for attempt in range(retries):
+                    try:
+                        order_response = await self.client.place_order(
+                            symbol=symbol,
+                            side=side,
+                            qty=position_size,
+                            leverage=signal.get("leverage", 15),
+                            mode="CROSS",
+                            stop_loss=sl,
+                            take_profit=tp
+                        )
+                        if "error" not in order_response:
+                            break
+                        logger.warning(f"Attempt {attempt + 1}/{retries} failed to place order for {symbol}: {order_response.get('error')}")
+                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    except Exception as e:
+                        logger.warning(f"Attempt {attempt + 1}/{retries} failed to place order for {symbol}: {e}")
+                        if attempt == retries - 1:
+                            logger.error(f"Failed to place order for {symbol} after {retries} attempts: {e}", exc_info=True)
+                            self._consecutive_failures += 1
+                            continue
 
-                if "error" in order_response or not order_response.get("order_id"):
-                    logger.error(f"Failed to place order for {symbol}: {order_response.get('error', 'Unknown error')}")
+                if not order_response or "error" in order_response or not order_response.get("order_id"):
+                    logger.error(f"Failed to place order for {symbol}: {order_response.get('error', 'Unknown error') if order_response else 'No response'}")
                     self._consecutive_failures += 1
                     continue
 
@@ -703,14 +764,14 @@ class TradingEngine:
                     "order_id": order_id,
                     "virtual": False,
                     "status": "open",
-                    "score": signal.get("score"),
+                    "score": signal.get("score", 0.0),
                     "strategy": signal.get("strategy", "Auto"),
                     "leverage": signal.get("leverage", 15),
                     "sl": sl,
                     "tp": tp,
-                    "trail": signal.get("trail"),
-                    "liquidation": signal.get("liquidation"),
-                    "margin_usdt": signal.get("margin_usdt"),
+                    "trail": signal.get("trail", 0.0),
+                    "liquidation": signal.get("liquidation", 0.0),
+                    "margin_usdt": position_size * entry_price / signal.get("leverage", 15),
                     "timestamp": datetime.now(timezone.utc)
                 }
 
@@ -721,7 +782,7 @@ class TradingEngine:
                         f"Qty: {position_size:.6f}, Order ID: {order_id}, "
                         f"SL: {sl:.2f}, TP: {tp:.2f}, "
                         f"Trail: {trade_data['trail']}, Liquidation: {trade_data['liquidation']}, "
-                        f"Margin: {trade_data['margin_usdt']} USDT"
+                        f"Margin: {trade_data['margin_usdt']:.2f} USDT"
                     )
                     success_count += 1
                     self._consecutive_failures = 0
@@ -732,13 +793,23 @@ class TradingEngine:
                     logger.error(f"Failed to save trade to database for {symbol}, Order ID: {order_id}")
                     self._consecutive_failures += 1
                     self.failed_trades += 1
+                    # Attempt to cancel the order to avoid orphaned trades
+                    try:
+                        cancel_response = await self.client.cancel_order(symbol=symbol, order_id=order_id)
+                        if "error" not in cancel_response:
+                            logger.info(f"Cancelled order {order_id} for {symbol} due to database failure")
+                        else:
+                            logger.error(f"Failed to cancel order {order_id} for {symbol}: {cancel_response.get('error')}")
+                    except Exception as e:
+                        logger.error(f"Failed to cancel order {order_id} for {symbol}: {e}", exc_info=True)
 
-                # Brief pause to avoid rate limits
+                # Brief pause to respect rate limits
                 await asyncio.sleep(0.5)
 
-            # Sync trades after execution
+            # Sync trades and balance after batch execution
             self.get_open_real_trades()
-            logger.info(f"Synced real trades to DB after executing {success_count}/{total_trades} trades")
+            self.sync_real_balance()
+            logger.info(f"Synced real trades and balance to DB after executing {success_count}/{total_trades} trades")
 
             self._daily_pnl += 0.0  # Updated in position monitoring
 

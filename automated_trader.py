@@ -235,15 +235,15 @@ class AutomatedTrader:
             # Get current positions count
             current_positions = len(self.engine.get_open_virtual_trades()) if trading_mode == "virtual" else len(self.engine.get_open_real_trades())
             
-            for signal in signals:
+            # Filter signals to respect max positions
+            max_new_trades = self.max_positions - current_positions
+            filtered_signals = []
+            
+            for signal in signals[:max_new_trades]:
                 symbol = signal.get("symbol")
                 if not symbol:
                     logger.warning("Skipping signal with missing symbol")
                     continue
-                    
-                if current_positions >= self.max_positions:
-                    logger.info(f"Max positions reached ({self.max_positions}), skipping {symbol}")
-                    break
                 
                 # Risk check
                 position_size = self.engine.calculate_position_size(symbol, signal.get("entry", 0))
@@ -254,36 +254,59 @@ class AutomatedTrader:
                 
                 # Convert signal to dict if needed
                 signal_dict = signal if isinstance(signal, dict) else signal.to_dict()
+                filtered_signals.append(signal_dict)
+            
+            if not filtered_signals:
+                logger.info("No valid signals after filtering")
+                return
+            
+            # Execute trades based on mode
+            if trading_mode == "virtual":
+                for signal_dict in filtered_signals:
+                    symbol = signal_dict.get("symbol")
+                    success = self.engine.execute_virtual_trade(signal_dict, trading_mode)
+                    if success:
+                        self.stats["trades_executed"] += 1
+                        logger.info(f"Virtual trade executed for {symbol}")
+                    else:
+                        logger.error(f"Failed to execute virtual trade for {symbol}")
+            else:
+                if not self.client.is_connected():
+                    logger.error("Bybit client not connected for real trades")
+                    if st._is_running_with_streamlit:
+                        st.error("Bybit client not connected for real trades")
+                    return
                 
-                success = False
-                if trading_mode == "virtual":
-                    success = self.engine.execute_virtual_trade(signal_dict)
-                else:
-                    if not self.client.is_connected():
-                        logger.error("Bybit client not connected for real trade")
-                        continue
-                    try:
-                        success = await self.engine.execute_real_trade([signal_dict])
-                        if success:
-                            # Wait briefly for Bybit to process
-                            await asyncio.sleep(2)
-                            # Sync real trades to DB after execution
-                            self.engine.get_open_real_trades()
-                            logger.info(f"Synced real trades to DB after executing trade for {symbol}")
-                    except APIException as e:
-                        if e.error_code == "100028":
-                            logger.warning(f"Unified account error for {symbol}: {e}. Retrying with cross margin mode.")
+                try:
+                    success = await self.engine.execute_real_trade(filtered_signals, trading_mode)
+                    if success:
+                        self.stats["trades_executed"] += len(filtered_signals)
+                        # Wait briefly for Bybit to process
+                        await asyncio.sleep(2)
+                        # Sync real trades to DB after execution
+                        self.engine.get_open_real_trades()
+                        self.engine.sync_real_balance()
+                        logger.info(f"Batch executed {len(filtered_signals)} real trades and synced to DB")
+                    else:
+                        logger.error("Failed to execute batch of real trades")
+                except APIException as e:
+                    if e.error_code == "100028":
+                        logger.warning(f"Unified account error: {e}. Retrying with cross margin mode.")
+                        for signal_dict in filtered_signals:
                             signal_dict["margin_mode"] = "CROSS"
-                            success = await self.engine.execute_real_trade([signal_dict])
-                            if success:
-                                await asyncio.sleep(2)
-                                self.engine.get_open_real_trades()
-                                logger.info(f"Synced real trades to DB after retrying trade for {symbol}")
-                
-                if success:
-                    self.stats["trades_executed"] += 1
-                    current_positions += 1
-                    logger.info(f"Trade executed for {symbol} in {trading_mode} mode")
+                        success = await self.engine.execute_real_trade(filtered_signals, trading_mode)
+                        if success:
+                            self.stats["trades_executed"] += len(filtered_signals)
+                            await asyncio.sleep(2)
+                            self.engine.get_open_real_trades()
+                            self.engine.sync_real_balance()
+                            logger.info(f"Batch executed {len(filtered_signals)} real trades on retry and synced to DB")
+                        else:
+                            logger.error("Failed to execute batch of real trades on retry")
+                    else:
+                        logger.error(f"Error executing real trades: {e}", exc_info=True)
+                        if st._is_running_with_streamlit:
+                            st.error(f"Error executing real trades: {e}")
             
         except Exception as e:
             logger.error(f"Error in scan and trade: {e}", exc_info=True)
