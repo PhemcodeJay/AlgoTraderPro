@@ -335,6 +335,12 @@ def display_manual_trading():
             st.error(f"Order placement error: {e}")
             logger.error(f"Manual order error: {e}")
 
+import streamlit as st
+import asyncio
+import pandas as pd
+from datetime import datetime, timezone, timedelta
+import time
+
 def display_automation_tab():
     """Display automation controls"""
     st.subheader("🤖 Automated Trading")
@@ -350,7 +356,7 @@ def display_automation_tab():
         is_running = False
         status = {}
     
-    # Status display
+    # ====== STATUS DISPLAY ======
     status_col1, status_col2, status_col3 = st.columns(3)
     
     with status_col1:
@@ -364,15 +370,45 @@ def display_automation_tab():
     
     with status_col3:
         scan_interval = status.get("scan_interval", 300) / 60
-        st.metric("Scan Interval", f"{scan_interval:.0f}min")
+        st.metric("Scan Interval", f"{scan_interval:.0f} min")
+
+    # ====== LIVE COUNTDOWN DISPLAY ======
+    st.markdown("### 🕒 Next Scan Countdown")
+    countdown_placeholder = st.empty()
     
-    # Settings
+    if is_running:
+        last_scan_str = automated_trader.stats.get("last_scan")
+        if last_scan_str:
+            try:
+                last_scan_time = datetime.strptime(last_scan_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                next_scan_time = last_scan_time + timedelta(seconds=automated_trader.scan_interval)
+            except Exception:
+                next_scan_time = datetime.now(timezone.utc) + timedelta(seconds=automated_trader.scan_interval)
+        else:
+            next_scan_time = datetime.now(timezone.utc) + timedelta(seconds=automated_trader.scan_interval)
+
+        while is_running and datetime.now(timezone.utc) < next_scan_time:
+            remaining = (next_scan_time - datetime.now(timezone.utc)).total_seconds()
+            hours, rem = divmod(int(remaining), 3600)
+            mins, secs = divmod(rem, 60)
+            time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+            
+            countdown_placeholder.info(f"⏳ Next scan in **{time_str}** (hh:mm:ss)")
+            time.sleep(1)
+            
+            # Check stop flag dynamically
+            if not automated_trader.is_running:
+                break
+        countdown_placeholder.success("🚀 Running next market scan...")
+    else:
+        countdown_placeholder.info("Automation not running — countdown paused")
+
+    # ====== SETTINGS ======
     st.markdown("### ⚙️ Automation Settings")
-    
     settings_col1, settings_col2 = st.columns(2)
     
     with settings_col1:
-        new_max_positions = st.number_input("Max Positions", 1, 10, max_positions, key="auto_max_pos")
+        new_max_positions = st.number_input("Max Positions", 1, 10, status.get("max_positions", 5), key="auto_max_pos")
         new_risk_per_trade = st.number_input("Risk per Trade (%)", 0.5, 5.0, 
                                            status.get("risk_per_trade", 0.02) * 100, 
                                            step=0.1, key="auto_risk")
@@ -381,14 +417,13 @@ def display_automation_tab():
         new_scan_interval = st.number_input("Scan Interval (minutes)", 1, 60, int(scan_interval), key="auto_interval")
         min_signal_score = st.number_input("Min Signal Score", 50, 90, 65, key="auto_min_score")
     
-    # Control buttons
+    # ====== CONTROL BUTTONS ======
     control_col1, control_col2, control_col3 = st.columns(3)
     
     with control_col1:
         if st.button("🚀 Start Automation", disabled=is_running):
             with st.spinner("Starting automation..."):
                 try:
-                    # Update settings
                     automated_trader.max_positions = new_max_positions
                     automated_trader.risk_per_trade = new_risk_per_trade / 100
                     automated_trader.scan_interval = new_scan_interval * 60
@@ -424,10 +459,9 @@ def display_automation_tab():
             except Exception as e:
                 st.error(f"Reset error: {e}")
     
-    # Performance summary
+    # ====== PERFORMANCE SUMMARY ======
     if is_running or status.get("stats", {}).get("total_trades", 0) > 0:
         st.markdown("### 📊 Performance Summary")
-        
         performance = automated_trader.get_performance_summary()
         
         perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
@@ -447,26 +481,25 @@ def display_automation_tab():
             runtime = performance.get("runtime", "N/A")
             st.metric("Runtime", runtime)
         
-        # Recent activity
+        # ====== RECENT ACTIVITY ======
         if is_running:
             st.markdown("### 🕐 Recent Activity")
             recent_trades = db_manager.get_trades(limit=5)
             
             if recent_trades:
-                activity_data = []
-                for trade in recent_trades:
-                    activity_data.append({
-                        "Time": trade.timestamp.strftime("%H:%M:%S") if trade.timestamp else "N/A",
-                        "Symbol": trade.symbol,
-                        "Side": trade.side,
-                        "Entry": f"${trade.entry_price:.4f}",
-                        "Status": trade.status.title(),
-                        "Type": "Virtual" if trade.virtual else "Real"
-                    })
+                activity_data = [{
+                    "Time": t.timestamp.strftime("%H:%M:%S") if t.timestamp else "N/A",
+                    "Symbol": t.symbol,
+                    "Side": t.side,
+                    "Entry": f"${t.entry_price:.4f}",
+                    "Status": t.status.title(),
+                    "Type": "Virtual" if t.virtual else "Real"
+                } for t in recent_trades]
                 
                 st.dataframe(pd.DataFrame(activity_data), height=200)
             else:
                 st.info("No recent activity")
+
 
 def main():
     # Verify database initialization
