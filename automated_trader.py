@@ -2,17 +2,29 @@ import asyncio
 import logging
 import time
 import json
+import streamlit as st
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from engine import TradingEngine
 from bybit_client import BybitClient
 from signal_generator import generate_signals, get_usdt_symbols
-from db import db_manager, Trade, Signal
+from db import db_manager, Trade, TradeModel
 from settings import load_settings
 from logging_config import get_trading_logger
 from exceptions import APIException
+from sqlalchemy import update
 
 logger = get_trading_logger(__name__)
+
+@st.cache_resource
+def get_automated_trader(_engine: TradingEngine) -> 'AutomatedTrader':
+    """Cached factory for AutomatedTrader instance."""
+    client = st.session_state.get("bybit_client", None)
+    if not client:
+        logger.warning("Bybit client not initialized, creating new instance")
+        client = BybitClient()
+        st.session_state.bybit_client = client
+    return AutomatedTrader(_engine, client)
 
 class AutomatedTrader:
     def __init__(self, engine: TradingEngine, client: BybitClient):
@@ -41,6 +53,9 @@ class AutomatedTrader:
             "start_time": None,
             "last_scan": None
         }
+        
+        # Store in session state for emergency stop
+        st.session_state.automated_trader = self
         
         logger.info("Automated trader initialized", extra={
             'scan_interval': self.scan_interval,
@@ -71,11 +86,12 @@ class AutomatedTrader:
                     status_container.error("Failed to connect to database")
                 return False
             
-            # Verify Bybit client connection
-            if not self.client.is_connected():
-                logger.error("Bybit client not connected")
+            # Verify Bybit client connection for real mode
+            trading_mode = st.session_state.get("trading_mode", "virtual")
+            if trading_mode == "real" and (not self.client or not self.client.is_connected()):
+                logger.error("Bybit client not connected for real mode")
                 if status_container:
-                    status_container.error("Bybit client not connected")
+                    status_container.error("Bybit client not connected. Check API keys in .env file.")
                 return False
 
             self.is_running = True
@@ -85,9 +101,9 @@ class AutomatedTrader:
             # Start the main trading loop
             self.task = asyncio.create_task(self._trading_loop(status_container))
             
-            logger.info("Automated trading started")
+            logger.info(f"Automated trading started in {trading_mode} mode")
             if status_container:
-                status_container.success("🤖 Automated trading started")
+                status_container.success(f"🤖 Automated trading started in {trading_mode.title()} mode")
             return True
             
         except Exception as e:
@@ -124,10 +140,11 @@ class AutomatedTrader:
     async def get_status(self) -> Dict[str, Any]:
         """Get current trading status"""
         try:
+            trading_mode = st.session_state.get("trading_mode", "virtual")
             return {
                 "is_running": self.is_running,
                 "stats": self.stats.copy(),
-                "current_positions": len(self.engine.get_open_virtual_trades()) + len(self.engine.get_open_real_trades()),
+                "current_positions": len(self.engine.get_open_virtual_trades()) if trading_mode == "virtual" else len(self.engine.get_open_real_trades()),
                 "max_positions": self.max_positions,
                 "scan_interval": self.scan_interval,
                 "risk_per_trade": self.risk_per_trade,
@@ -157,16 +174,18 @@ class AutomatedTrader:
         try:
             while self.is_running and not self.stop_event.is_set():
                 try:
+                    trading_mode = st.session_state.get("trading_mode", "virtual")
                     # Update status
                     if status_container:
-                        status_container.info(f"🤖 Scanning markets... Last scan: {self.stats.get('last_scan', 'Never')}")
+                        status_container.info(f"🤖 Scanning markets in {trading_mode.title()} mode... Last scan: {self.stats.get('last_scan', 'Never')}")
                     
                     # Sync real balance if in real mode
-                    trading_mode = self.db.get_setting("trading_mode") or "virtual"
                     if trading_mode == "real":
                         success = self.engine.sync_real_balance()
                         if not success:
                             logger.warning("Failed to sync real balance, retrying in 60s")
+                            if status_container:
+                                status_container.warning("Failed to sync real balance, retrying in 60s")
                             await asyncio.sleep(60)
                             continue
                         self.engine.get_open_real_trades()
@@ -205,8 +224,8 @@ class AutomatedTrader:
     async def _scan_and_trade(self, trading_mode: str):
         """Scan for signals and execute trades"""
         try:
-            symbols = get_usdt_symbols(limit=100)
-            signals = generate_signals(symbols, interval="60", top_n=self.top_n_signals, trading_mode=trading_mode)
+            symbols = get_usdt_symbols(limit=100, _trading_mode=trading_mode)
+            signals = generate_signals(symbols, interval="60", top_n=self.top_n_signals, _trading_mode=trading_mode)
             self.stats["signals_generated"] += len(signals)
             
             if not signals:
@@ -240,6 +259,9 @@ class AutomatedTrader:
                 if trading_mode == "virtual":
                     success = self.engine.execute_virtual_trade(signal_dict)
                 else:
+                    if not self.client.is_connected():
+                        logger.error("Bybit client not connected for real trade")
+                        continue
                     try:
                         success = await self.engine.execute_real_trade([signal_dict])
                         if success:
@@ -265,6 +287,8 @@ class AutomatedTrader:
             
         except Exception as e:
             logger.error(f"Error in scan and trade: {e}", exc_info=True)
+            if st._is_running_with_streamlit:
+                st.error(f"Error scanning and trading: {e}")
 
     async def _monitor_positions(self, trading_mode: str):
         """Monitor and manage existing positions"""
@@ -279,6 +303,8 @@ class AutomatedTrader:
                     
         except Exception as e:
             logger.error(f"Error monitoring positions: {e}", exc_info=True)
+            if st._is_running_with_streamlit:
+                st.error(f"Error monitoring positions: {e}")
 
     async def _check_trade_exit(self, trade: Trade, trading_mode: str):
         """Check if trade should be closed"""
@@ -305,6 +331,9 @@ class AutomatedTrader:
             
             # For real trades, check if Bybit closed the position
             if trading_mode == "real":
+                if not self.client.is_connected():
+                    logger.warning(f"Bybit client not connected for checking {symbol}")
+                    return
                 try:
                     positions = await self.client.get_positions(symbol=symbol)
                     position = next((p for p in positions if p["size"] > 0 and p["side"].upper() == side), None)
@@ -369,7 +398,9 @@ class AutomatedTrader:
                     
         except Exception as e:
             logger.error(f"Error checking trade exit for {trade.symbol}: {e}", exc_info=True)
-                
+            if st._is_running_with_streamlit:
+                st.error(f"Error checking trade exit for {trade.symbol}: {e}")
+
     async def _close_trade(self, trade: Trade, exit_price: float, reason: str, trading_mode: str):
         """Close a trade"""
         try:
@@ -378,9 +409,10 @@ class AutomatedTrader:
             if trading_mode == "virtual":
                 pnl = self.engine.calculate_virtual_pnl(trade_dict)
             else:
-                # Fetch actual PnL from Bybit
                 if not self.client.is_connected():
                     logger.error("Bybit client not connected for real trade close")
+                    if st._is_running_with_streamlit:
+                        st.error("Bybit client not connected for real trade close")
                     return
                 positions = await self.client.get_positions(symbol=trade.symbol)
                 pnl = float(positions[0].get("unrealisedPnl", 0.0)) if positions else 0.0
@@ -398,6 +430,8 @@ class AutomatedTrader:
                     )
                     if "error" in close_result:
                         logger.error(f"Failed to close real position {trade.order_id}: {close_result['error']}")
+                        if st._is_running_with_streamlit:
+                            st.error(f"Failed to close real position {trade.order_id}: {close_result['error']}")
                         return
                     logger.info(f"Closed real position {trade.order_id}")
                     await asyncio.sleep(2)
@@ -415,6 +449,8 @@ class AutomatedTrader:
                         )
                         if "error" in close_result:
                             logger.error(f"Retry failed to close real position {trade.order_id}: {close_result['error']}")
+                            if st._is_running_with_streamlit:
+                                st.error(f"Retry failed to close real position {trade.order_id}: {close_result['error']}")
                             return
                         logger.info(f"Closed real position {trade.order_id} on retry")
                         await asyncio.sleep(2)
@@ -422,33 +458,38 @@ class AutomatedTrader:
                         logger.info(f"Synced real trades to DB after closing {trade.order_id}")
                     else:
                         logger.error(f"Error closing real position {trade.order_id}: {e}")
+                        if st._is_running_with_streamlit:
+                            st.error(f"Error closing real position {trade.order_id}: {e}")
                         return
 
             # Update trade in database
-            from db import TradeModel
-            from sqlalchemy import update
-            
             if not self.db.session:
                 logger.error("Database session not initialized")
+                if st._is_running_with_streamlit:
+                    st.error("Database session not initialized")
                 return
             
             success = False
             try:
                 self.db.session.execute(
                     update(TradeModel)
-                    .where(TradeModel.order_id == trade.order_id)
+                    .where(TradeModel.id == int(trade.id))  # Use integer ID
                     .values(
                         status="closed",
                         exit_price=exit_price,
                         pnl=pnl,
-                        closed_at=datetime.now(timezone.utc)
+                        closed_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc)
                     )
                 )
                 self.db.session.commit()
                 success = True
+                logger.info(f"Updated trade ID {trade.id} to closed in database")
             except Exception as e:
                 self.db.session.rollback()
-                logger.error(f"Database error updating trade {trade.order_id}: {e}", exc_info=True)
+                logger.error(f"Database error updating trade ID {trade.id}: {e}", exc_info=True)
+                if st._is_running_with_streamlit:
+                    st.error(f"Database error updating trade ID {trade.id}: {e}")
             
             if success:
                 self.stats["total_pnl"] += pnl
@@ -461,11 +502,18 @@ class AutomatedTrader:
                     self.engine.sync_real_balance()
                 
                 logger.info(f"Trade closed: {trade.symbol} {reason} PnL: ${pnl:.2f}, Mode: {trading_mode}")
+                if st._is_running_with_streamlit:
+                    st.success(f"✅ Trade closed: {trade.symbol} ({reason}) PnL: ${pnl:.2f}")
+                st.cache_data.clear()  # Clear cache for UI refresh
             else:
-                logger.error(f"Failed to close trade {trade.order_id}")
+                logger.error(f"Failed to close trade ID {trade.id}")
+                if st._is_running_with_streamlit:
+                    st.error(f"Failed to close trade ID {trade.id}")
                 
         except Exception as e:
-            logger.error(f"Error closing trade {trade.order_id}: {e}", exc_info=True)
+            logger.error(f"Error closing trade ID {trade.id}: {e}", exc_info=True)
+            if st._is_running_with_streamlit:
+                st.error(f"Error closing trade ID {trade.id}: {e}")
 
     def get_performance_summary(self) -> Dict[str, Any]:
         """Get performance summary"""

@@ -1,4 +1,5 @@
 import logging
+import streamlit as st
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 from indicators import scan_multiple_symbols, get_top_symbols
@@ -15,15 +16,32 @@ logger = get_logger(__name__)
 # Core Signal Utilities
 # -------------------------------
 
-def get_usdt_symbols(limit: int = 50) -> List[str]:
+@st.cache_data
+def get_usdt_symbols(limit: int = 50, _trading_mode: str = "virtual") -> List[str]:
+    """
+    Fetch top USDT symbols, using Bybit API for real mode if connected, otherwise fallback to defaults.
+    """
     try:
-        symbols = get_top_symbols(limit)
-        if not symbols:
-            logger.warning("No symbols from API, using fallback list")
-            symbols = ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
-        return symbols[:limit]
+        if _trading_mode == "real" and "bybit_client" in st.session_state and st.session_state.bybit_client and st.session_state.bybit_client.is_connected():
+            try:
+                symbols = get_top_symbols(limit)
+                if not symbols:
+                    logger.warning("No symbols from Bybit API, using fallback list")
+                    symbols = ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
+                logger.info(f"Fetched {len(symbols)} USDT symbols from Bybit API for real mode")
+                return symbols[:limit]
+            except Exception as e:
+                logger.error(f"Error fetching USDT symbols from Bybit API: {e}")
+                return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
+        else:
+            symbols = get_top_symbols(limit)
+            if not symbols:
+                logger.warning("No symbols from API, using fallback list")
+                symbols = ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
+            logger.info(f"Fetched {len(symbols)} USDT symbols for virtual mode")
+            return symbols[:limit]
     except Exception as e:
-        logger.error(f"Error fetching USDT symbols: {e}")
+        logger.error(f"Error in get_usdt_symbols: {e}")
         return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
 
 def calculate_signal_score(analysis: Dict[str, Any]) -> float:
@@ -101,23 +119,29 @@ def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
 # Signal Generation
 # -------------------------------
 
+@st.cache_data
 def generate_signals(
     symbols: List[str],
     interval: str = "60",
     top_n: int = 10,
-    trading_mode: str = "virtual"
+    _trading_mode: str = None
 ) -> List[Dict[str, Any]]:
+    """
+    Generate trading signals for given symbols, respecting trading mode from session state.
+    """
+    trading_mode = _trading_mode or st.session_state.get("trading_mode", "virtual")
     logger.info(f"Generating signals for {len(symbols)} symbols in {trading_mode} mode")
+    
     raw_analyses = scan_multiple_symbols(symbols, interval, max_workers=5)
     if not raw_analyses:
         logger.warning("No analysis results")
         return []
 
     scored_signals = []
+    min_score = 50 if trading_mode == "real" else 40
     for analysis in raw_analyses:
         score = calculate_signal_score(analysis)
         analysis["score"] = score
-        min_score = 50 if trading_mode == "real" else 40
         if score >= min_score:
             scored_signals.append(analysis)
 
@@ -173,8 +197,16 @@ def generate_signals(
 
         try:
             db_manager.add_signal(signal_obj)
+            logger.info(f"Saved signal for {signal_obj.symbol} to database")
         except Exception as e:
             logger.error(f"Failed to save signal {enhanced.get('symbol')} to DB: {e}")
+
+    if final_signals and trading_mode == "real":
+        try:
+            send_all_notifications(final_signals)
+            logger.info(f"Sent notifications for {len(final_signals)} real mode signals")
+        except Exception as e:
+            logger.error(f"Failed to send notifications for real mode signals: {e}")
 
     return final_signals
 
@@ -211,6 +243,9 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
     """
     Analyze a single symbol and return the enhanced signal dictionary.
     """
+    trading_mode = st.session_state.get("trading_mode", "virtual")
+    logger.info(f"Analyzing single symbol {symbol} in {trading_mode} mode")
+
     raw_analyses = scan_multiple_symbols([symbol], interval, max_workers=1)
     if not raw_analyses:
         logger.warning(f"No analysis found for {symbol}")
@@ -218,6 +253,10 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
 
     analysis = raw_analyses[0]
     analysis["score"] = calculate_signal_score(analysis)
+    if (trading_mode == "real" and analysis["score"] < 50) or (trading_mode == "virtual" and analysis["score"] < 40):
+        logger.info(f"Signal score for {symbol} too low: {analysis['score']}")
+        return {}
+
     enhanced = enhance_signal(analysis)
 
     # Save to DB
@@ -241,8 +280,16 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
 
     try:
         db_manager.add_signal(signal_obj)
+        logger.info(f"Saved signal for {symbol} to database")
     except Exception as e:
         logger.error(f"Failed to save signal {enhanced.get('symbol')} to DB: {e}")
+
+    if trading_mode == "real":
+        try:
+            send_all_notifications([enhanced])
+            logger.info(f"Sent notification for real mode signal {symbol}")
+        except Exception as e:
+            logger.error(f"Failed to send notification for {symbol}: {e}")
 
     return enhanced
 
@@ -251,11 +298,15 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
 # -------------------------------
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-
-    symbols = get_usdt_symbols(limit=20)
+    
+    # Initialize session state for standalone testing
+    if "trading_mode" not in st.session_state:
+        st.session_state.trading_mode = "virtual"
+    
+    symbols = get_usdt_symbols(limit=20, _trading_mode=st.session_state.trading_mode)
     signals = generate_signals(symbols, interval="60", top_n=5)
     summary = get_signal_summary(signals)
     logger.info(f"Signal Summary: {summary}")
 
-    if signals:
+    if signals and st.session_state.trading_mode == "real":
         send_all_notifications(signals)
