@@ -109,7 +109,7 @@ def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
     enhanced.update({
         "entry": round(price, 6),
         "trail": round(atr, 6),  # For trailing SL
-        "margin_usdt": 2.0,
+        "margin_usdt": 1.0,
         "bb_slope": bb_slope,
         "market": market_type,
         "leverage": leverage,
