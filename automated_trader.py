@@ -170,16 +170,18 @@ class AutomatedTrader:
             logger.error(f"Error resetting stats: {e}", exc_info=True)
 
     async def _trading_loop(self, status_container=None):
-        """Main automated trading loop with retry logic"""
+        """Main automated trading loop with live countdown and effective rescan trigger"""
         try:
             while self.is_running and not self.stop_event.is_set():
                 try:
                     trading_mode = st.session_state.get("trading_mode", "virtual")
-                    # Update status
+                    
+                    # Notify scan start
                     if status_container:
                         status_container.info(f"🤖 Scanning markets in {trading_mode.title()} mode... Last scan: {self.stats.get('last_scan', 'Never')}")
-                    
-                    # Sync real balance if in real mode
+                    print(f"\n🚀 Starting new market scan in {trading_mode.title()} mode...")
+
+                    # Sync balance for real trading
                     if trading_mode == "real":
                         success = self.engine.sync_real_balance()
                         if not success:
@@ -189,37 +191,51 @@ class AutomatedTrader:
                             await asyncio.sleep(60)
                             continue
                         self.engine.get_open_real_trades()
-                    
-                    # Scan for signals
+
+                    # 1️⃣ Scan for signals and trade
                     await self._scan_and_trade(trading_mode)
-                    
-                    # Monitor existing positions
+
+                    # 2️⃣ Monitor existing positions
                     await self._monitor_positions(trading_mode)
-                    
-                    # Update last scan time
+
+                    # 3️⃣ Update timestamp
                     self.stats["last_scan"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    # Countdown to next scan
+
+                    # 4️⃣ Countdown until next scan
                     next_scan_time = time.time() + self.scan_interval
+                    print(f"\n⏳ Waiting {self.scan_interval//60} minutes until next scan...\n")
                     while time.time() < next_scan_time and self.is_running and not self.stop_event.is_set():
                         remaining = int(next_scan_time - time.time())
+                        hours, rem = divmod(remaining, 3600)
+                        mins, secs = divmod(rem, 60)
+                        time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+
+                        # Show countdown in terminal
+                        print(f"\r🕒 Next scan in {time_str} (hh:mm:ss)", end="", flush=True)
+
+                        # Update Streamlit (optional)
                         if status_container:
-                            mins, secs = divmod(remaining, 60)
-                            status_container.info(f"⏳ Next scan in {mins:02d}:{secs:02d} | Last scan: {self.stats.get('last_scan', 'Never')}")
+                            status_container.info(
+                                f"🕒 Next scan in {time_str} | Last scan: {self.stats.get('last_scan', 'Never')}"
+                            )
+
                         await asyncio.sleep(1)
-                    
+
+                    print("\r🚀 Countdown finished — initiating next market scan...       \n")
+
                 except Exception as e:
                     logger.error(f"Error in trading loop: {e}", exc_info=True)
                     if status_container:
                         status_container.warning(f"Trading loop error: {e}")
-                    await asyncio.sleep(60)  # Wait 1 minute on error
-                    
+                    await asyncio.sleep(60)  # retry after 1 minute
+
         except asyncio.CancelledError:
             logger.info("Trading loop cancelled")
         except Exception as e:
             logger.critical(f"Unexpected trading loop error: {e}", exc_info=True)
             if status_container:
                 status_container.error(f"Critical trading loop error: {e}")
+
 
     async def _scan_and_trade(self, trading_mode: str):
         """Scan for signals and execute trades"""
