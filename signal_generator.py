@@ -2,7 +2,7 @@ import logging
 import streamlit as st
 from typing import List, Dict, Any
 from datetime import datetime, timezone
-from indicators import scan_multiple_symbols, get_top_symbols
+from indicators import scan_multiple_symbols, get_top_symbols, analyze_symbol
 from utils import normalize_signal
 from ml import MLFilter
 from notifications import send_all_notifications
@@ -49,14 +49,12 @@ def calculate_signal_score(analysis: Dict[str, Any]) -> float:
     indicators = analysis.get("indicators", {})
 
     rsi = indicators.get("rsi", 50)
-    if 20 <= rsi <= 30 or 70 <= rsi <= 80:
+    if 20 <= rsi <= 25 or 75 <= rsi <= 80:  # Adjusted for tighter ranges
         score += 10
     elif rsi < 20 or rsi > 80:
         score += 5
 
-    macd_hist = indicators.get("macd_histogram", 0)
-    if abs(macd_hist) > 0.01:
-        score += 8
+    # macd_hist not in original, skipping unless added
 
     vol_ratio = indicators.get("volume_ratio", 1)
     if vol_ratio > 2:
@@ -65,15 +63,24 @@ def calculate_signal_score(analysis: Dict[str, Any]) -> float:
         score += 6
 
     vol = indicators.get("volatility", 0)
+    if vol > 5:  # Filter high volatility: set score to 0 to skip
+        logger.info(f"High volatility ({vol}) for {analysis['symbol']}, skipping signal")
+        return 0
     if 0.5 <= vol <= 3:
         score += 5
-    elif vol > 5:
-        score -= 10
 
     trend_score = indicators.get("trend_score", 0)
     score += trend_score * 3
 
     return min(100, max(0, score))
+
+def is_market_bullish(interval: str = "60") -> bool:
+    """Check if overall market (BTC) is bullish based on trend score"""
+    btc_analysis = analyze_symbol("BTCUSDT", interval)
+    if not btc_analysis:
+        return False
+    btc_trend_score = btc_analysis["indicators"].get("trend_score", 0)
+    return btc_trend_score >= 3
 
 def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
     indicators = analysis.get("indicators", {})
@@ -81,8 +88,8 @@ def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
     atr = indicators.get("atr", 0)
     side = analysis.get("side", "Buy").title()
     leverage = 15
-    atr_multiplier = 2
-    risk_reward = 2
+    atr_multiplier = 3  # Increased from 2 for volatile crypto (wider SL to avoid whipsaws)
+    risk_reward = 3  # Upgraded from 2 to 3:1 for better profitability
 
     # Bollinger Bands slope
     bb_upper = indicators.get("bb_upper", 0)
@@ -101,7 +108,7 @@ def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
     enhanced = analysis.copy()
     enhanced.update({
         "entry": round(price, 6),
-        "trail": round(atr, 6),
+        "trail": round(atr, 6),  # For trailing SL
         "margin_usdt": 2.0,
         "bb_slope": bb_slope,
         "market": market_type,
@@ -111,7 +118,7 @@ def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": datetime.now(timezone.utc)
     })
 
-    # Normalize signal to include SL/TP
+    # Normalize signal to include SL/TP (assuming normalize_signal computes them based on params)
     enhanced = normalize_signal(enhanced)
     return enhanced
 
@@ -132,6 +139,9 @@ def generate_signals(
     trading_mode = _trading_mode or st.session_state.get("trading_mode", "virtual")
     logger.info(f"Generating signals for {len(symbols)} symbols in {trading_mode} mode")
     
+    # Check overall market trend (BTC) to align signals
+    market_bullish = is_market_bullish(interval)
+    
     raw_analyses = scan_multiple_symbols(symbols, interval, max_workers=5)
     if not raw_analyses:
         logger.warning("No analysis results")
@@ -142,7 +152,14 @@ def generate_signals(
     for analysis in raw_analyses:
         score = calculate_signal_score(analysis)
         analysis["score"] = score
+        # Align with market trend: skip buy if market not bullish, skip sell if market bullish
         if score >= min_score:
+            if analysis["signal_type"] == "buy" and not market_bullish:
+                logger.info(f"Skipping buy signal for {analysis['symbol']} due to bearish market trend")
+                continue
+            elif analysis["signal_type"] == "sell" and market_bullish:
+                logger.info(f"Skipping sell signal for {analysis['symbol']} due to bullish market trend")
+                continue
             scored_signals.append(analysis)
 
     if not scored_signals:
@@ -246,6 +263,9 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
     trading_mode = st.session_state.get("trading_mode", "virtual")
     logger.info(f"Analyzing single symbol {symbol} in {trading_mode} mode")
 
+    # Check market trend for alignment
+    market_bullish = is_market_bullish(interval)
+
     raw_analyses = scan_multiple_symbols([symbol], interval, max_workers=1)
     if not raw_analyses:
         logger.warning(f"No analysis found for {symbol}")
@@ -253,6 +273,13 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
 
     analysis = raw_analyses[0]
     analysis["score"] = calculate_signal_score(analysis)
+    if analysis["signal_type"] == "buy" and not market_bullish:
+        logger.info(f"Skipping buy signal for {symbol} due to bearish market trend")
+        return {}
+    elif analysis["signal_type"] == "sell" and market_bullish:
+        logger.info(f"Skipping sell signal for {symbol} due to bullish market trend")
+        return {}
+
     if (trading_mode == "real" and analysis["score"] < 50) or (trading_mode == "virtual" and analysis["score"] < 40):
         logger.info(f"Signal score for {symbol} too low: {analysis['score']}")
         return {}

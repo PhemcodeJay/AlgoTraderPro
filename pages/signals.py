@@ -238,7 +238,7 @@ def main():
                     symbols_to_scan, 
                     interval="60", 
                     top_n=top_n_signals,
-                    trading_mode=trading_mode
+                    _trading_mode=trading_mode  # Changed from trading_mode to _trading_mode
                 )
                 filtered_signals = [s for s in signals if float(str(s.get('score', '0%')).replace('%', '')) >= min_score]
                 st.session_state.generated_signals = filtered_signals

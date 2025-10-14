@@ -13,6 +13,9 @@ logger = get_logger(__name__)
 INTERVALS = ["1", "3", "5", "15", "30", "60", "120", "240", "360", "720", "D", "W"]
 ML_ENABLED = True  # Feature flag for ML filtering
 
+# Blacklist for high-volatility or low-quality assets (e.g., meme coins like 1000SATS)
+BLACKLIST_SYMBOLS = ["1000SATSUSDT"]  # Add more as needed, e.g., based on patterns or known volatile assets
+
 def get_candles(symbol: str, interval: str, limit: int = 200, retries: int = 3) -> List[Dict]:
     """Fetch candlestick data from Bybit API with retries"""
     time.sleep(0.1)  # Small delay to avoid rate limits
@@ -177,8 +180,24 @@ def bollinger_bands(prices: List[float], period: int = 20, std_dev: float = 2) -
         "lower": lower_band
     }
 
+def atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> List[float]:
+    """Average True Range"""
+    if len(highs) < period:
+        return [0.0] * len(highs)
+    
+    tr_values = []
+    for i in range(len(highs)):
+        if i == 0:
+            tr = highs[0] - lows[0]
+        else:
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        tr_values.append(tr)
+    
+    atr_values = sma(tr_values, period)
+    return atr_values
+
 def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
-    """Calculate technical indicators (SMA 20, SMA 200, EMA 9, EMA 21, Bollinger Bands, RSI, Stochastic RSI, Volume)"""
+    """Calculate technical indicators (SMA 20, SMA 200, EMA 9, EMA 21, Bollinger Bands, RSI, Stochastic RSI, Volume, ATR)"""
     try:
         if not candles or len(candles) < 200:
             return {}
@@ -201,24 +220,33 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         # Volatility indicators
         bb_data = bollinger_bands(closes, period=20, std_dev=2)
         
+        # ATR for dynamic SL/TP
+        atr_14 = atr(highs, lows, closes, 14)
+        
         # Current values (last in arrays)
         current_price = closes[-1]
-        current_sma_20 = sma_20[-1] if sma_20 else current_price
-        current_sma_200 = sma_200[-1] if sma_200 else current_price
-        current_ema_9 = ema_9[-1] if ema_9 else current_price
-        current_ema_21 = ema_21[-1] if ema_21 else current_price
+        current_sma_20 = sma_20[-1] if sma_20[-1] != 0 else None
+        current_sma_200 = sma_200[-1] if sma_200[-1] != 0 else None
+        current_ema_9 = ema_9[-1] if ema_9[-1] != 0 else None
+        current_ema_21 = ema_21[-1] if ema_21[-1] != 0 else None
         current_rsi = rsi_14[-1] if rsi_14 else 50
         current_stoch_k = stoch_rsi_data["k"][-1] if stoch_rsi_data["k"] else 50
         current_stoch_d = stoch_rsi_data["d"][-1] if stoch_rsi_data["d"] else 50
         current_bb_upper = bb_data["upper"][-1] if bb_data["upper"] else 0
         current_bb_lower = bb_data["lower"][-1] if bb_data["lower"] else 0
         current_volume = volumes[-1] if volumes else 0
+        current_atr = atr_14[-1] if atr_14 else 0
+        
+        # Skip if any key indicator is invalid (e.g., defaults due to insufficient data)
+        if None in [current_sma_20, current_sma_200, current_ema_9, current_ema_21] or current_atr == 0:
+            logger.warning("Incomplete indicators, skipping asset")
+            return {}
         
         # Volume analysis
         avg_volume = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else 0
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
         
-        # Trend analysis
+        # Trend analysis with short-term downtrend check for profitability
         trend_score = 0
         if len(sma_20) > 1 and len(sma_200) > 1:
             if sma_20[-1] > sma_200[-1]:
@@ -229,6 +257,11 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
                 trend_score += 1
             if ema_9[-1] > ema_21[-1]:
                 trend_score += 1
+        # Reduce trend score if recent 10-period price change is negative (to avoid buy in downtrends)
+        if len(closes) >= 10:
+            recent_change = (closes[-1] - closes[-10]) / closes[-10] * 100
+            if recent_change < 0:
+                trend_score -= 1  # Penalize for short-term downtrend
         
         return {
             "price": current_price,
@@ -244,8 +277,9 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
             "bb_middle": bb_data["middle"][-1] if bb_data["middle"] else current_price,
             "volume": current_volume,
             "volume_ratio": volume_ratio,
-            "trend_score": trend_score,
-            "volatility": ((current_bb_upper - current_bb_lower) / current_price * 100) if current_price > 0 else 0
+            "trend_score": max(0, trend_score),  # Ensure non-negative
+            "volatility": ((current_bb_upper - current_bb_lower) / current_price * 100) if current_price > 0 else 0,
+            "atr": current_atr
         }
         
     except Exception as e:
@@ -267,11 +301,12 @@ def get_top_symbols(limit: int = 50) -> List[str]:
             usdt_pairs = []
             for ticker in tickers:
                 symbol = ticker.get("symbol", "")
-                if symbol.endswith("USDT"):
+                if symbol.endswith("USDT") and symbol not in BLACKLIST_SYMBOLS:
                     volume = float(ticker.get("volume24h", 0))
                     price = float(ticker.get("lastPrice", 0))
                     turnover = float(ticker.get("turnover24h", 0))
-                    if volume > 100000 and price > 0 and turnover > 100000:
+                    # Additional filter: skip very low-price assets (e.g., <0.001) prone to high volatility
+                    if volume > 100000 and price > 0.001 and turnover > 100000:
                         usdt_pairs.append({
                             "symbol": symbol,
                             "volume": volume,
@@ -315,24 +350,24 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
             signals.append("BULLISH_MA_CROSS")
         elif price < sma_200 and ema_9 < ema_21:
             score += 20
-            signals.append("BEARISH_MA_CRAWSS")
+            signals.append("BEARISH_MA_CROSS")  # Fixed typo from original
         
-        # RSI signals
+        # RSI signals (tightened for profitability in volatile markets)
         rsi = indicators.get("rsi", 50)
-        if rsi < 30:
+        if rsi < 25:  # Tightened from 30
             score += 20
             signals.append("RSI_OVERSOLD")
-        elif rsi > 70:
+        elif rsi > 75:  # Tightened from 70 for overbought
             score += 20
             signals.append("RSI_OVERBOUGHT")
         
-        # Stochastic RSI signals
+        # Stochastic RSI signals (tightened)
         stoch_k = indicators.get("stoch_k", 50)
         stoch_d = indicators.get("stoch_d", 50)
-        if stoch_k < 20 and stoch_k > stoch_d:
+        if stoch_k < 15 and stoch_k > stoch_d:  # Tightened from 20
             score += 20
             signals.append("STOCH_RSI_OVERSOLD")
-        elif stoch_k > 80 and stoch_k < stoch_d:
+        elif stoch_k > 85 and stoch_k < stoch_d:  # Tightened from 80
             score += 20
             signals.append("STOCH_RSI_OVERBOUGHT")
         
