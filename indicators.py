@@ -13,38 +13,44 @@ logger = get_logger(__name__)
 INTERVALS = ["1", "3", "5", "15", "30", "60", "120", "240", "360", "720", "D", "W"]
 ML_ENABLED = True  # Feature flag for ML filtering
 
-def get_candles(symbol: str, interval: str, limit: int = 200) -> List[Dict]:
-    """Fetch candlestick data from Bybit API"""
-    try:
-        url = "https://api.bybit.com/v5/market/kline"
-        params = {
-            "category": "linear",
-            "symbol": symbol,
-            "interval": interval,
-            "limit": str(limit)
-        }
-        
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get("retCode") == 0 and "result" in data:
-            klines = []
-            tick_size = get_symbol_precision(symbol)
-            for k in data["result"]["list"]:
-                klines.append({
-                    "time": int(k[0]),
-                    "open": round_to_precision(float(k[1]), tick_size),
-                    "high": round_to_precision(float(k[2]), tick_size),
-                    "low": round_to_precision(float(k[3]), tick_size),
-                    "close": round_to_precision(float(k[4]), tick_size),
-                    "volume": float(k[5])
-                })
-            return sorted(klines, key=lambda x: x["time"])
-        return []
-    except Exception as e:
-        logger.error(f"Error fetching candles for {symbol}: {e}")
-        return []
+def get_candles(symbol: str, interval: str, limit: int = 200, retries: int = 3) -> List[Dict]:
+    """Fetch candlestick data from Bybit API with retries"""
+    time.sleep(0.1)  # Small delay to avoid rate limits
+    for attempt in range(retries):
+        try:
+            url = "https://api.bybit.com/v5/market/kline"
+            params = {
+                "category": "linear",
+                "symbol": symbol,
+                "interval": interval,
+                "limit": str(limit)
+            }
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("retCode") == 0 and "result" in data:
+                klines = []
+                tick_size = get_symbol_precision(symbol)
+                for k in data["result"]["list"]:
+                    klines.append({
+                        "time": int(k[0]),
+                        "open": round_to_precision(float(k[1]), tick_size),
+                        "high": round_to_precision(float(k[2]), tick_size),
+                        "low": round_to_precision(float(k[3]), tick_size),
+                        "close": round_to_precision(float(k[4]), tick_size),
+                        "volume": float(k[5])
+                    })
+                return sorted(klines, key=lambda x: x["time"])
+            logger.warning(f"Invalid response for {symbol}: {data.get('retMsg', 'No message')}")
+            return []
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1}/{retries} failed for {symbol}: {e}")
+            if attempt < retries - 1:
+                time.sleep(1)  # Wait before retrying
+            continue
+    logger.error(f"Failed to fetch candles for {symbol} after {retries} attempts")
+    return []
 
 def sma(prices: List[float], period: int) -> List[float]:
     """Simple Moving Average"""
@@ -246,7 +252,7 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         logger.error(f"Error calculating indicators: {e}")
         return {}
 
-def get_top_symbols(limit: int = 100) -> List[str]:
+def get_top_symbols(limit: int = 50) -> List[str]:
     """Get top USDT trading pairs by volume"""
     try:
         url = "https://api.bybit.com/v5/market/tickers"
@@ -265,7 +271,9 @@ def get_top_symbols(limit: int = 100) -> List[str]:
                 if symbol.endswith("USDT"):
                     volume = float(ticker.get("volume24h", 0))
                     price = float(ticker.get("lastPrice", 0))
-                    if volume > 0 and price > 0:
+                    turnover = float(ticker.get("turnover24h", 0))
+                    # Filter out low-liquidity or invalid symbols
+                    if volume > 100000 and price > 0 and turnover > 100000:
                         usdt_pairs.append({
                             "symbol": symbol,
                             "volume": volume,
@@ -380,16 +388,17 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
         logger.error(f"Error analyzing {symbol}: {e}")
         return {}
 
-def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers: int = 10) -> List[Dict]:
+def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers: int = 20, timeout: int = 60) -> List[Dict]:
     """Scan multiple symbols concurrently"""
     try:
         results = []
+        unfinished = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_symbol = {
                 executor.submit(analyze_symbol, symbol, interval): symbol
                 for symbol in symbols
             }
-            for future in as_completed(future_to_symbol, timeout=60):
+            for future in as_completed(future_to_symbol, timeout=timeout):
                 symbol = future_to_symbol[future]
                 try:
                     result = future.result()
@@ -397,6 +406,10 @@ def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers:
                         results.append(result)
                 except Exception as e:
                     logger.error(f"Error analyzing {symbol}: {e}")
+            # Check for unfinished futures
+            unfinished = [symbol for future, symbol in future_to_symbol.items() if not future.done()]
+            if unfinished:
+                logger.warning(f"Error scanning symbols: {len(unfinished)} (of {len(symbols)}) futures unfinished: {unfinished}")
         if len(results) < len(symbols):
             logger.warning(f"Only {len(results)} of {len(symbols)} symbols analyzed successfully")
         results.sort(key=lambda x: x.get("score", 0), reverse=True)

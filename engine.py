@@ -391,6 +391,26 @@ class TradingEngine:
                 tp = float(pos.get("takeProfit") or 0)
                 created_at = datetime.fromtimestamp(float(pos.get("createdTime")) / 1000, timezone.utc)
 
+                # Define trade_data for both new and existing trades
+                trade_data = {
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": qty,
+                    "entry_price": entry_price,
+                    "order_id": position_id,
+                    "virtual": False,
+                    "status": "open",
+                    "score": 0.0,
+                    "strategy": "Auto",
+                    "leverage": leverage,
+                    "sl": sl,
+                    "tp": tp,
+                    "trail": 0.0,
+                    "liquidation": float(pos.get("liqPrice", 0)),
+                    "margin_usdt": float(pos.get("positionValue", 0)) / leverage,
+                    "timestamp": created_at
+                }
+
                 # Check if trade exists in DB
                 existing_trade = self.db.get_trade_by_order_id(position_id)
                 if existing_trade:
@@ -417,27 +437,9 @@ class TradingEngine:
                         logger.info(f"Updated trade {position_id} for {symbol} in DB")
                     except Exception as e:
                         self.db.session.rollback()
-                        logger.error(f"Failed to update trade {position_id}: {e}")
+                        logger.error(f"Failed to update trade {position_id}: {e}", exc_info=True)
                 else:
                     # Create new trade
-                    trade_data = {
-                        "symbol": symbol,
-                        "side": side,
-                        "qty": qty,
-                        "entry_price": entry_price,
-                        "order_id": position_id,
-                        "virtual": False,
-                        "status": "open",
-                        "score": 0.0,
-                        "strategy": "Auto",
-                        "leverage": leverage,
-                        "sl": sl,
-                        "tp": tp,
-                        "trail": 0.0,
-                        "liquidation": float(pos.get("liqPrice", 0)),
-                        "margin_usdt": float(pos.get("positionValue", 0)) / leverage,
-                        "timestamp": created_at
-                    }
                     success = self.db.add_trade(trade_data)
                     if success:
                         logger.info(f"Added new real trade {position_id} for {symbol} to DB")
@@ -474,7 +476,7 @@ class TradingEngine:
                         logger.info(f"Closed stale trade {trade.order_id} in DB")
                     except Exception as e:
                         self.db.session.rollback()
-                        logger.error(f"Failed to close stale trade {trade.order_id}: {e}")
+                        logger.error(f"Failed to close stale trade {trade.order_id}: {e}", exc_info=True)
 
             return open_trades
 

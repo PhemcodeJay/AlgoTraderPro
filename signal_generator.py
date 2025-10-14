@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 # Core Signal Utilities
 # -------------------------------
 
-def get_usdt_symbols(limit: int = 100) -> List[str]:
+def get_usdt_symbols(limit: int = 50) -> List[str]:
     try:
         symbols = get_top_symbols(limit)
         if not symbols:

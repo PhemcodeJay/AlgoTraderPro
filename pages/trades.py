@@ -12,7 +12,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import TradingEngine
 from db import db_manager, TradeModel
 from automated_trader import AutomatedTrader
-from utils import calculate_portfolio_metrics
 from signal_generator import get_usdt_symbols
 from sqlalchemy import update
 
@@ -598,22 +597,30 @@ def main():
         all_trades = engine.get_closed_virtual_trades() + engine.get_closed_real_trades()
         
         if all_trades:
-            metrics = calculate_portfolio_metrics([t.to_dict() for t in all_trades])
+            pnls = [t.pnl or 0 for t in all_trades if t.pnl is not None]
+            total_trades = len(all_trades)
+            total_pnl = sum(pnls)
+            avg_pnl = total_pnl / total_trades if total_trades > 0 else 0.0
+            profitable_trades = sum(1 for p in pnls if p > 0)
+            win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0.0
+            best_trade = max(pnls) if pnls else 0.0
+            worst_trade = min(pnls) if pnls else 0.0
+            losing_trades = total_trades - profitable_trades
             
             # Main metrics
             metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
             
             with metric_col1:
-                st.metric("Total Trades", metrics['total_trades'])
+                st.metric("Total Trades", total_trades)
             
             with metric_col2:
-                st.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
+                st.metric("Win Rate", f"{win_rate:.1f}%")
             
             with metric_col3:
-                st.metric("Total P&L", f"${metrics['total_pnl']:.2f}")
+                st.metric("Total P&L", f"${total_pnl:.2f}")
             
             with metric_col4:
-                st.metric("Avg P&L/Trade", f"${metrics['avg_pnl']:.2f}")
+                st.metric("Avg P&L/Trade", f"${avg_pnl:.2f}")
             
             # Additional metrics
             st.markdown("### 🎯 Detailed Statistics")
@@ -621,13 +628,12 @@ def main():
             detail_col1, detail_col2 = st.columns(2)
             
             with detail_col1:
-                st.metric("Profitable Trades", metrics['profitable_trades'])
-                st.metric("Best Trade", f"${metrics['best_trade']:.2f}")
+                st.metric("Profitable Trades", profitable_trades)
+                st.metric("Best Trade", f"${best_trade:.2f}")
             
             with detail_col2:
-                losing_trades = metrics['total_trades'] - metrics['profitable_trades']
                 st.metric("Losing Trades", losing_trades)
-                st.metric("Worst Trade", f"${metrics['worst_trade']:.2f}")
+                st.metric("Worst Trade", f"${worst_trade:.2f}")
             
             # Performance by symbol
             st.markdown("### 📈 Performance by Symbol")
