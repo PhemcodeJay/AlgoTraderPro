@@ -45,12 +45,18 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
         engine = get_engine()
         
         # Get trade from database
-        open_trades = [t for t in db_manager.get_trades(limit=1000) if t.status == "open"]
-        trade = next((t for t in open_trades if str(t.id) == str(trade_id) or str(t.order_id) == str(trade_id)), None)
+        open_trades = [t for t in db_manager.get_trades(limit=1000) if t.status.lower() == "open"]
+        logger.info(f"Searching for trade_id: {trade_id}, available IDs: {[str(t.id) for t in open_trades]}, order_ids: {[str(t.order_id) for t in open_trades]}")
+        trade = next((t for t in open_trades if str(t.id) == trade_id or str(t.order_id) == trade_id), None)
         
         if not trade:
-            st.error(f"Trade {trade_id} not found")
+            st.error(f"Trade {trade_id} not found in open trades")
+            logger.error(f"Trade {trade_id} not found. Open trades: {len(open_trades)}")
+            for t in open_trades[:5]:  # Log up to 5 trades for debugging
+                logger.debug(f"Trade: ID={t.id}, Order ID={t.order_id}, Symbol={t.symbol}, Status={t.status}")
             return False
+        
+        logger.info(f"Found trade: {trade.symbol}, ID: {trade.id}, Order ID: {trade.order_id}, Virtual: {trade.virtual}")
         
         # Initialize variables
         current_price = engine.client.get_current_price(trade.symbol)
@@ -59,13 +65,14 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
         # Handle real trades
         if not virtual:
             try:
-                # Fetch position data
+                logger.info(f"Fetching positions for {trade.symbol}, side={trade.side}")
                 positions = await engine.client.get_positions(symbol=trade.symbol)
+                logger.info(f"Positions retrieved: {len(positions)} positions")
                 position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
                 
                 if position:
-                    # Close position on Bybit
                     close_side = "Sell" if trade.side.upper() == "BUY" else "Buy"
+                    logger.info(f"Closing position for {trade.symbol}, side={close_side}, qty={trade.qty}")
                     close_response = await engine.client.place_order(
                         symbol=trade.symbol,
                         side=close_side,
@@ -73,17 +80,18 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
                         leverage=trade.leverage or 10,
                         mode="CROSS"
                     )
+                    logger.info(f"Close response: {close_response}")
                     
                     if "error" in close_response or not close_response.get("order_id"):
                         st.error(f"Failed to close position for {trade.symbol}: {close_response.get('error', 'Unknown error')}")
                         logger.error(f"Failed to close position for {trade.symbol}: {close_response}")
                         return False
                     
-                    # Use Bybit's unrealized PnL and mark price
                     pnl = float(position.get("unrealized_pnl", 0.0))
                     current_price = float(position.get("mark_price", current_price))
                 else:
                     st.warning(f"No active position found for {trade.symbol}. Marking trade as closed.")
+                    logger.warning(f"No active position for {trade.symbol}")
                     pnl = 0.0
             except Exception as e:
                 st.error(f"Failed to fetch/close position for {trade.symbol}: {e}")
@@ -100,21 +108,24 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
             return False
         
         try:
+            logger.info(f"Updating trade ID: {trade.id}, Order ID: {trade.order_id} to closed, exit_price={current_price}, pnl={pnl}")
             db_manager.session.execute(
                 update(TradeModel)
-                .where(TradeModel.order_id == trade.order_id)
+                .where(TradeModel.id == int(trade.id))  # Convert to int for database
                 .values(
                     status="closed",
                     exit_price=current_price,
                     pnl=pnl,
-                    closed_at=datetime.now(timezone.utc)
+                    closed_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc)
                 )
             )
             db_manager.session.commit()
+            logger.info(f"Trade ID: {trade.id}, Order ID: {trade.order_id} updated successfully")
             success = True
         except Exception as e:
             db_manager.session.rollback()
-            logger.error(f"Database error updating trade {trade.order_id}: {e}", exc_info=True)
+            logger.error(f"Database error updating trade ID: {trade.id}, Order ID: {trade.order_id}: {e}", exc_info=True)
             st.error(f"Database error updating trade: {e}")
             return False
         
@@ -124,6 +135,7 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
                 engine.update_virtual_balances(pnl)
             
             st.success(f"✅ Trade closed successfully! PnL: ${pnl:.2f}")
+            st.cache_data.clear()  # Clear cache to ensure UI refresh
             return True
         else:
             st.error("❌ Failed to close trade in database")
@@ -168,10 +180,12 @@ async def display_trade_management():
                         st.write(f"**Trail:** ${trade.trail:.4f}" if trade.trail else "N/A")
                         st.write(f"**Liquidation:** ${trade.liquidation:.4f}" if trade.liquidation else "N/A")
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
-                    
-                    if st.button("❌ Close", key=f"close_virtual_{trade.id}"):
-                        if await close_trade_safely(str(trade.id), virtual=True):
-                            st.rerun()
+                        st.write(f"**ID:** {trade.id}")  # Display for debugging
+                        st.write(f"**Order ID:** {trade.order_id}")  # Display for debugging
+                        if st.button("❌ Close", key=f"close_virtual_{trade.id}_{trade.order_id}"):
+                            logger.info(f"Close button clicked for virtual trade ID: {trade.id}, Order ID: {trade.order_id}")
+                            if await close_trade_safely(str(trade.id), virtual=True):
+                                st.rerun()
         else:
             st.info("No open virtual trades")
     
@@ -182,8 +196,8 @@ async def display_trade_management():
         if real_trades:
             for i, trade in enumerate(real_trades):
                 with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
-                    # Fetch real-time position data from Bybit
                     try:
+                        logger.info(f"Fetching real-time position data for {trade.symbol}")
                         positions = await engine.client.get_positions(symbol=trade.symbol)
                         position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
                         current_price = float(position.get("mark_price", engine.client.get_current_price(trade.symbol))) if position else engine.client.get_current_price(trade.symbol)
@@ -211,10 +225,12 @@ async def display_trade_management():
                         st.write(f"**Trail:** ${trade.trail:.4f}" if trade.trail else "N/A")
                         st.write(f"**Liquidation:** ${trade.liquidation:.4f}" if trade.liquidation else "N/A")
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
-                    
-                    if st.button("❌ Close", key=f"close_real_{trade.id}"):
-                        if await close_trade_safely(str(trade.id), virtual=False):
-                            st.rerun()
+                        st.write(f"**ID:** {trade.id}")  # Display for debugging
+                        st.write(f"**Order ID:** {trade.order_id}")  # Display for debugging
+                        if st.button("❌ Close", key=f"close_real_{trade.id}_{trade.order_id}"):
+                            logger.info(f"Close button clicked for real trade ID: {trade.id}, Order ID: {trade.order_id}")
+                            if await close_trade_safely(str(trade.id), virtual=False):
+                                st.rerun()
         else:
             st.info("No open real trades")
 
@@ -281,7 +297,8 @@ def display_manual_trading():
                 "tp": take_profit if take_profit > 0 else None,
                 "trail": trail_value if trail_value > 0 else None,
                 "liquidation": liquidation_value if liquidation_value > 0 else None,
-                "margin_usdt": margin_value if margin_value > 0 else None
+                "margin_usdt": margin_value if margin_value > 0 else None,
+                "timestamp": datetime.now(timezone.utc)
             }
             
             # Add to database
@@ -301,7 +318,7 @@ def display_manual_trading():
                     if not success:
                         st.error("❌ Failed to execute real trade on Bybit")
                         # Rollback DB entry
-                        session = db_manager._get_session()
+                        session = db_manager.session
                         session.execute(
                             update(TradeModel)
                             .where(TradeModel.order_id == trade_data["order_id"])
@@ -452,6 +469,11 @@ def display_automation_tab():
                 st.info("No recent activity")
 
 def main():
+    # Verify database initialization
+    if not db_manager.session:
+        st.error("Database not initialized. Please check configuration.")
+        return
+    
     st.markdown("""
     <div style="text-align: center; padding: 1rem 0; border-bottom: 2px solid #00ff88; margin-bottom: 2rem;">
         <h1 style="color: #00ff88; margin: 0;">💼 Trading Center</h1>

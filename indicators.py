@@ -253,7 +253,6 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         return {}
 
 def get_top_symbols(limit: int = 50) -> List[str]:
-    """Get top USDT trading pairs by volume"""
     try:
         url = "https://api.bybit.com/v5/market/tickers"
         params = {"category": "linear"}
@@ -272,7 +271,6 @@ def get_top_symbols(limit: int = 50) -> List[str]:
                     volume = float(ticker.get("volume24h", 0))
                     price = float(ticker.get("lastPrice", 0))
                     turnover = float(ticker.get("turnover24h", 0))
-                    # Filter out low-liquidity or invalid symbols
                     if volume > 100000 and price > 0 and turnover > 100000:
                         usdt_pairs.append({
                             "symbol": symbol,
@@ -281,7 +279,9 @@ def get_top_symbols(limit: int = 50) -> List[str]:
                         })
             
             usdt_pairs.sort(key=lambda x: x["volume"], reverse=True)
-            return [pair["symbol"] for pair in usdt_pairs[:limit]]
+            symbols = [pair["symbol"] for pair in usdt_pairs[:limit]]
+            logger.info(f"Top {len(symbols)} symbols fetched: {symbols}")
+            return symbols
         
         return []
     except Exception as e:
@@ -388,8 +388,7 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
         logger.error(f"Error analyzing {symbol}: {e}")
         return {}
 
-def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers: int = 20, timeout: int = 60) -> List[Dict]:
-    """Scan multiple symbols concurrently"""
+def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers: int = 10, timeout: int = 120) -> List[Dict]:
     try:
         results = []
         unfinished = []
@@ -406,7 +405,6 @@ def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers:
                         results.append(result)
                 except Exception as e:
                     logger.error(f"Error analyzing {symbol}: {e}")
-            # Check for unfinished futures
             unfinished = [symbol for future, symbol in future_to_symbol.items() if not future.done()]
             if unfinished:
                 logger.warning(f"Error scanning symbols: {len(unfinished)} (of {len(symbols)}) futures unfinished: {unfinished}")
