@@ -3,8 +3,9 @@ import pandas as pd
 import asyncio
 import sys
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 import json
+import time
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -12,8 +13,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import TradingEngine
 from db import db_manager, TradeModel
 from automated_trader import AutomatedTrader
+from utils import calculate_portfolio_metrics
 from signal_generator import get_usdt_symbols
 from sqlalchemy import update
+from exceptions import APIException
 
 # Initialize database
 db = db_manager
@@ -45,18 +48,12 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
         engine = get_engine()
         
         # Get trade from database
-        open_trades = [t for t in db_manager.get_trades(limit=1000) if t.status.lower() == "open"]
-        logger.info(f"Searching for trade_id: {trade_id}, available IDs: {[str(t.id) for t in open_trades]}, order_ids: {[str(t.order_id) for t in open_trades]}")
-        trade = next((t for t in open_trades if str(t.id) == trade_id or str(t.order_id) == trade_id), None)
+        open_trades = [t for t in db_manager.get_trades(limit=1000) if t.status == "open"]
+        trade = next((t for t in open_trades if str(t.id) == str(trade_id) or str(t.order_id) == str(trade_id)), None)
         
         if not trade:
-            st.error(f"Trade {trade_id} not found in open trades")
-            logger.error(f"Trade {trade_id} not found. Open trades: {len(open_trades)}")
-            for t in open_trades[:5]:  # Log up to 5 trades for debugging
-                logger.debug(f"Trade: ID={t.id}, Order ID={t.order_id}, Symbol={t.symbol}, Status={t.status}")
+            st.error(f"Trade {trade_id} not found")
             return False
-        
-        logger.info(f"Found trade: {trade.symbol}, ID: {trade.id}, Order ID: {trade.order_id}, Virtual: {trade.virtual}")
         
         # Initialize variables
         current_price = engine.client.get_current_price(trade.symbol)
@@ -65,33 +62,49 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
         # Handle real trades
         if not virtual:
             try:
-                logger.info(f"Fetching positions for {trade.symbol}, side={trade.side}")
+                # Fetch position data
                 positions = await engine.client.get_positions(symbol=trade.symbol)
-                logger.info(f"Positions retrieved: {len(positions)} positions")
                 position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
                 
                 if position:
-                    close_side = "Sell" if trade.side.upper() == "BUY" else "Buy"
-                    logger.info(f"Closing position for {trade.symbol}, side={close_side}, qty={trade.qty}")
-                    close_response = await engine.client.place_order(
-                        symbol=trade.symbol,
-                        side=close_side,
-                        qty=trade.qty,
-                        leverage=trade.leverage or 10,
-                        mode="CROSS"
-                    )
-                    logger.info(f"Close response: {close_response}")
+                    # Close position on Bybit
+                    close_side = "Sell" if trade.side.upper() in ["BUY", "LONG"] else "Buy"
+                    try:
+                        close_response = await engine.client.place_order(
+                            symbol=trade.symbol,
+                            side=close_side,
+                            qty=trade.qty,
+                            leverage=trade.leverage or 10
+                        )
+                        if "error" in close_response:
+                            st.error(f"Failed to close position for {trade.symbol}: {close_response.get('error', 'Unknown error')}")
+                            logger.error(f"Failed to close position for {trade.symbol}: {close_response}")
+                            return False
+                    except APIException as e:
+                        if e.error_code == "100028":
+                            logger.warning(f"Unified account error closing {trade.order_id}: {e}. Retrying with cross margin mode.")
+                            close_response = await engine.client.place_order(
+                                symbol=trade.symbol,
+                                side=close_side,
+                                qty=trade.qty,
+                                leverage=trade.leverage or 10,
+                                mode="CROSS"
+                            )
+                            if "error" in close_response:
+                                st.error(f"Retry failed to close position for {trade.symbol}: {close_response.get('error', 'Unknown error')}")
+                                logger.error(f"Retry failed to close position for {trade.symbol}: {close_response}")
+                                return False
+                            logger.info(f"Closed real position {trade.order_id} on retry")
+                        else:
+                            st.error(f"Failed to close position for {trade.symbol}: {e}")
+                            logger.error(f"Failed to close position for {trade.symbol}: {e}", exc_info=True)
+                            return False
                     
-                    if "error" in close_response or not close_response.get("order_id"):
-                        st.error(f"Failed to close position for {trade.symbol}: {close_response.get('error', 'Unknown error')}")
-                        logger.error(f"Failed to close position for {trade.symbol}: {close_response}")
-                        return False
-                    
+                    # Use Bybit's unrealized PnL and mark price
                     pnl = float(position.get("unrealized_pnl", 0.0))
                     current_price = float(position.get("mark_price", current_price))
                 else:
                     st.warning(f"No active position found for {trade.symbol}. Marking trade as closed.")
-                    logger.warning(f"No active position for {trade.symbol}")
                     pnl = 0.0
             except Exception as e:
                 st.error(f"Failed to fetch/close position for {trade.symbol}: {e}")
@@ -108,24 +121,21 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
             return False
         
         try:
-            logger.info(f"Updating trade ID: {trade.id}, Order ID: {trade.order_id} to closed, exit_price={current_price}, pnl={pnl}")
             db_manager.session.execute(
                 update(TradeModel)
-                .where(TradeModel.id == int(trade.id))  # Convert to int for database
+                .where(TradeModel.order_id == trade.order_id)
                 .values(
                     status="closed",
                     exit_price=current_price,
                     pnl=pnl,
-                    closed_at=datetime.now(timezone.utc),
-                    updated_at=datetime.now(timezone.utc)
+                    closed_at=datetime.now(timezone.utc)
                 )
             )
             db_manager.session.commit()
-            logger.info(f"Trade ID: {trade.id}, Order ID: {trade.order_id} updated successfully")
             success = True
         except Exception as e:
             db_manager.session.rollback()
-            logger.error(f"Database error updating trade ID: {trade.id}, Order ID: {trade.order_id}: {e}", exc_info=True)
+            logger.error(f"Database error updating trade {trade.order_id}: {e}", exc_info=True)
             st.error(f"Database error updating trade: {e}")
             return False
         
@@ -135,7 +145,6 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
                 engine.update_virtual_balances(pnl)
             
             st.success(f"✅ Trade closed successfully! PnL: ${pnl:.2f}")
-            st.cache_data.clear()  # Clear cache to ensure UI refresh
             return True
         else:
             st.error("❌ Failed to close trade in database")
@@ -180,12 +189,10 @@ async def display_trade_management():
                         st.write(f"**Trail:** ${trade.trail:.4f}" if trade.trail else "N/A")
                         st.write(f"**Liquidation:** ${trade.liquidation:.4f}" if trade.liquidation else "N/A")
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
-                        st.write(f"**ID:** {trade.id}")  # Display for debugging
-                        st.write(f"**Order ID:** {trade.order_id}")  # Display for debugging
-                        if st.button("❌ Close", key=f"close_virtual_{trade.id}_{trade.order_id}"):
-                            logger.info(f"Close button clicked for virtual trade ID: {trade.id}, Order ID: {trade.order_id}")
-                            if await close_trade_safely(str(trade.id), virtual=True):
-                                st.rerun()
+                    
+                    if st.button("❌ Close", key=f"close_virtual_{trade.id}"):
+                        if await close_trade_safely(str(trade.id), virtual=True):
+                            st.rerun()
         else:
             st.info("No open virtual trades")
     
@@ -196,12 +203,12 @@ async def display_trade_management():
         if real_trades:
             for i, trade in enumerate(real_trades):
                 with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
+                    # Fetch real-time position data from Bybit
                     try:
-                        logger.info(f"Fetching real-time position data for {trade.symbol}")
                         positions = await engine.client.get_positions(symbol=trade.symbol)
                         position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
                         current_price = float(position.get("mark_price", engine.client.get_current_price(trade.symbol))) if position else engine.client.get_current_price(trade.symbol)
-                        current_pnl = float(position.get("unrealized_pnl", 0.0)) if position else 0.0
+                        current_pnl = float(position.get("unrealisedPnl", 0.0)) if position else 0.0
                     except Exception as e:
                         logger.warning(f"Failed to fetch real position data for {trade.symbol}: {e}")
                         st.warning(f"Could not fetch real-time data for {trade.symbol}. Using fallback price.")
@@ -225,12 +232,10 @@ async def display_trade_management():
                         st.write(f"**Trail:** ${trade.trail:.4f}" if trade.trail else "N/A")
                         st.write(f"**Liquidation:** ${trade.liquidation:.4f}" if trade.liquidation else "N/A")
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
-                        st.write(f"**ID:** {trade.id}")  # Display for debugging
-                        st.write(f"**Order ID:** {trade.order_id}")  # Display for debugging
-                        if st.button("❌ Close", key=f"close_real_{trade.id}_{trade.order_id}"):
-                            logger.info(f"Close button clicked for real trade ID: {trade.id}, Order ID: {trade.order_id}")
-                            if await close_trade_safely(str(trade.id), virtual=False):
-                                st.rerun()
+                    
+                    if st.button("❌ Close", key=f"close_real_{trade.id}"):
+                        if await close_trade_safely(str(trade.id), virtual=False):
+                            st.rerun()
         else:
             st.info("No open real trades")
 
@@ -287,7 +292,7 @@ def display_manual_trading():
                 "symbol": symbol,
                 "side": side,
                 "qty": qty,
-                "entry_price": entry_price,
+                "entry": entry_price,
                 "order_id": f"manual_{symbol}_{int(datetime.now().timestamp())}",
                 "virtual": trading_mode == "virtual",
                 "status": "open",
@@ -298,27 +303,49 @@ def display_manual_trading():
                 "trail": trail_value if trail_value > 0 else None,
                 "liquidation": liquidation_value if liquidation_value > 0 else None,
                 "margin_usdt": margin_value if margin_value > 0 else None,
-                "timestamp": datetime.now(timezone.utc)
+                "margin_mode": "CROSS" if trading_mode == "real" else None
             }
             
             # Add to database
             success = db_manager.add_trade(trade_data)
             
-            if success:
-                st.success(f"✅ {trading_mode.title()} order placed: {symbol} {side} @ ${entry_price:.4f}")
-                
+            if not success:
+                st.error("❌ Failed to place order in database")
+                return
+            
+            st.success(f"✅ {trading_mode.title()} order placed: {symbol} {side} @ ${entry_price:.4f}")
+            
+            # Handle trade execution based on mode
+            if trading_mode == "virtual":
                 # Update balance for virtual trades
-                if trading_mode == "virtual":
-                    margin_used = margin_value or (entry_price * qty) / leverage
-                    engine.update_virtual_balances(-margin_used, "virtual")
-                
-                # Execute real trade if necessary
-                if trading_mode == "real":
-                    success = asyncio.run(engine.execute_real_trade([trade_data]))
-                    if not success:
+                margin_used = margin_value or (entry_price * qty) / leverage
+                engine.update_virtual_balances(-margin_used, "virtual")
+                # Execute virtual trade
+                success = engine.execute_virtual_trade(trade_data)
+                if not success:
+                    st.error("❌ Failed to execute virtual trade")
+                    # Rollback DB entry
+                    session = db_manager._get_session()
+                    session.execute(
+                        update(TradeModel)
+                        .where(TradeModel.order_id == trade_data["order_id"])
+                        .values(status="failed")
+                    )
+                    session.commit()
+                    return
+            else:
+                # Execute real trade on Bybit
+                try:
+                    success = await engine.execute_real_trade([trade_data])
+                    if success:
+                        # Sync trades after execution
+                        await asyncio.sleep(2)
+                        engine.get_open_real_trades()
+                        logger.info(f"Synced real trades to DB after executing manual trade for {symbol}")
+                    else:
                         st.error("❌ Failed to execute real trade on Bybit")
                         # Rollback DB entry
-                        session = db_manager.session
+                        session = db_manager._get_session()
                         session.execute(
                             update(TradeModel)
                             .where(TradeModel.order_id == trade_data["order_id"])
@@ -326,122 +353,133 @@ def display_manual_trading():
                         )
                         session.commit()
                         return
-                
-                st.rerun()
-            else:
-                st.error("❌ Failed to place order in database")
+                except APIException as e:
+                    if e.error_code == "100028":
+                        logger.warning(f"Unified account error for manual trade {symbol}: {e}. Retrying with cross margin mode.")
+                        trade_data["margin_mode"] = "CROSS"
+                        success = await engine.execute_real_trade([trade_data])
+                        if success:
+                            await asyncio.sleep(2)
+                            engine.get_open_real_trades()
+                            logger.info(f"Synced real trades to DB after retrying manual trade for {symbol}")
+                        else:
+                            st.error("❌ Retry failed to execute real trade on Bybit")
+                            # Rollback DB entry
+                            session = db_manager._get_session()
+                            session.execute(
+                                update(TradeModel)
+                                .where(TradeModel.order_id == trade_data["order_id"])
+                                .values(status="failed")
+                            )
+                            session.commit()
+                            return
+                    else:
+                        st.error(f"❌ Failed to execute real trade on Bybit: {e}")
+                        # Rollback DB entry
+                        session = db_manager._get_session()
+                        session.execute(
+                            update(TradeModel)
+                            .where(TradeModel.order_id == trade_data["order_id"])
+                            .values(status="failed")
+                        )
+                        session.commit()
+                        return
+            
+            st.rerun()
                 
         except Exception as e:
             st.error(f"Order placement error: {e}")
-            logger.error(f"Manual order error: {e}")
-
+            logger.error(f"Manual order error: {e}", exc_info=True)
+            # Rollback DB entry on general error
+            session = db_manager._get_session()
+            session.execute(
+                update(TradeModel)
+                .where(TradeModel.order_id == trade_data["order_id"])
+                .values(status="failed")
+            )
+            session.commit()
 
 def display_automation_tab():
     """Display automation controls"""
     st.subheader("🤖 Automated Trading")
-
+    
     automated_trader = get_automated_trader()
-
-    # Track running state persistently across reruns
-    if "auto_running" not in st.session_state:
-        st.session_state.auto_running = False
-
+    
+    # Get current status
     try:
         status = asyncio.run(automated_trader.get_status())
         is_running = status.get("is_running", False)
-        st.session_state.auto_running = is_running
     except Exception as e:
         logger.error(f"Error getting automation status: {e}")
         is_running = False
         status = {}
-
-    # ===== STATUS DISPLAY =====
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    
+    # Status display
+    status_col1, status_col2, status_col3 = st.columns(3)
+    
+    with status_col1:
         status_text = "🟢 Running" if is_running else "🔴 Stopped"
         st.metric("Automation Status", status_text)
-    with col2:
-        st.metric("Positions", f"{status.get('current_positions', 0)}/{status.get('max_positions', 5)}")
-    with col3:
+    
+    with status_col2:
+        current_positions = status.get("current_positions", 0)
+        max_positions = status.get("max_positions", 5)
+        st.metric("Positions", f"{current_positions}/{max_positions}")
+    
+    with status_col3:
         scan_interval = status.get("scan_interval", 300) / 60
-        st.metric("Scan Interval", f"{scan_interval:.0f} min")
-
-    # ===== COUNTDOWN =====
-    st.markdown("### 🕒 Next Scan Countdown")
-    countdown_placeholder = st.empty()
-
-    if is_running:
-        last_scan_str = automated_trader.stats.get("last_scan")
-        if last_scan_str:
-            try:
-                last_scan_time = datetime.strptime(last_scan_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-            except Exception:
-                last_scan_time = datetime.now(timezone.utc)
-        else:
-            last_scan_time = datetime.now(timezone.utc)
-
-        next_scan_time = last_scan_time + timedelta(seconds=automated_trader.scan_interval)
-        remaining = (next_scan_time - datetime.now(timezone.utc)).total_seconds()
-
-        if remaining > 0:
-            hours, rem = divmod(int(remaining), 3600)
-            mins, secs = divmod(rem, 60)
-            countdown_placeholder.info(f"⏳ Next scan in **{hours:02d}:{mins:02d}:{secs:02d}** (hh:mm:ss)")
-
-            # Non-blocking auto-refresh every second
-            st.experimental_rerun_delay = 1
-            st.rerun()
-        else:
-            countdown_placeholder.success("🚀 Running next market scan...")
-    else:
-        countdown_placeholder.info("Automation not running — countdown paused")
-
-    # ===== SETTINGS =====
+        st.metric("Scan Interval", f"{scan_interval:.0f}min")
+    
+    # Settings
     st.markdown("### ⚙️ Automation Settings")
-    s1, s2 = st.columns(2)
-    with s1:
-        new_max_positions = st.number_input("Max Positions", 1, 10, status.get("max_positions", 5), key="auto_max_pos")
+    
+    settings_col1, settings_col2 = st.columns(2)
+    
+    with settings_col1:
+        new_max_positions = st.number_input("Max Positions", 1, 10, max_positions, key="auto_max_pos")
         new_risk_per_trade = st.number_input("Risk per Trade (%)", 0.5, 5.0, 
-                                             status.get("risk_per_trade", 0.02) * 100, 
-                                             step=0.1, key="auto_risk")
-    with s2:
+                                           status.get("risk_per_trade", 0.02) * 100, 
+                                           step=0.1, key="auto_risk")
+    
+    with settings_col2:
         new_scan_interval = st.number_input("Scan Interval (minutes)", 1, 60, int(scan_interval), key="auto_interval")
         min_signal_score = st.number_input("Min Signal Score", 50, 90, 65, key="auto_min_score")
-
-    # ===== CONTROL BUTTONS (Always Visible) =====
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    
+    # Control buttons
+    control_col1, control_col2, control_col3 = st.columns(3)
+    
+    with control_col1:
         if st.button("🚀 Start Automation", disabled=is_running):
             with st.spinner("Starting automation..."):
                 try:
+                    # Update settings
                     automated_trader.max_positions = new_max_positions
                     automated_trader.risk_per_trade = new_risk_per_trade / 100
                     automated_trader.scan_interval = new_scan_interval * 60
+                    
                     success = asyncio.run(automated_trader.start())
                     if success:
-                        st.session_state.auto_running = True
                         st.success("✅ Automation started!")
                         st.rerun()
                     else:
                         st.error("❌ Failed to start automation")
                 except Exception as e:
                     st.error(f"Start error: {e}")
-
-    with c2:
+    
+    with control_col2:
         if st.button("⏹️ Stop Automation", disabled=not is_running):
             with st.spinner("Stopping automation..."):
                 try:
                     success = asyncio.run(automated_trader.stop())
                     if success:
-                        st.session_state.auto_running = False
                         st.success("✅ Automation stopped!")
                         st.rerun()
                     else:
                         st.error("❌ Failed to stop automation")
                 except Exception as e:
                     st.error(f"Stop error: {e}")
-
-    with c3:
+    
+    with control_col3:
         if st.button("🔄 Reset Stats"):
             try:
                 asyncio.run(automated_trader.reset_stats())
@@ -449,26 +487,82 @@ def display_automation_tab():
                 st.rerun()
             except Exception as e:
                 st.error(f"Reset error: {e}")
-
-    # ===== PERFORMANCE SUMMARY =====
+    
+    # Countdown timer
+    if is_running:
+        st.markdown("### ⏱️ Scan Countdown")
+        placeholder = st.empty()
+        try:
+            status = asyncio.run(automated_trader.get_status())
+            last_scan_str = status['stats'].get('last_scan')
+            if last_scan_str:
+                last_scan = datetime.strptime(last_scan_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - last_scan).total_seconds()
+                remaining = status['scan_interval'] - elapsed
+                if remaining < 0:
+                    remaining = 0
+                    placeholder.warning("Scan overdue! Checking status...")
+                else:
+                    mins, secs = divmod(int(remaining), 60)
+                    placeholder.info(f"⏳ Next scan in {mins:02d}:{secs:02d} | Last scan: {last_scan_str}")
+            else:
+                placeholder.info("⏳ Initial scan pending...")
+        except Exception as e:
+            placeholder.error(f"Status error: {e}")
+        
+        # Live update mechanism
+        if 'last_rerun' not in st.session_state:
+            st.session_state.last_rerun = 0
+        if time.time() - st.session_state.last_rerun > 1 and is_running:
+            st.session_state.last_rerun = time.time()
+            time.sleep(0.5)
+            st.rerun()
+    
+    # Performance summary
     if is_running or status.get("stats", {}).get("total_trades", 0) > 0:
         st.markdown("### 📊 Performance Summary")
+        
         performance = automated_trader.get_performance_summary()
-
-        p1, p2, p3, p4 = st.columns(4)
-        p1.metric("Total Trades", performance.get("total_trades", 0))
-        p2.metric("Win Rate", f"{performance.get('win_rate', 0)}%")
-        p3.metric("Total PnL", f"${performance.get('total_pnl', 0):.2f}")
-        p4.metric("Runtime", performance.get("runtime", 'N/A'))
-
-
+        
+        perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
+        
+        with perf_col1:
+            st.metric("Total Trades", performance.get("total_trades", 0))
+        
+        with perf_col2:
+            win_rate = performance.get("win_rate", 0)
+            st.metric("Win Rate", f"{win_rate}%")
+        
+        with perf_col3:
+            total_pnl = performance.get("total_pnl", 0)
+            st.metric("Total PnL", f"${total_pnl:.2f}")
+        
+        with perf_col4:
+            runtime = performance.get("runtime", "N/A")
+            st.metric("Runtime", runtime)
+        
+        # Recent activity
+        if is_running:
+            st.markdown("### 🕐 Recent Activity")
+            recent_trades = db_manager.get_trades(limit=5)
+            
+            if recent_trades:
+                activity_data = []
+                for trade in recent_trades:
+                    activity_data.append({
+                        "Time": trade.timestamp.strftime("%H:%M:%S") if trade.timestamp else "N/A",
+                        "Symbol": trade.symbol,
+                        "Side": trade.side,
+                        "Entry": f"${trade.entry_price:.4f}",
+                        "Status": trade.status.title(),
+                        "Type": "Virtual" if trade.virtual else "Real"
+                    })
+                
+                st.dataframe(pd.DataFrame(activity_data), height=200)
+            else:
+                st.info("No recent activity")
 
 def main():
-    # Verify database initialization
-    if not db_manager.session:
-        st.error("Database not initialized. Please check configuration.")
-        return
-    
     st.markdown("""
     <div style="text-align: center; padding: 1rem 0; border-bottom: 2px solid #00ff88; margin-bottom: 2rem;">
         <h1 style="color: #00ff88; margin: 0;">💼 Trading Center</h1>
@@ -614,30 +708,22 @@ def main():
         all_trades = engine.get_closed_virtual_trades() + engine.get_closed_real_trades()
         
         if all_trades:
-            pnls = [t.pnl or 0 for t in all_trades if t.pnl is not None]
-            total_trades = len(all_trades)
-            total_pnl = sum(pnls)
-            avg_pnl = total_pnl / total_trades if total_trades > 0 else 0.0
-            profitable_trades = sum(1 for p in pnls if p > 0)
-            win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0.0
-            best_trade = max(pnls) if pnls else 0.0
-            worst_trade = min(pnls) if pnls else 0.0
-            losing_trades = total_trades - profitable_trades
+            metrics = calculate_portfolio_metrics([t.to_dict() for t in all_trades])
             
             # Main metrics
             metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
             
             with metric_col1:
-                st.metric("Total Trades", total_trades)
+                st.metric("Total Trades", metrics['total_trades'])
             
             with metric_col2:
-                st.metric("Win Rate", f"{win_rate:.1f}%")
+                st.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
             
             with metric_col3:
-                st.metric("Total P&L", f"${total_pnl:.2f}")
+                st.metric("Total P&L", f"${metrics['total_pnl']:.2f}")
             
             with metric_col4:
-                st.metric("Avg P&L/Trade", f"${avg_pnl:.2f}")
+                st.metric("Avg P&L/Trade", f"${metrics['avg_pnl']:.2f}")
             
             # Additional metrics
             st.markdown("### 🎯 Detailed Statistics")
@@ -645,12 +731,13 @@ def main():
             detail_col1, detail_col2 = st.columns(2)
             
             with detail_col1:
-                st.metric("Profitable Trades", profitable_trades)
-                st.metric("Best Trade", f"${best_trade:.2f}")
+                st.metric("Profitable Trades", metrics['profitable_trades'])
+                st.metric("Best Trade", f"${metrics['best_trade']:.2f}")
             
             with detail_col2:
+                losing_trades = metrics['total_trades'] - metrics['profitable_trades']
                 st.metric("Losing Trades", losing_trades)
-                st.metric("Worst Trade", f"${worst_trade:.2f}")
+                st.metric("Worst Trade", f"${metrics['worst_trade']:.2f}")
             
             # Performance by symbol
             st.markdown("### 📈 Performance by Symbol")

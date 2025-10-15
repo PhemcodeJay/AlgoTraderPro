@@ -2,18 +2,20 @@ from datetime import datetime
 import streamlit as st
 import os
 import sys
-from db import db_manager, WalletBalance, DatabaseException
+from db import db_manager, WalletBalance
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine import TradingEngine
 from bybit_client import BybitClient
-from settings import validate_env  # Note: settings.py (settings management) is updated separately
+from settings import load_settings, save_settings, validate_env
 
 # Configure logging
+# Logging using centralized system
 from logging_config import get_logger
 logger = get_logger(__name__)
+
 
 st.set_page_config(
     page_title="Settings - AlgoTrader Pro",
@@ -21,140 +23,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-def load_settings() -> dict:
-    default_settings = {
-        "SCAN_INTERVAL": 3600,
-        "TOP_N_SIGNALS": 5,
-        "MAX_LOSS_PCT": -15.0,
-        "TP_PERCENT": 50.0,
-        "SL_PERCENT": 10.0,
-        "MAX_DRAWDOWN_PCT": -20.0,
-        "LEVERAGE": 15.0,
-        "RISK_PCT": 0.02,
-        "ENTRY_BUFFER_PCT": 0.002,
-        "SYMBOLS": ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "AVAXUSDT"],
-        "USE_WEBSOCKET": True,
-        "MAX_POSITIONS": 5,
-        "MIN_SIGNAL_SCORE": 40.0,
-        "AUTO_TRADING_ENABLED": True,
-        "NOTIFICATION_ENABLED": True,
-        "RSI_OVERSOLD": 30,
-        "RSI_OVERBOUGHT": 70,
-        "MIN_VOLUME": 1000000,
-        "MIN_ATR_PCT": 0.5,
-        "MAX_SPREAD_PCT": 0.1
-    }
-
-    try:
-        if not db_manager.is_connected():
-            logger.error("Database not connected, returning default settings")
-            st.error("❌ Database not connected, using default settings")
-            return default_settings
-
-        settings = {}
-        for key in default_settings:
-            value = db_manager.get_setting(key)
-            if value is not None:
-                try:
-                    if isinstance(default_settings[key], bool):
-                        settings[key] = value.lower() == "true"
-                    elif isinstance(default_settings[key], (int, float)):
-                        settings[key] = float(value)
-                        if key in ["LEVERAGE", "RISK_PCT", "ENTRY_BUFFER_PCT"]:
-                            if settings[key] <= 0:
-                                logger.warning(f"Invalid {key} value {settings[key]}, using default")
-                                settings[key] = default_settings[key]
-                        if key in ["MAX_LOSS_PCT", "MAX_DRAWDOWN_PCT"] and settings[key] > 0:
-                            logger.warning(f"Invalid {key} value {settings[key]}, using default")
-                            settings[key] = default_settings[key]
-                    elif isinstance(default_settings[key], list):
-                        settings[key] = eval(value) if value else default_settings[key]
-                    else:
-                        settings[key] = value
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Invalid {key} value {value}, using default")
-                    settings[key] = default_settings[key]
-            else:
-                settings[key] = default_settings[key]
-                logger.warning(f"Missing {key} in database, using default")
-        return settings
-    except DatabaseException as e:
-        logger.error(f"Database error loading settings: {e}")
-        st.error(f"❌ Database error loading settings: {e}")
-        return default_settings
-    except Exception as e:
-        logger.error(f"Unexpected error loading settings: {e}")
-        st.error(f"❌ Unexpected error loading settings: {e}")
-        return default_settings
-
-def save_settings(settings: dict) -> bool:
-    try:
-        if not db_manager.is_connected():
-            logger.error("Database not connected, cannot save settings")
-            st.error("❌ Database not connected, cannot save settings")
-            return False
-
-        errors = []
-        for key, value in settings.items():
-            if key in ["LEVERAGE", "RISK_PCT", "ENTRY_BUFFER_PCT"] and float(value) <= 0:
-                errors.append(f"{key}: {value} must be positive")
-            if key in ["MAX_LOSS_PCT", "MAX_DRAWDOWN_PCT"] and float(value) > 0:
-                errors.append(f"{key}: {value} must be negative")
-
-        if errors:
-            logger.error(f"Validation errors: {'; '.join(errors)}")
-            st.error(f"❌ Validation errors: {'; '.join(errors)}")
-            return False
-
-        for key, value in settings.items():
-            if isinstance(value, (list, dict)):
-                value = str(value)
-            elif isinstance(value, bool):
-                value = str(value).lower()
-            else:
-                value = str(value)
-            if not db_manager.save_setting(key, value):
-                logger.error(f"Failed to save setting {key}")
-                st.error(f"❌ Failed to save setting {key}")
-                return False
-        return True
-    except DatabaseException as e:
-        logger.error(f"Database error saving settings: {e}")
-        st.error(f"❌ Database error saving settings: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error saving settings: {e}")
-        st.error(f"❌ Unexpected error saving settings: {e}")
-        return False
-
-def migrate_json_to_db(json_file_path: str = "settings.json") -> bool:
-    try:
-        if not os.path.exists(json_file_path):
-            logger.warning(f"Settings file {json_file_path} not found, skipping migration")
-            return True
-
-        import json
-        with open(json_file_path, "r") as f:
-            json_settings = json.load(f)
-
-        for key, value in json_settings.items():
-            if isinstance(value, (list, dict)):
-                value = str(value)
-            elif isinstance(value, bool):
-                value = str(value).lower()
-            else:
-                value = str(value)
-            if not db_manager.save_setting(key, value):
-                logger.error(f"Failed to migrate setting {key} to database")
-                return False
-
-        logger.info(f"Settings migrated successfully from {json_file_path} to database")
-        os.rename(json_file_path, f"{json_file_path}.backup")
-        return True
-    except Exception as e:
-        logger.error(f"Error migrating settings from {json_file_path} to database: {e}")
-        return False
 
 def load_capital_data():
     try:
@@ -180,22 +48,16 @@ def load_capital_data():
                 "start_balance": real_balance.start_balance
             }
         return capital_data
-    except DatabaseException as e:
-        logger.error(f"Database error loading capital data: {e}")
-        st.error(f"❌ Database error loading capital data: {e}")
-        return {}
     except Exception as e:
-        logger.error(f"Unexpected error loading capital data: {e}")
-        st.error(f"❌ Unexpected error loading capital data: {e}")
+        st.error(f"Error loading capital data from database: {e}")
         return {}
 
 def save_capital_data(capital_data: dict) -> bool:
+    """
+    Save capital data to the database using db_manager.
+    Handles both virtual and real balances.
+    """
     try:
-        if not db_manager.is_connected():
-            logger.error("Database not connected, cannot save capital data")
-            st.error("❌ Database not connected, cannot save capital data")
-            return False
-
         # Process virtual balance
         if "virtual" in capital_data:
             v = capital_data["virtual"]
@@ -208,15 +70,19 @@ def save_capital_data(capital_data: dict) -> bool:
                 currency=v.get("currency", "USDT"),
                 updated_at=datetime.utcnow(),
             )
+
+            # Update fields from input
             virtual_balance.capital = float(v.get("capital", virtual_balance.capital))
             virtual_balance.available = float(v.get("available", virtual_balance.available))
             virtual_balance.used = float(v.get("used", virtual_balance.used))
             virtual_balance.start_balance = float(v.get("start_balance", virtual_balance.start_balance))
             virtual_balance.currency = v.get("currency", "USDT")
             virtual_balance.updated_at = datetime.utcnow()
-            if not db_manager.update_wallet_balance(virtual_balance):
-                logger.error("Failed to update virtual balance")
-                st.error("❌ Failed to update virtual balance")
+
+            try:
+                db_manager.update_wallet_balance(virtual_balance)
+            except Exception as e:
+                st.error(f"Failed to update virtual balance: {e}")
                 return False
 
         # Process real balance
@@ -231,25 +97,25 @@ def save_capital_data(capital_data: dict) -> bool:
                 currency=r.get("currency", "USDT"),
                 updated_at=datetime.utcnow(),
             )
+
+            # Update fields from input
             real_balance.capital = float(r.get("capital", real_balance.capital))
             real_balance.available = float(r.get("available", real_balance.available))
             real_balance.used = float(r.get("used", real_balance.used))
             real_balance.start_balance = float(r.get("start_balance", real_balance.start_balance))
             real_balance.currency = r.get("currency", "USDT")
             real_balance.updated_at = datetime.utcnow()
-            if not db_manager.update_wallet_balance(real_balance):
-                logger.error("Failed to update real balance")
-                st.error("❌ Failed to update real balance")
+
+            try:
+                db_manager.update_wallet_balance(real_balance)
+            except Exception as e:
+                st.error(f"Failed to update real balance: {e}")
                 return False
 
         return True
-    except DatabaseException as e:
-        logger.error(f"Database error saving capital data: {e}")
-        st.error(f"❌ Database error saving capital data: {e}")
-        return False
+
     except Exception as e:
-        logger.error(f"Unexpected error saving capital data: {e}")
-        st.error(f"❌ Unexpected error saving capital data: {e}")
+        st.error(f"Error saving capital data: {e}")
         return False
 
 def main():
@@ -263,28 +129,29 @@ def main():
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Settings Navigation")
+
+        # System status
         env_valid = validate_env()
         status_color = "🟢" if env_valid else "🔴"
         st.metric("Environment", f"{status_color} {'Valid' if env_valid else 'Issues'}")
+
+        # Quick actions
         if st.button("🔄 Reload Settings", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
+
         if st.button("📊 Dashboard", use_container_width=True):
             st.switch_page("app.py")
+
         st.divider()
+
+        # Warning about real trading
         st.warning("⚠️ Changes to real trading settings require careful consideration and proper API configuration.")
 
     try:
         # Initialize engine and Bybit client
         engine = TradingEngine() if "engine" not in st.session_state else st.session_state.engine
         bybit_client = BybitClient()
-
-        # Migrate settings from JSON to database if needed
-        if os.path.exists("settings.json"):
-            if migrate_json_to_db():
-                st.success("✅ Settings migrated from JSON to database")
-            else:
-                st.error("❌ Failed to migrate settings to database")
 
         # Load settings and capital data
         current_settings = load_settings()
@@ -297,6 +164,7 @@ def main():
 
         with tab1:
             st.subheader("🎯 Trading Configuration")
+
             col1, col2 = st.columns(2)
 
             with col1:
@@ -386,22 +254,16 @@ def main():
                         "AUTO_TRADING_ENABLED": auto_trading
                     })
                     if save_settings(new_settings):
-                        updated_settings = load_settings()
-                        if all(new_settings.get(k) == updated_settings.get(k) for k in new_settings):
-                            st.success("✅ Trading settings saved and verified!")
-                            st.cache_data.clear()
-                            st.rerun()
-                        else:
-                            st.error("❌ Settings saved but verification failed")
+                        st.success("✅ Trading settings saved successfully!")
+                        st.rerun()
                     else:
                         st.error("❌ Failed to save settings")
-                except DatabaseException as e:
-                    st.error(f"❌ Database error saving settings: {e}")
                 except Exception as e:
-                    st.error(f"❌ Unexpected error saving settings: {e}")
+                    st.error(f"Error saving settings: {e}")
 
         with tab2:
             st.subheader("🔍 Signal Generation Settings")
+
             col1, col2 = st.columns(2)
 
             with col1:
@@ -410,7 +272,7 @@ def main():
                     "Scan Interval (minutes)",
                     min_value=15.0,
                     max_value=1440.0,
-                    value=float(current_settings.get("SCAN_INTERVAL", 3600) / 60),
+                    value=float(current_settings.get("SCAN_INTERVAL", 3600) // 60),
                     help="How often to scan for new signals"
                 )
                 top_n_signals = st.number_input(
@@ -479,22 +341,16 @@ def main():
                         "SYMBOLS": selected_symbols
                     })
                     if save_settings(new_settings):
-                        updated_settings = load_settings()
-                        if all(new_settings.get(k) == updated_settings.get(k) for k in new_settings):
-                            st.success("✅ Signal settings saved and verified!")
-                            st.cache_data.clear()
-                            st.rerun()
-                        else:
-                            st.error("❌ Settings saved but verification failed")
+                        st.success("✅ Signal settings saved successfully!")
+                        st.rerun()
                     else:
                         st.error("❌ Failed to save settings")
-                except DatabaseException as e:
-                    st.error(f"❌ Database error saving settings: {e}")
                 except Exception as e:
-                    st.error(f"❌ Unexpected error saving settings: {e}")
+                    st.error(f"Error saving settings: {e}")
 
         with tab3:
             st.subheader("💰 Capital Management")
+
             col1, col2 = st.columns(2)
 
             with col1:
@@ -518,12 +374,15 @@ def main():
 
             with col2:
                 st.markdown("### 📈 Real Capital")
+
+                # Display API Connection Status
                 api_status = "🟢 Connected" if bybit_client.is_connected() else "🔴 Disconnected"
                 st.metric("API Connection", api_status)
 
                 if not bybit_client.is_connected():
                     st.warning("Bybit API not connected. Check API keys in .env file.")
 
+                # Display real balances as metrics (read-only)
                 real_capital_value = capital_data.get("real", {}).get("capital", 0.0)
                 real_available_value = capital_data.get("real", {}).get("available", 0.0)
                 real_used_value = capital_data.get("real", {}).get("used", 0.0)
@@ -532,6 +391,7 @@ def main():
                 st.metric("Real Available (USDT)", f"${real_available_value:.2f}")
                 st.metric("Used Margin (Real)", f"${real_used_value:.2f}")
 
+                # Info if available == 0 but capital > 0
                 if real_available_value == 0.0 and real_capital_value > 0.0:
                     st.info("Available balance is $0.00. Funds may be in use (e.g., open positions).")
                 elif real_available_value == 0.0 and real_capital_value == 0.0 and bybit_client.is_connected():
@@ -544,8 +404,7 @@ def main():
                         try:
                             if engine.sync_real_balance():
                                 st.success("✅ Real balance synced successfully!")
-                                st.cache_data.clear()
-                                st.rerun()
+                                st.rerun()  # Reload to reflect updated values
                             else:
                                 st.error("❌ Failed to sync real balance. Check Bybit account or API permissions.")
                         except Exception as e:
@@ -569,37 +428,46 @@ def main():
                 }
                 if save_capital_data(new_capital):
                     st.success("✅ Capital settings saved!")
-                    st.cache_data.clear()
                     st.rerun()
                 else:
                     st.error("❌ Failed to save capital settings")
 
         with tab4:
             st.subheader("🔑 API Configuration")
+
             col1, col2 = st.columns(2)
 
+            # ---------------- LEFT SIDE: API INPUTS + STATUS ----------------
             with col1:
                 st.markdown("### 📡 Bybit API")
+
+                # Current env/session values
                 current_key = os.getenv("BYBIT_API_KEY", st.session_state.get("BYBIT_API_KEY", ""))
                 current_secret = os.getenv("BYBIT_API_SECRET", st.session_state.get("BYBIT_API_SECRET", ""))
                 current_mainnet = os.getenv("BYBIT_MAINNET", "false").lower() == "true"
                 current_account_type = os.getenv("BYBIT_ACCOUNT_TYPE", st.session_state.get("BYBIT_ACCOUNT_TYPE", "UNIFIED"))
 
+                # ✅ / ❌ Status
                 api_key_status = "✅ Configured" if current_key else "❌ Not Set"
                 st.metric("API Key", api_key_status)
+
                 secret_status = "✅ Configured" if current_secret else "❌ Not Set"
                 st.metric("API Secret", secret_status)
+
                 mode_text = "🧪 Mainnet" if current_mainnet else "🔴 Testnet"
                 st.metric("Trading Mode", mode_text)
 
+                # Editable inputs
                 api_key = st.text_input("Update API Key", value=current_key, type="password")
                 api_secret = st.text_input("Update API Secret", value=current_secret, type="password")
+
                 mainnet_mode = st.radio(
                     "Trading Mode",
                     options=[True, False],
                     index=0 if current_mainnet else 1,
                     format_func=lambda x: "🧪 Mainnet" if x else "🔴 Testnet"
                 )
+
                 account_type = st.selectbox(
                     "Account Type",
                     ["UNIFIED", "CONTRACT", "SPOT"],
@@ -607,39 +475,35 @@ def main():
                 )
 
                 if st.button("💾 Save Keys"):
-                    try:
-                        from dotenv import set_key
-                        env_file = ".env"
-                        set_key(env_file, "BYBIT_API_KEY", api_key)
-                        set_key(env_file, "BYBIT_API_SECRET", api_secret)
-                        set_key(env_file, "BYBIT_MAINNET", str(mainnet_mode).lower())
-                        set_key(env_file, "BYBIT_ACCOUNT_TYPE", account_type)
-                        st.session_state["BYBIT_API_KEY"] = api_key
-                        st.session_state["BYBIT_API_SECRET"] = api_secret
-                        st.session_state["BYBIT_MAINNET"] = mainnet_mode
-                        st.session_state["BYBIT_ACCOUNT_TYPE"] = account_type
-                        st.success("✅ API keys saved to .env file and session")
-                    except Exception as e:
-                        st.error(f"❌ Failed to save API keys: {e}")
-                        logger.error(f"Failed to save API keys: {e}", exc_info=True)
+                    st.session_state["BYBIT_API_KEY"] = api_key
+                    st.session_state["BYBIT_API_SECRET"] = api_secret
+                    st.session_state["BYBIT_MAINNET"] = mainnet_mode
+                    st.session_state["BYBIT_ACCOUNT_TYPE"] = account_type
+                    st.success("✅ API keys saved in session")
 
+            # ---------------- RIGHT SIDE: CONNECTION STATUS ----------------
             with col2:
                 st.markdown("### 🔗 Connection Status")
+
                 if st.button("🔍 Test API Connection"):
                     with st.spinner("Testing connection..."):
                         try:
+                            # Set env vars from session or inputs
                             os.environ["BYBIT_API_KEY"] = api_key
                             os.environ["BYBIT_API_SECRET"] = api_secret
                             os.environ["BYBIT_ACCOUNT_TYPE"] = account_type
                             os.environ["BYBIT_MAINNET"] = "true" if mainnet_mode else "false"
+
+                            # Recreate client with new values
                             bybit_client = BybitClient()
+
                             connection_ok = bybit_client._test_connection()
                             if connection_ok:
                                 st.success("✅ API connection successful!")
                             else:
                                 st.error("❌ API connection failed")
                         except Exception as e:
-                            st.error(f"❌ Connection test error: {e}")
+                            st.error(f"Connection test error: {e}")
                             logger.error(f"API connection test failed: {e}", exc_info=True)
 
                 if bybit_client.is_connected():
@@ -663,26 +527,26 @@ def main():
                    - Create a new API key with trading permissions
 
                 2. **Set Environment Variables:**
-                     - Add the following to your `.env` file:
-                        ```
-                        BYBIT_API_KEY=your_api_key
-                        BYBIT_API_SECRET=your_api_secret
-                        BYBIT_MAINNET=true_or_false
-                        BYBIT_ACCOUNT_TYPE=UNIFIED_or_CONTRACT_or_SPOT
-                
-3. **Required Permissions:**
-- Read wallet balance
-- Place/modify/cancel orders
-- View trading history
+                   ```
+                   BYBIT_API_KEY=your_api_key_here
+                   BYBIT_API_SECRET=your_api_secret_here
+                   BYBIT_mainnet=false  # Use true for mainnet
+                   ```
 
-4. **Security Notes:**
-- Never share your API credentials
-- Use IP whitelist if possible
-- Start with testnet for testing
-""")
+                3. **Required Permissions:**
+                   - Read wallet balance
+                   - Place/modify/cancel orders
+                   - View trading history
+
+                4. **Security Notes:**
+                   - Never share your API credentials
+                   - Use IP whitelist if possible
+                   - Start with mainnet for testing
+                """)
 
         with tab5:
             st.subheader("🔔 Notification Settings")
+
             col1, col2 = st.columns(2)
 
             with col1:
@@ -690,7 +554,6 @@ def main():
                 discord_url = os.getenv("DISCORD_WEBHOOK_URL", "")
                 discord_status = "✅ Configured" if discord_url else "❌ Not Set"
                 st.metric("Discord Webhook", discord_status)
-
                 if st.button("📤 Test Discord"):
                     try:
                         from notifications import send_discord
@@ -708,8 +571,7 @@ def main():
                         send_discord(test_signal)
                         st.success("✅ Discord test sent!")
                     except Exception as e:
-                        st.error(f"❌ Discord test failed: {e}")
-                        logger.error(f"Discord test failed: {e}", exc_info=True)
+                        st.error(f"Discord test failed: {e}")
 
                 st.markdown("### 📞 WhatsApp")
                 whatsapp_number = os.getenv("WHATSAPP_TO", "")
@@ -722,7 +584,6 @@ def main():
                 telegram_chat = os.getenv("TELEGRAM_CHAT_ID", "")
                 telegram_status = "✅ Configured" if telegram_token and telegram_chat else "❌ Not Set"
                 st.metric("Telegram Bot", telegram_status)
-
                 if st.button("📤 Test Telegram"):
                     try:
                         from notifications import send_telegram
@@ -740,15 +601,14 @@ def main():
                         send_telegram(test_signal)
                         st.success("✅ Telegram test sent!")
                     except Exception as e:
-                        st.error(f"❌ Telegram test failed: {e}")
-                        logger.error(f"Telegram test failed: {e}", exc_info=True)
+                        st.error(f"Telegram test failed: {e}")
 
-            st.markdown("### ⚙️ Notification Settings")
-            notifications_enabled = st.checkbox(
-                "Enable Notifications",
-                value=current_settings.get("NOTIFICATION_ENABLED", True),
-                help="Enable/disable all notifications"
-            )
+                st.markdown("### ⚙️ Notification Settings")
+                notifications_enabled = st.checkbox(
+                    "Enable Notifications",
+                    value=current_settings.get("NOTIFICATION_ENABLED", True),
+                    help="Enable/disable all notifications"
+                )
 
             with st.expander("📖 Notification Setup Guide"):
                 st.markdown("""
@@ -773,50 +633,32 @@ def main():
                         "NOTIFICATION_ENABLED": notifications_enabled
                     })
                     if save_settings(new_settings):
-                        updated_settings = load_settings()
-                        if all(new_settings.get(k) == updated_settings.get(k) for k in new_settings):
-                            st.success("✅ Notification settings saved and verified!")
-                            st.cache_data.clear()
-                            st.rerun()
-                        else:
-                            st.error("❌ Settings saved but verification failed")
+                        st.success("✅ Notification settings saved!")
+                        st.rerun()
                     else:
                         st.error("❌ Failed to save settings")
-                except DatabaseException as e:
-                    st.error(f"❌ Database error saving settings: {e}")
                 except Exception as e:
-                    st.error(f"❌ Unexpected error saving settings: {e}")
+                    st.error(f"Error saving settings: {e}")
 
         # System information footer
         st.markdown("---")
         st.markdown("### ℹ️ System Information")
         info_col1, info_col2, info_col3 = st.columns(3)
-
         with info_col1:
-            st.info(f"**Settings Storage:** Database")
+            st.info(f"**Settings File:** settings.json")
             st.info(f"**Capital Storage:** Database")
-
         with info_col2:
             st.info(f"**Log File:** app.log")
             st.info(f"**Database:** SQLite/PostgreSQL")
-
         with info_col3:
-            env_text = 'Mainnet' if os.getenv('BYBIT_MAINNET', 'false').lower() == 'true' else 'Testnet'
-            st.info(f"**Environment:** {env_text}")
+            st.info(f"**Environment:** {'Production' if not os.getenv('BYBIT_MAINNET') else 'Live'}")
             st.info(f"**Version:** AlgoTrader Pro v1.0")
 
-    except DatabaseException as e:
-        st.error(f"❌ Database error: {e}")
-        logger.error(f"Settings page error: {e}", exc_info=True)
-        if st.button("🔄 Reload Page"):
-            st.rerun()
-
     except Exception as e:
-        st.error(f"❌ Settings page error: {e}")
+        st.error(f"Settings page error: {e}")
         logger.error(f"Settings page error: {e}", exc_info=True)
         if st.button("🔄 Reload Page"):
             st.rerun()
-
 
 if __name__ == "__main__":
     main()
