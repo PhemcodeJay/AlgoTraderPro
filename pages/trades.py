@@ -3,7 +3,7 @@ import pandas as pd
 import asyncio
 import sys
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 
 # Add parent directory to path
@@ -335,122 +335,113 @@ def display_manual_trading():
             st.error(f"Order placement error: {e}")
             logger.error(f"Manual order error: {e}")
 
-import streamlit as st
-import asyncio
-import pandas as pd
-from datetime import datetime, timezone, timedelta
-import time
 
 def display_automation_tab():
     """Display automation controls"""
     st.subheader("🤖 Automated Trading")
-    
+
     automated_trader = get_automated_trader()
-    
-    # Get current status
+
+    # Track running state persistently across reruns
+    if "auto_running" not in st.session_state:
+        st.session_state.auto_running = False
+
     try:
         status = asyncio.run(automated_trader.get_status())
         is_running = status.get("is_running", False)
+        st.session_state.auto_running = is_running
     except Exception as e:
         logger.error(f"Error getting automation status: {e}")
         is_running = False
         status = {}
-    
-    # ====== STATUS DISPLAY ======
-    status_col1, status_col2, status_col3 = st.columns(3)
-    
-    with status_col1:
+
+    # ===== STATUS DISPLAY =====
+    col1, col2, col3 = st.columns(3)
+    with col1:
         status_text = "🟢 Running" if is_running else "🔴 Stopped"
         st.metric("Automation Status", status_text)
-    
-    with status_col2:
-        current_positions = status.get("current_positions", 0)
-        max_positions = status.get("max_positions", 5)
-        st.metric("Positions", f"{current_positions}/{max_positions}")
-    
-    with status_col3:
+    with col2:
+        st.metric("Positions", f"{status.get('current_positions', 0)}/{status.get('max_positions', 5)}")
+    with col3:
         scan_interval = status.get("scan_interval", 300) / 60
         st.metric("Scan Interval", f"{scan_interval:.0f} min")
 
-    # ====== LIVE COUNTDOWN DISPLAY ======
+    # ===== COUNTDOWN =====
     st.markdown("### 🕒 Next Scan Countdown")
     countdown_placeholder = st.empty()
-    
+
     if is_running:
         last_scan_str = automated_trader.stats.get("last_scan")
         if last_scan_str:
             try:
                 last_scan_time = datetime.strptime(last_scan_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                next_scan_time = last_scan_time + timedelta(seconds=automated_trader.scan_interval)
             except Exception:
-                next_scan_time = datetime.now(timezone.utc) + timedelta(seconds=automated_trader.scan_interval)
+                last_scan_time = datetime.now(timezone.utc)
         else:
-            next_scan_time = datetime.now(timezone.utc) + timedelta(seconds=automated_trader.scan_interval)
+            last_scan_time = datetime.now(timezone.utc)
 
-        while is_running and datetime.now(timezone.utc) < next_scan_time:
-            remaining = (next_scan_time - datetime.now(timezone.utc)).total_seconds()
+        next_scan_time = last_scan_time + timedelta(seconds=automated_trader.scan_interval)
+        remaining = (next_scan_time - datetime.now(timezone.utc)).total_seconds()
+
+        if remaining > 0:
             hours, rem = divmod(int(remaining), 3600)
             mins, secs = divmod(rem, 60)
-            time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
-            
-            countdown_placeholder.info(f"⏳ Next scan in **{time_str}** (hh:mm:ss)")
-            time.sleep(1)
-            
-            # Check stop flag dynamically
-            if not automated_trader.is_running:
-                break
-        countdown_placeholder.success("🚀 Running next market scan...")
+            countdown_placeholder.info(f"⏳ Next scan in **{hours:02d}:{mins:02d}:{secs:02d}** (hh:mm:ss)")
+
+            # Non-blocking auto-refresh every second
+            st.experimental_rerun_delay = 1
+            st.rerun()
+        else:
+            countdown_placeholder.success("🚀 Running next market scan...")
     else:
         countdown_placeholder.info("Automation not running — countdown paused")
 
-    # ====== SETTINGS ======
+    # ===== SETTINGS =====
     st.markdown("### ⚙️ Automation Settings")
-    settings_col1, settings_col2 = st.columns(2)
-    
-    with settings_col1:
+    s1, s2 = st.columns(2)
+    with s1:
         new_max_positions = st.number_input("Max Positions", 1, 10, status.get("max_positions", 5), key="auto_max_pos")
         new_risk_per_trade = st.number_input("Risk per Trade (%)", 0.5, 5.0, 
-                                           status.get("risk_per_trade", 0.02) * 100, 
-                                           step=0.1, key="auto_risk")
-    
-    with settings_col2:
+                                             status.get("risk_per_trade", 0.02) * 100, 
+                                             step=0.1, key="auto_risk")
+    with s2:
         new_scan_interval = st.number_input("Scan Interval (minutes)", 1, 60, int(scan_interval), key="auto_interval")
         min_signal_score = st.number_input("Min Signal Score", 50, 90, 65, key="auto_min_score")
-    
-    # ====== CONTROL BUTTONS ======
-    control_col1, control_col2, control_col3 = st.columns(3)
-    
-    with control_col1:
+
+    # ===== CONTROL BUTTONS (Always Visible) =====
+    c1, c2, c3 = st.columns(3)
+    with c1:
         if st.button("🚀 Start Automation", disabled=is_running):
             with st.spinner("Starting automation..."):
                 try:
                     automated_trader.max_positions = new_max_positions
                     automated_trader.risk_per_trade = new_risk_per_trade / 100
                     automated_trader.scan_interval = new_scan_interval * 60
-                    
                     success = asyncio.run(automated_trader.start())
                     if success:
+                        st.session_state.auto_running = True
                         st.success("✅ Automation started!")
                         st.rerun()
                     else:
                         st.error("❌ Failed to start automation")
                 except Exception as e:
                     st.error(f"Start error: {e}")
-    
-    with control_col2:
+
+    with c2:
         if st.button("⏹️ Stop Automation", disabled=not is_running):
             with st.spinner("Stopping automation..."):
                 try:
                     success = asyncio.run(automated_trader.stop())
                     if success:
+                        st.session_state.auto_running = False
                         st.success("✅ Automation stopped!")
                         st.rerun()
                     else:
                         st.error("❌ Failed to stop automation")
                 except Exception as e:
                     st.error(f"Stop error: {e}")
-    
-    with control_col3:
+
+    with c3:
         if st.button("🔄 Reset Stats"):
             try:
                 asyncio.run(automated_trader.reset_stats())
@@ -458,47 +449,18 @@ def display_automation_tab():
                 st.rerun()
             except Exception as e:
                 st.error(f"Reset error: {e}")
-    
-    # ====== PERFORMANCE SUMMARY ======
+
+    # ===== PERFORMANCE SUMMARY =====
     if is_running or status.get("stats", {}).get("total_trades", 0) > 0:
         st.markdown("### 📊 Performance Summary")
         performance = automated_trader.get_performance_summary()
-        
-        perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
-        
-        with perf_col1:
-            st.metric("Total Trades", performance.get("total_trades", 0))
-        
-        with perf_col2:
-            win_rate = performance.get("win_rate", 0)
-            st.metric("Win Rate", f"{win_rate}%")
-        
-        with perf_col3:
-            total_pnl = performance.get("total_pnl", 0)
-            st.metric("Total PnL", f"${total_pnl:.2f}")
-        
-        with perf_col4:
-            runtime = performance.get("runtime", "N/A")
-            st.metric("Runtime", runtime)
-        
-        # ====== RECENT ACTIVITY ======
-        if is_running:
-            st.markdown("### 🕐 Recent Activity")
-            recent_trades = db_manager.get_trades(limit=5)
-            
-            if recent_trades:
-                activity_data = [{
-                    "Time": t.timestamp.strftime("%H:%M:%S") if t.timestamp else "N/A",
-                    "Symbol": t.symbol,
-                    "Side": t.side,
-                    "Entry": f"${t.entry_price:.4f}",
-                    "Status": t.status.title(),
-                    "Type": "Virtual" if t.virtual else "Real"
-                } for t in recent_trades]
-                
-                st.dataframe(pd.DataFrame(activity_data), height=200)
-            else:
-                st.info("No recent activity")
+
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Total Trades", performance.get("total_trades", 0))
+        p2.metric("Win Rate", f"{performance.get('win_rate', 0)}%")
+        p3.metric("Total PnL", f"${performance.get('total_pnl', 0):.2f}")
+        p4.metric("Runtime", performance.get("runtime", 'N/A'))
+
 
 
 def main():

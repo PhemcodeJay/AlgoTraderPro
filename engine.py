@@ -364,7 +364,7 @@ class TradingEngine:
             return False
 
     def get_open_real_trades(self) -> List[Trade]:
-        """Fetch and sync open real trades from Bybit to database with retry logic"""
+        """Fetch and sync ONLY real open trades from Bybit to database - NO PLACEHOLDERS!"""
         try:
             if not self.client.is_connected():
                 logger.warning("Bybit client not connected. Attempting to reconnect...")
@@ -392,15 +392,38 @@ class TradingEngine:
                     if attempt == retries - 1:
                         logger.error(f"Failed to fetch positions after {retries} attempts: {e}", exc_info=True)
                         return []
-                    time.sleep(2 ** attempt)  # Synchronous sleep for retry
+                    time.sleep(2 ** attempt)
 
             if not positions or "list" not in positions or not positions["list"]:
-                logger.warning("No positions found in Bybit response")
+                logger.info("✅ No open positions found - DB stays clean")  # ← CLEAN LOG
+                # Clean any stale trades (safety)
+                self._close_all_stale_trades(positions)
                 return []
 
             open_trades = []
+            valid_positions = []  # Track only REAL positions
+            
+            # ✅ STEP 1: Filter ONLY real positions (size > 0)
             for pos in positions["list"]:
-                if float(pos.get("size", 0)) <= 0:
+                size = float(pos.get("size", 0))
+                if size <= 0:
+                    continue  # ← BYE BYE ZERO POSITIONS!
+                
+                valid_positions.append(pos)
+                symbol = pos.get("symbol")
+                logger.info(f"🔍 Found real position: {symbol} (size: {size})")
+
+            if not valid_positions:
+                logger.info("✅ No valid positions - skipping DB ops")
+                return []
+
+            # ✅ STEP 2: Process ONLY real positions
+            for pos in valid_positions:
+                position_id = str(pos.get("positionIdx"))
+                
+                # SAFETY: Skip if position_id is 0 or invalid
+                if not position_id or position_id == "0":
+                    logger.warning(f"⚠️ Skipping invalid position_id: {position_id}")
                     continue
 
                 symbol = pos.get("symbol")
@@ -408,18 +431,16 @@ class TradingEngine:
                 qty = float(pos.get("size"))
                 entry_price = float(pos.get("avgPrice"))
                 leverage = int(float(pos.get("leverage")))
-                position_id = str(pos.get("positionIdx"))  # Ensure positionIdx is a string
                 sl = float(pos.get("stopLoss") or 0)
                 tp = float(pos.get("takeProfit") or 0)
                 created_at = datetime.fromtimestamp(float(pos.get("createdTime")) / 1000, timezone.utc)
 
-                # Define trade_data for both new and existing trades
                 trade_data = {
                     "symbol": symbol,
                     "side": side,
                     "qty": qty,
                     "entry_price": entry_price,
-                    "order_id": position_id,
+                    "order_id": position_id,  # ← REAL ID, never 0!
                     "virtual": False,
                     "status": "open",
                     "score": 0.0,
@@ -433,81 +454,65 @@ class TradingEngine:
                     "timestamp": created_at
                 }
 
-                # Check if trade exists in DB
+                # Check if trade exists
                 existing_trade = self.db.get_trade_by_order_id(position_id)
                 if existing_trade:
-                    # Update existing trade
-                    from sqlalchemy import update
-                    if not self.db.session:
-                        logger.error("Database session not initialized")
-                        return []
-                    try:
-                        self.db.session.execute(
-                            update(TradeModel)
-                            .where(TradeModel.order_id == position_id)
-                            .values(
-                                qty=qty,
-                                entry_price=entry_price,
-                                leverage=leverage,
-                                sl=sl,
-                                tp=tp,
-                                status="open",
-                                updated_at=datetime.now(timezone.utc)
-                            )
-                        )
-                        self.db.session.commit()
-                        logger.info(f"Updated trade {position_id} for {symbol} in DB")
-                    except Exception as e:
-                        self.db.session.rollback()
-                        logger.error(f"Failed to update trade {position_id}: {e}", exc_info=True)
+                    # Update existing
+                    success = self.db.update_trade(position_id, {
+                        "qty": qty, "entry_price": entry_price, "leverage": leverage,
+                        "sl": sl, "tp": tp, "status": "open"
+                    })
+                    if success:
+                        logger.info(f"✅ Updated real trade {position_id} for {symbol}")
                 else:
-                    # Create new trade
+                    # Create new
                     success = self.db.add_trade(trade_data)
                     if success:
-                        logger.info(f"Added new real trade {position_id} for {symbol} to DB")
+                        logger.info(f"✅ Added new real trade {position_id} for {symbol}")
                     else:
-                        logger.error(f"Failed to add trade {position_id} for {symbol} to DB")
+                        logger.error(f"❌ Failed to add trade {position_id}")
+                        continue
 
-                trade = Trade(**trade_data)
-                open_trades.append(trade)
+                open_trades.append(Trade(**trade_data))
 
-            # Remove stale trades from DB
-            db_trades = self.db.get_open_trades(virtual=False)
-            db_order_ids = {trade.order_id for trade in db_trades}
-            bybit_order_ids = {pos.get("positionIdx") for pos in positions["list"] if float(pos.get("size", 0)) > 0}
-            for trade in db_trades:
-                if trade.order_id not in bybit_order_ids:
-                    from sqlalchemy import update
-                    if not self.db.session:
-                        logger.error("Database session not initialized")
-                        return []
-                    try:
-                        current_price = self.client.get_current_price(trade.symbol)
-                        if current_price <= 0:
-                            current_price = trade.entry_price  # Fallback to entry price
-                        self.db.session.execute(
-                            update(TradeModel)
-                            .where(TradeModel.order_id == trade.order_id)
-                            .values(
-                                status="closed",
-                                exit_price=float(current_price),
-                                closed_at=datetime.now(timezone.utc)
-                            )
-                        )
-                        self.db.session.commit()
-                        logger.info(f"Closed stale trade {trade.order_id} in DB")
-                    except Exception as e:
-                        self.db.session.rollback()
-                        logger.error(f"Failed to close stale trade {trade.order_id}: {e}", exc_info=True)
-
-            # Sync wallet balance after trade updates
+            # ✅ STEP 3: Close ONLY truly stale trades
+            self._close_all_stale_trades(positions)
+            
+            # Sync balance
             self.sync_real_balance()
+            logger.info(f"✅ Synced {len(open_trades)} real trades")
             return open_trades
 
         except Exception as e:
-            logger.error(f"Error syncing open real trades: {e}", exc_info=True)
+            logger.error(f"❌ Error syncing real trades: {e}", exc_info=True)
             return []
 
+    # ✅ HELPER: Clean & efficient stale trade closer
+    def _close_all_stale_trades(self, positions):
+        """Close ONLY trades not in current Bybit positions"""
+        try:
+            bybit_order_ids = {
+                str(pos.get("positionIdx")) 
+                for pos in positions["list"] 
+                if float(pos.get("size", 0)) > 0 and str(pos.get("positionIdx")) != "0"
+            }
+            
+            db_trades = self.db.get_open_trades(virtual=False)
+            stale_count = 0
+            
+            for trade in db_trades:
+                if trade.order_id not in bybit_order_ids:
+                    current_price = self.client.get_current_price(trade.symbol) or trade.entry_price
+                    self.db.close_trade(trade.order_id, float(current_price))
+                    logger.info(f"✅ Closed stale trade {trade.order_id}")
+                    stale_count += 1
+            
+            if stale_count == 0:
+                logger.debug("No stale trades to close")  # Quiet!
+                
+        except Exception as e:
+            logger.error(f"Error closing stale trades: {e}")
+        
     def sync_real_balance(self) -> bool:
         """Sync real wallet balance from Bybit to database"""
         try:
