@@ -241,15 +241,16 @@ class TradingEngine:
         self,
         symbol: str,
         entry_price: float,
+        stop_loss: float,
         risk_percent: Optional[float] = None,
         leverage: Optional[int] = None,
         available_balance: Optional[float] = None
     ) -> float:
-        """Calculate position size based on risk, available balance, leverage, and symbol rules."""
+        """Calculate position size based on risk, stop-loss, available balance, leverage, and symbol rules."""
         try:
             import math
 
-            risk_pct = risk_percent or self.settings.get("RISK_PCT", 0.01)
+            risk_pct = risk_percent or self.settings.get("RISK_PCT", 0.01)  # Default to 1%
             lev = leverage or self.settings.get("LEVERAGE", 15)
 
             mode = "real" if self.db.get_setting("trading_mode") == "real" else "virtual"
@@ -263,9 +264,15 @@ class TradingEngine:
                 logger.warning(f"Cannot calculate position size for {symbol}: Available balance is {balance}")
                 return 0.0
 
-            risk_amount = max(balance * risk_pct, 2.0)
-            position_value = risk_amount * lev
-            position_size = position_value / entry_price
+            # Calculate risk based on stop-loss distance
+            if stop_loss <= 0 or entry_price <= 0:
+                logger.warning(f"Invalid entry_price ({entry_price}) or stop_loss ({stop_loss}) for {symbol}")
+                return 0.0
+            
+            risk_distance = abs(entry_price - stop_loss) / entry_price
+            risk_amount = max(balance * risk_pct, 1.0)  # Minimum $1 risk
+            position_value = risk_amount / risk_distance
+            position_size = position_value / entry_price * lev
 
             symbol_info = self.get_symbol_info(symbol)
             if not symbol_info:
@@ -280,15 +287,10 @@ class TradingEngine:
                 min_position_value = min_qty * entry_price
                 min_margin_required = min_position_value / lev
                 if min_margin_required > balance:
-                    fraction = balance * lev / entry_price
-                    if fraction >= qty_step:
-                        position_size = max(fraction, qty_step)
-                        logger.info(f"Adjusted tiny balance to position size {position_size} for {symbol}")
-                    else:
-                        logger.warning(
-                            f"Skipping {symbol}: required margin {min_margin_required:.2f}, available {balance:.2f}"
-                        )
-                        return 0.0
+                    logger.warning(
+                        f"Skipping {symbol}: required margin {min_margin_required:.2f}, available {balance:.2f}"
+                    )
+                    return 0.0
                 else:
                     position_size = min_qty
                     logger.info(f"Adjusted position size up to minimum {min_qty} for {symbol}")
@@ -296,6 +298,7 @@ class TradingEngine:
             if qty_step > 0:
                 position_size = round(position_size / qty_step) * qty_step
 
+            logger.info(f"Calculated position size for {symbol}: {position_size:.6f} (risk: ${risk_amount:.2f}, balance: ${balance:.2f})")
             return position_size
 
         except Exception as e:
@@ -364,7 +367,7 @@ class TradingEngine:
             return False
 
     def get_open_real_trades(self) -> List[Trade]:
-        """Fetch and sync ONLY real open trades from Bybit to database - NO PLACEHOLDERS!"""
+        """Fetch and sync ONLY real open trades from Bybit to database"""
         try:
             if not self.client.is_connected():
                 logger.warning("Bybit client not connected. Attempting to reconnect...")
@@ -395,52 +398,47 @@ class TradingEngine:
                     time.sleep(2 ** attempt)
 
             if not positions or "list" not in positions or not positions["list"]:
-                logger.info("✅ No open positions found - DB stays clean")  # ← CLEAN LOG
-                # Clean any stale trades (safety)
+                logger.info("No open positions found")
                 self._close_all_stale_trades(positions)
                 return []
 
             open_trades = []
-            valid_positions = []  # Track only REAL positions
+            valid_positions = []
             
-            # ✅ STEP 1: Filter ONLY real positions (size > 0)
             for pos in positions["list"]:
                 size = float(pos.get("size", 0))
                 if size <= 0:
-                    continue  # ← BYE BYE ZERO POSITIONS!
+                    continue
+                
+                position_id = pos.get("positionIdx", 0)
+                if position_id == 0:
+                    logger.info(f"Using default position_id 0 for {pos.get('symbol')}")
                 
                 valid_positions.append(pos)
-                symbol = pos.get("symbol")
-                logger.info(f"🔍 Found real position: {symbol} (size: {size})")
+                logger.info(f"Found real position: {pos.get('symbol')} (size: {size}, position_id: {position_id})")
 
             if not valid_positions:
-                logger.info("✅ No valid positions - skipping DB ops")
+                logger.info("No valid positions")
+                self._close_all_stale_trades(positions)
                 return []
 
-            # ✅ STEP 2: Process ONLY real positions
             for pos in valid_positions:
-                position_id = str(pos.get("positionIdx"))
-                
-                # SAFETY: Skip if position_id is 0 or invalid
-                if not position_id or position_id == "0":
-                    logger.warning(f"⚠️ Skipping invalid position_id: {position_id}")
-                    continue
-
+                position_id = str(pos.get("positionIdx", 0))
                 symbol = pos.get("symbol")
                 side = pos.get("side").upper()
                 qty = float(pos.get("size"))
-                entry_price = float(pos.get("avgPrice"))
-                leverage = int(float(pos.get("leverage")))
-                sl = float(pos.get("stopLoss") or 0)
-                tp = float(pos.get("takeProfit") or 0)
-                created_at = datetime.fromtimestamp(float(pos.get("createdTime")) / 1000, timezone.utc)
+                entry_price = float(pos.get("avgPrice", 0))
+                leverage = int(float(pos.get("leverage", 15)))
+                sl = float(pos.get("stopLoss", 0))
+                tp = float(pos.get("takeProfit", 0))
+                created_at = datetime.fromtimestamp(float(pos.get("createdTime", 0)) / 1000, timezone.utc)
 
                 trade_data = {
                     "symbol": symbol,
                     "side": side,
                     "qty": qty,
                     "entry_price": entry_price,
-                    "order_id": position_id,  # ← REAL ID, never 0!
+                    "order_id": position_id,
                     "virtual": False,
                     "status": "open",
                     "score": 0.0,
@@ -454,47 +452,40 @@ class TradingEngine:
                     "timestamp": created_at
                 }
 
-                # Check if trade exists
                 existing_trade = self.db.get_trade_by_order_id(position_id)
                 if existing_trade:
-                    # Update existing
                     success = self.db.update_trade(position_id, {
                         "qty": qty, "entry_price": entry_price, "leverage": leverage,
                         "sl": sl, "tp": tp, "status": "open"
                     })
                     if success:
-                        logger.info(f"✅ Updated real trade {position_id} for {symbol}")
+                        logger.info(f"Updated real trade {position_id} for {symbol}")
                 else:
-                    # Create new
                     success = self.db.add_trade(trade_data)
                     if success:
-                        logger.info(f"✅ Added new real trade {position_id} for {symbol}")
+                        logger.info(f"Added new real trade {position_id} for {symbol}")
                     else:
-                        logger.error(f"❌ Failed to add trade {position_id}")
+                        logger.error(f"Failed to add trade {position_id}")
                         continue
 
                 open_trades.append(Trade(**trade_data))
 
-            # ✅ STEP 3: Close ONLY truly stale trades
             self._close_all_stale_trades(positions)
-            
-            # Sync balance
             self.sync_real_balance()
-            logger.info(f"✅ Synced {len(open_trades)} real trades")
+            logger.info(f"Synced {len(open_trades)} real trades")
             return open_trades
 
         except Exception as e:
-            logger.error(f"❌ Error syncing real trades: {e}", exc_info=True)
+            logger.error(f"Error syncing real trades: {e}", exc_info=True)
             return []
 
-    # ✅ HELPER: Clean & efficient stale trade closer
     def _close_all_stale_trades(self, positions):
-        """Close ONLY trades not in current Bybit positions"""
+        """Close trades not in current Bybit positions"""
         try:
             bybit_order_ids = {
-                str(pos.get("positionIdx")) 
-                for pos in positions["list"] 
-                if float(pos.get("size", 0)) > 0 and str(pos.get("positionIdx")) != "0"
+                str(pos.get("positionIdx", 0))
+                for pos in positions["list"]
+                if float(pos.get("size", 0)) > 0
             }
             
             db_trades = self.db.get_open_trades(virtual=False)
@@ -504,16 +495,16 @@ class TradingEngine:
                 if trade.order_id not in bybit_order_ids:
                     current_price = self.client.get_current_price(trade.symbol) or trade.entry_price
                     self.db.close_trade(trade.order_id, float(current_price))
-                    logger.info(f"✅ Closed stale trade {trade.order_id}")
+                    logger.info(f"Closed stale trade {trade.order_id}")
                     stale_count += 1
             
             if stale_count == 0:
-                logger.debug("No stale trades to close")  # Quiet!
+                logger.debug("No stale trades to close")
                 
         except Exception as e:
             logger.error(f"Error closing stale trades: {e}")
-        
-    def sync_real_balance(self) -> bool:
+
+    def sync_real_balance(self) -> Dict:
         """Sync real wallet balance from Bybit to database"""
         try:
             if not self.client.is_connected():
@@ -522,13 +513,12 @@ class TradingEngine:
                     self.client = BybitClient()
                     if not self.client.is_connected():
                         logger.error("Reconnection failed. Check API credentials and network.")
-                        return False
+                        return {"capital": 0.0, "available": 0.0, "used": 0.0}
                     logger.info("Bybit client reconnected successfully")
                 except Exception as e:
                     logger.error(f"Reconnection failed: {e}", exc_info=True)
-                    return False
+                    return {"capital": 0.0, "available": 0.0, "used": 0.0}
 
-            # Retry logic for balance sync
             retries = 3
             for attempt in range(retries):
                 try:
@@ -540,20 +530,20 @@ class TradingEngine:
                     logger.warning(f"Attempt {attempt + 1}/{retries} failed to sync balance: {e}")
                     if attempt == retries - 1:
                         logger.error(f"Failed to sync balance after {retries} attempts: {e}", exc_info=True)
-                        return False
-                    time.sleep(2 ** attempt)  # Synchronous sleep for retry
+                        return {"capital": 0.0, "available": 0.0, "used": 0.0}
+                    time.sleep(2 ** attempt)
 
             if not result or "list" not in result or not result["list"]:
                 logger.warning("No account data in Bybit response")
-                return False
+                return {"capital": 0.0, "available": 0.0, "used": 0.0}
 
             wallet = result["list"][0]
-            total_equity = float(wallet.get("totalEquity") or 0.0)
+            total_equity = float(wallet.get("totalEquity", 0.0))
             coins = wallet.get("coin", [])
             usdt_coin = next((c for c in coins if c.get("coin") == "USDT"), None)
 
             if usdt_coin:
-                total_available = float(usdt_coin.get("walletBalance") or 0.0)
+                total_available = float(usdt_coin.get("walletBalance", 0.0))
             else:
                 total_available = total_equity
 
@@ -587,17 +577,17 @@ class TradingEngine:
 
             if self.db.update_wallet_balance(wallet_balance):
                 logger.info(
-                    f"✅ Real balance synced with Bybit: Capital=${total_equity:.2f}, "
+                    f"Real balance synced with Bybit: Capital=${total_equity:.2f}, "
                     f"Available=${total_available:.2f}, Used=${used:.2f}"
                 )
-                return True
+                return {"capital": total_equity, "available": total_available, "used": used}
             else:
                 logger.error("Failed to update wallet balance in database")
-                return False
+                return {"capital": total_equity, "available": total_available, "used": used}
 
         except Exception as e:
-            logger.error(f"❌ Error syncing real balance: {e}", exc_info=True)
-            return False
+            logger.error(f"Error syncing real balance: {e}", exc_info=True)
+            return {"capital": 0.0, "available": 0.0, "used": 0.0}
 
     def get_open_virtual_trades(self) -> List[Trade]:
         """Fetch open virtual trades from database"""
@@ -622,7 +612,7 @@ class TradingEngine:
                 logger.error(f"Invalid entry price for {symbol}")
                 return False
             
-            position_size = self.calculate_position_size(symbol, entry_price)
+            position_size = self.calculate_position_size(symbol, entry_price, signal.get("sl", 0))
             
             trade_data = {
                 "symbol": symbol,
@@ -657,7 +647,7 @@ class TradingEngine:
             logger.error(f"Error executing virtual trade: {e}", exc_info=True)
             return False
             
-    async def execute_real_trade(self, signals: List[Dict], trading_mode: str = "real") -> bool:
+    async def execute_real_trades(self, signals: List[Dict], trading_mode: str = "real") -> bool:
         """Execute multiple real trades on Bybit based on a list of signals with retry logic"""
         try:
             if not self.is_trading_enabled():
@@ -685,6 +675,7 @@ class TradingEngine:
             open_trades = self.get_open_real_trades()
             current_positions = len(open_trades)
             total_position_value = sum(trade.entry_price * trade.qty for trade in open_trades)
+            balance = self.sync_real_balance()["available"]
 
             # Process signals in a batch, respecting rate limits
             for signal in signals:
@@ -696,7 +687,7 @@ class TradingEngine:
                 side = signal.get("side", "Buy").upper()
                 entry_price = signal.get("entry") or self.client.get_current_price(symbol)
                 if entry_price <= 0:
-                    logger.error(f"Invalid entry price for {symbol}")
+                    logger.error(f"Invalid entry price for {symbol}: {entry_price}")
                     continue
 
                 # Get symbol-specific tick size
@@ -715,9 +706,17 @@ class TradingEngine:
                         sl = round_to_precision(entry_price * (1 + sl_percent), tick_size)
                         tp = round_to_precision(entry_price * (1 - tp_percent), tick_size)
 
-                position_size = self.calculate_position_size(symbol, entry_price)
+                leverage = signal.get("leverage", 15)
+                # Set leverage before placing order (required for Bybit V5 API)
+                leverage_result = await self.client.set_leverage(symbol, leverage)
+                if "error" in leverage_result:
+                    logger.error(f"Failed to set leverage for {symbol}: {leverage_result['error']}")
+                    self._consecutive_failures += 1
+                    continue
+
+                position_size = self.calculate_position_size(symbol, entry_price, sl, leverage=leverage, available_balance=balance)
                 if position_size <= 0:
-                    logger.error(f"Invalid position size for {symbol}: {position_size}")
+                    logger.error(f"Invalid position size for {symbol}: {position_size} (balance: ${balance:.2f})")
                     continue
 
                 if current_positions >= self.max_open_positions:
@@ -738,7 +737,7 @@ class TradingEngine:
                             symbol=symbol,
                             side=side,
                             qty=position_size,
-                            leverage=signal.get("leverage", 15),
+                            leverage=leverage,
                             mode="CROSS",
                             stop_loss=sl,
                             take_profit=tp
@@ -757,6 +756,7 @@ class TradingEngine:
                 if not order_response or "error" in order_response or not order_response.get("order_id"):
                     logger.error(f"Failed to place order for {symbol}: {order_response.get('error', 'Unknown error') if order_response else 'No response'}")
                     self._consecutive_failures += 1
+                    self.failed_trades += 1
                     continue
 
                 order_id = order_response.get("order_id")
@@ -771,12 +771,12 @@ class TradingEngine:
                     "status": "open",
                     "score": signal.get("score", 0.0),
                     "strategy": signal.get("strategy", "Auto"),
-                    "leverage": signal.get("leverage", 15),
+                    "leverage": leverage,
                     "sl": sl,
                     "tp": tp,
                     "trail": signal.get("trail", 0.0),
                     "liquidation": signal.get("liquidation", 0.0),
-                    "margin_usdt": position_size * entry_price / signal.get("leverage", 15),
+                    "margin_usdt": position_size * entry_price / leverage,
                     "timestamp": datetime.now(timezone.utc)
                 }
 
@@ -843,7 +843,7 @@ class TradingEngine:
             return [trade for trade in trades if not trade.virtual and trade.status.lower() == "closed"]
         except Exception as e:
             logger.error(f"Error fetching closed real trades: {e}", exc_info=True)
-        return []
+            return []
 
     def close(self):
         """Clean up resources"""

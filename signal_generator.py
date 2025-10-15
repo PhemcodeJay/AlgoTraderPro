@@ -31,7 +31,7 @@ def get_usdt_symbols(limit: int = 50, _trading_mode: str = "virtual") -> List[st
                 logger.info(f"Fetched {len(symbols)} USDT symbols from Bybit API for real mode")
                 return symbols[:limit]
             except Exception as e:
-                logger.error(f"Error fetching USDT symbols from Bybit API: {e}")
+                logger.error(f"Error fetching USDT symbols from Bybit API: {e}", exc_info=True)
                 return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
         else:
             symbols = get_top_symbols(limit)
@@ -41,55 +41,68 @@ def get_usdt_symbols(limit: int = 50, _trading_mode: str = "virtual") -> List[st
             logger.info(f"Fetched {len(symbols)} USDT symbols for virtual mode")
             return symbols[:limit]
     except Exception as e:
-        logger.error(f"Error in get_usdt_symbols: {e}")
+        logger.error(f"Error in get_usdt_symbols: {e}", exc_info=True)
         return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
 
 def calculate_signal_score(analysis: Dict[str, Any]) -> float:
+    """Calculate a score for a signal based on indicators."""
     score = analysis.get("score", 0)
     indicators = analysis.get("indicators", {})
 
+    # RSI scoring (broadened to avoid overly restrictive filtering)
     rsi = indicators.get("rsi", 50)
-    if 20 <= rsi <= 25 or 75 <= rsi <= 80:  # Adjusted for tighter ranges
-        score += 10
-    elif rsi < 20 or rsi > 80:
-        score += 5
+    if rsi <= 30:  # Oversold
+        score += 8
+    elif rsi >= 70:  # Overbought
+        score += 8
+    elif 40 <= rsi <= 60:  # Neutral zone
+        score += 4
 
-    # macd_hist not in original, skipping unless added
-
+    # Volume ratio scoring
     vol_ratio = indicators.get("volume_ratio", 1)
     if vol_ratio > 2:
-        score += 12
-    elif vol_ratio > 1.5:
-        score += 6
+        score += 15  # Increased weight for high volume
+    elif vol_ratio > 1.2:
+        score += 8
 
+    # Volatility scoring
     vol = indicators.get("volatility", 0)
-    if vol > 5:  # Filter high volatility: set score to 0 to skip
-        logger.info(f"High volatility ({vol}) for {analysis['symbol']}, skipping signal")
-        return 0
-    if 0.5 <= vol <= 3:
-        score += 5
+    if vol > 3:
+        logger.info(f"High volatility ({vol}) detected for {analysis['symbol']}, boosting score")
+        score += 12  # Increased reward for high volatility
+    elif vol > 1:
+        score += 6
+    else:
+        score += 3
 
+    # Trend scoring
     trend_score = indicators.get("trend_score", 0)
-    score += trend_score * 3
+    score += trend_score * 4  # Increased weight for trend alignment
 
     return min(100, max(0, score))
 
 def is_market_bullish(interval: str = "60") -> bool:
-    """Check if overall market (BTC) is bullish based on trend score"""
-    btc_analysis = analyze_symbol("BTCUSDT", interval)
-    if not btc_analysis:
-        return False
-    btc_trend_score = btc_analysis["indicators"].get("trend_score", 0)
-    return btc_trend_score >= 3
+    """Check if overall market (BTC) is bullish based on trend score."""
+    try:
+        btc_analysis = analyze_symbol("BTCUSDT", interval)
+        if not btc_analysis:
+            logger.warning("No BTC analysis available, assuming neutral market")
+            return True  # Allow signals in neutral market
+        btc_trend_score = btc_analysis["indicators"].get("trend_score", 0)
+        return btc_trend_score >= 2  # Lowered threshold to allow more signals
+    except Exception as e:
+        logger.error(f"Error checking market trend: {e}", exc_info=True)
+        return True  # Fallback to allow signals if BTC analysis fails
 
 def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """Enhance signal with additional parameters like SL/TP, leverage, etc."""
     indicators = analysis.get("indicators", {})
     price = indicators.get("price", 0)
     atr = indicators.get("atr", 0)
     side = analysis.get("side", "Buy").title()
     leverage = 15
-    atr_multiplier = 3  # Increased from 2 for volatile crypto (wider SL to avoid whipsaws)
-    risk_reward = 3  # Upgraded from 2 to 3:1 for better profitability
+    atr_multiplier = 3
+    risk_reward = 3
 
     # Bollinger Bands slope
     bb_upper = indicators.get("bb_upper", 0)
@@ -108,7 +121,7 @@ def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
     enhanced = analysis.copy()
     enhanced.update({
         "entry": round(price, 6),
-        "trail": round(atr, 6),  # For trailing SL
+        "trail": round(atr, 6),
         "margin_usdt": 1.0,
         "bb_slope": bb_slope,
         "market": market_type,
@@ -118,7 +131,6 @@ def enhance_signal(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": datetime.now(timezone.utc)
     })
 
-    # Normalize signal to include SL/TP (assuming normalize_signal computes them based on params)
     enhanced = normalize_signal(enhanced)
     return enhanced
 
@@ -141,57 +153,54 @@ def generate_signals(
     
     # Check overall market trend (BTC) to align signals
     market_bullish = is_market_bullish(interval)
+    logger.info(f"Market trend: {'Bullish' if market_bullish else 'Bearish or Neutral'}")
     
     raw_analyses = scan_multiple_symbols(symbols, interval, max_workers=5)
     if not raw_analyses:
-        logger.warning("No analysis results")
+        logger.warning("No analysis results from scan_multiple_symbols")
         return []
 
     scored_signals = []
-    min_score = 50 if trading_mode == "real" else 40
+    min_score = 30 if trading_mode == "real" else 40  # Lowered min_score for real mode
     for analysis in raw_analyses:
         score = calculate_signal_score(analysis)
         analysis["score"] = score
-        # Align with market trend: skip buy if market not bullish, skip sell if market bullish
-        if score >= min_score:
-            if analysis["signal_type"] == "buy" and not market_bullish:
-                logger.info(f"Skipping buy signal for {analysis['symbol']} due to bearish market trend")
-                continue
-            elif analysis["signal_type"] == "sell" and market_bullish:
-                logger.info(f"Skipping sell signal for {analysis['symbol']} due to bullish market trend")
-                continue
-            scored_signals.append(analysis)
+        if score < min_score:
+            logger.info(f"Skipping {analysis['symbol']} due to low score: {score} < {min_score}")
+            continue
+        # Soften market trend filter to allow neutral market signals
+        if analysis["signal_type"] == "buy" and not market_bullish and analysis["score"] < 60:
+            logger.info(f"Skipping buy signal for {analysis['symbol']} due to non-bullish market and score {score}")
+            continue
+        elif analysis["signal_type"] == "sell" and market_bullish and analysis["score"] < 60:
+            logger.info(f"Skipping sell signal for {analysis['symbol']} due to bullish market and score {score}")
+            continue
+        scored_signals.append(analysis)
+        logger.info(f"Valid signal for {analysis['symbol']}: score={score}, type={analysis['signal_type']}")
 
     if not scored_signals:
-        logger.info("No significant signals found after scoring")
+        logger.warning("No signals passed scoring threshold")
         return []
 
-    # ML filtering
+    # ML filtering with fallback
     ml_filter = MLFilter()
     try:
         filtered_signals = ml_filter.filter_signals(scored_signals)
+        logger.info(f"ML filter retained {len(filtered_signals)}/{len(scored_signals)} signals")
     except Exception as e:
-        logger.warning(f"ML filter failed: {e}")
-        filtered_signals = scored_signals
+        logger.error(f"ML filter failed: {e}", exc_info=True)
+        filtered_signals = scored_signals  # Fallback to unfiltered signals
+        logger.info("Bypassing ML filter due to error")
+
+    # Sort by score and take top N
+    filtered_signals.sort(key=lambda x: x["score"], reverse=True)
+    top_signals = filtered_signals[:top_n]
+    logger.info(f"Selected top {len(top_signals)} signals")
 
     # Enhance and store signals
     final_signals = []
-    for s in filtered_signals[:top_n]:
-        if isinstance(s, Signal):
-            s_dict = {
-                "symbol": s.symbol,
-                "interval": s.interval,
-                "signal_type": s.signal_type,
-                "score": s.score,
-                "indicators": s.indicators,
-                "side": s.side,
-                "entry": s.entry,
-            }
-            enhanced = enhance_signal(s_dict)
-        else:
-            enhanced = enhance_signal(s)
-
-        final_signals.append(enhanced)
+    for analysis in top_signals:
+        enhanced = enhance_signal(analysis)
 
         # Save to DB
         signal_obj = Signal(
@@ -214,17 +223,20 @@ def generate_signals(
 
         try:
             db_manager.add_signal(signal_obj)
-            logger.info(f"Saved signal for {signal_obj.symbol} to database")
+            logger.info(f"Saved signal for {signal_obj.symbol} to database (score={signal_obj.score})")
         except Exception as e:
-            logger.error(f"Failed to save signal {enhanced.get('symbol')} to DB: {e}")
+            logger.error(f"Failed to save signal {enhanced.get('symbol')} to DB: {e}", exc_info=True)
+
+        final_signals.append(enhanced)
 
     if final_signals and trading_mode == "real":
         try:
             send_all_notifications(final_signals)
             logger.info(f"Sent notifications for {len(final_signals)} real mode signals")
         except Exception as e:
-            logger.error(f"Failed to send notifications for real mode signals: {e}")
+            logger.error(f"Failed to send notifications for real mode signals: {e}", exc_info=True)
 
+    logger.info(f"Generated {len(final_signals)} final signals")
     return final_signals
 
 # -------------------------------
@@ -232,6 +244,7 @@ def generate_signals(
 # -------------------------------
 
 def get_signal_summary(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Summarize signal statistics."""
     if not signals:
         return {"total": 0, "avg_score": 0, "top_symbol": "None"}
 
@@ -273,15 +286,15 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
 
     analysis = raw_analyses[0]
     analysis["score"] = calculate_signal_score(analysis)
-    if analysis["signal_type"] == "buy" and not market_bullish:
-        logger.info(f"Skipping buy signal for {symbol} due to bearish market trend")
+    min_score = 30 if trading_mode == "real" else 40
+    if analysis["score"] < min_score:
+        logger.info(f"Signal score for {symbol} too low: {analysis['score']} < {min_score}")
         return {}
-    elif analysis["signal_type"] == "sell" and market_bullish:
-        logger.info(f"Skipping sell signal for {symbol} due to bullish market trend")
+    if analysis["signal_type"] == "buy" and not market_bullish and analysis["score"] < 60:
+        logger.info(f"Skipping buy signal for {symbol} due to non-bullish market and score {analysis['score']}")
         return {}
-
-    if (trading_mode == "real" and analysis["score"] < 50) or (trading_mode == "virtual" and analysis["score"] < 40):
-        logger.info(f"Signal score for {symbol} too low: {analysis['score']}")
+    elif analysis["signal_type"] == "sell" and market_bullish and analysis["score"] < 60:
+        logger.info(f"Skipping sell signal for {symbol} due to bullish market and score {analysis['score']}")
         return {}
 
     enhanced = enhance_signal(analysis)
@@ -307,16 +320,16 @@ def analyze_single_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
 
     try:
         db_manager.add_signal(signal_obj)
-        logger.info(f"Saved signal for {symbol} to database")
+        logger.info(f"Saved signal for {symbol} to database (score={signal_obj.score})")
     except Exception as e:
-        logger.error(f"Failed to save signal {enhanced.get('symbol')} to DB: {e}")
+        logger.error(f"Failed to save signal {enhanced.get('symbol')} to DB: {e}", exc_info=True)
 
     if trading_mode == "real":
         try:
             send_all_notifications([enhanced])
             logger.info(f"Sent notification for real mode signal {symbol}")
         except Exception as e:
-            logger.error(f"Failed to send notification for {symbol}: {e}")
+            logger.error(f"Failed to send notification for {symbol}: {e}", exc_info=True)
 
     return enhanced
 

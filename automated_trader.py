@@ -179,17 +179,18 @@ class AutomatedTrader:
                     # Notify scan start
                     if status_container:
                         status_container.info(f"🤖 Scanning markets in {trading_mode.title()} mode... Last scan: {self.stats.get('last_scan', 'Never')}")
-                    print(f"\n🚀 Starting new market scan in {trading_mode.title()} mode...")
+                    logger.info(f"Starting new market scan in {trading_mode.title()} mode")
 
                     # Sync balance for real trading
                     if trading_mode == "real":
-                        success = self.engine.sync_real_balance()
-                        if not success:
-                            logger.warning("Failed to sync real balance, retrying in 60s")
+                        balance = self.engine.sync_real_balance()
+                        if not balance or balance["available"] <= 0:
+                            logger.warning(f"Failed to sync real balance or insufficient funds: {balance}")
                             if status_container:
-                                status_container.warning("Failed to sync real balance, retrying in 60s")
+                                status_container.warning("Failed to sync real balance or insufficient funds, retrying in 60s")
                             await asyncio.sleep(60)
                             continue
+                        logger.info(f"Synced real balance: ${balance['available']:.2f} available")
                         self.engine.get_open_real_trades()
 
                     # 1️⃣ Scan for signals and trade
@@ -203,7 +204,7 @@ class AutomatedTrader:
 
                     # 4️⃣ Countdown until next scan
                     next_scan_time = time.time() + self.scan_interval
-                    print(f"\n⏳ Waiting {self.scan_interval//60} minutes until next scan...\n")
+                    logger.info(f"Waiting {self.scan_interval//60} minutes until next scan")
                     while time.time() < next_scan_time and self.is_running and not self.stop_event.is_set():
                         remaining = int(next_scan_time - time.time())
                         hours, rem = divmod(remaining, 3600)
@@ -221,13 +222,13 @@ class AutomatedTrader:
 
                         await asyncio.sleep(1)
 
-                    print("\r🚀 Countdown finished — initiating next market scan...       \n")
+                    logger.info("Countdown finished — initiating next market scan")
 
                 except Exception as e:
                     logger.error(f"Error in trading loop: {e}", exc_info=True)
                     if status_container:
                         status_container.warning(f"Trading loop error: {e}")
-                    await asyncio.sleep(60)  # retry after 1 minute
+                    await asyncio.sleep(60)  # Retry after 1 minute
 
         except asyncio.CancelledError:
             logger.info("Trading loop cancelled")
@@ -235,7 +236,6 @@ class AutomatedTrader:
             logger.critical(f"Unexpected trading loop error: {e}", exc_info=True)
             if status_container:
                 status_container.error(f"Critical trading loop error: {e}")
-
 
     async def _scan_and_trade(self, trading_mode: str):
         """Scan for signals and execute trades"""
@@ -248,10 +248,13 @@ class AutomatedTrader:
                 logger.info("No signals generated")
                 return
             
-            # Get current positions count
+            # Get current positions count and balance
             current_positions = len(self.engine.get_open_virtual_trades()) if trading_mode == "virtual" else len(self.engine.get_open_real_trades())
+            balance = self.engine.sync_real_balance() if trading_mode == "real" else {"available": 100.0}
+            available_balance = balance.get("available", 0.0)
+            logger.info(f"Current positions: {current_positions}, Available balance: ${available_balance:.2f}")
             
-            # Filter signals to respect max positions
+            # Filter signals to respect max positions and balance
             max_new_trades = self.max_positions - current_positions
             filtered_signals = []
             
@@ -261,16 +264,27 @@ class AutomatedTrader:
                     logger.warning("Skipping signal with missing symbol")
                     continue
                 
-                # Risk check
-                position_size = self.engine.calculate_position_size(symbol, signal.get("entry", 0))
-                risk_amount = position_size * self.risk_per_trade
-                if risk_amount > self.engine.max_position_size:
-                    logger.warning(f"Risk too high for {symbol}: {risk_amount} > {self.engine.max_position_size}")
+                # Calculate position size
+                position_size = self.engine.calculate_position_size(
+                    symbol, 
+                    signal.get("entry", 0), 
+                    signal.get("sl", 0),
+                    available_balance=available_balance
+                )
+                if position_size <= 0:
+                    logger.warning(f"Skipping {symbol}: Invalid position size {position_size}")
+                    continue
+                
+                # Risk check (relaxed to allow smaller trades)
+                risk_amount = position_size * signal.get("entry", 0) / self.leverage
+                if risk_amount > available_balance * self.risk_per_trade:
+                    logger.warning(f"Risk too high for {symbol}: {risk_amount:.2f} > {available_balance * self.risk_per_trade:.2f}")
                     continue
                 
                 # Convert signal to dict if needed
                 signal_dict = signal if isinstance(signal, dict) else signal.to_dict()
                 filtered_signals.append(signal_dict)
+                logger.info(f"Valid signal for {symbol}: size={position_size:.6f}, risk=${risk_amount:.2f}")
             
             if not filtered_signals:
                 logger.info("No valid signals after filtering")
@@ -294,7 +308,7 @@ class AutomatedTrader:
                     return
                 
                 try:
-                    success = await self.engine.execute_real_trade(filtered_signals, trading_mode)
+                    success = await self.engine.execute_real_trades(filtered_signals, trading_mode)
                     if success:
                         self.stats["trades_executed"] += len(filtered_signals)
                         # Wait briefly for Bybit to process
@@ -310,7 +324,7 @@ class AutomatedTrader:
                         logger.warning(f"Unified account error: {e}. Retrying with cross margin mode.")
                         for signal_dict in filtered_signals:
                             signal_dict["margin_mode"] = "CROSS"
-                        success = await self.engine.execute_real_trade(filtered_signals, trading_mode)
+                        success = await self.engine.execute_real_trades(filtered_signals, trading_mode)
                         if success:
                             self.stats["trades_executed"] += len(filtered_signals)
                             await asyncio.sleep(2)

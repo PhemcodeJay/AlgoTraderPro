@@ -111,7 +111,6 @@ class BybitClient:
     def _start_background_loop(self):
         """Start background event loop for async operations"""
         try:
-            import threading
             def run_loop():
                 self.loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self.loop)
@@ -121,7 +120,7 @@ class BybitClient:
             thread.start()
             logger.info("Background event loop started")
         except Exception as e:
-            logger.error(f"Failed to start background loop: {e}")
+            logger.error(f"Failed to start background loop: {e}", exc_info=True)
 
     def _generate_signature(self, params: str, timestamp: str) -> str:
         """Generate API signature"""
@@ -221,6 +220,26 @@ class BybitClient:
         elif ret_code == 100028:
             raise APIException(
                 f"Operation forbidden for unified account: {ret_msg}. Use cross margin mode.",
+                error_code=str(ret_code),
+                context=create_error_context(
+                    module=__name__,
+                    function='_handle_api_error',
+                    extra_data={'endpoint': endpoint, 'ret_code': ret_code}
+                )
+            )
+        elif ret_code == 130021:  # Insufficient balance
+            raise APIException(
+                f"Insufficient balance: {ret_msg}",
+                error_code=str(ret_code),
+                context=create_error_context(
+                    module=__name__,
+                    function='_handle_api_error',
+                    extra_data={'endpoint': endpoint, 'ret_code': ret_code}
+                )
+            )
+        elif ret_code == 130004:  # Order quantity too small
+            raise APIException(
+                f"Order quantity too small: {ret_msg}",
                 error_code=str(ret_code),
                 context=create_error_context(
                     module=__name__,
@@ -404,7 +423,8 @@ class BybitClient:
                 
                 logger.error(
                     f"Unexpected error in API request to {endpoint}: {str(e)}",
-                    extra={'endpoint': endpoint, 'attempt': attempt + 1}
+                    extra={'endpoint': endpoint, 'attempt': attempt + 1},
+                    exc_info=True
                 )
                 
                 raise APIException(
@@ -438,7 +458,7 @@ class BybitClient:
             try:
                 self._test_connection()
             except Exception as e:
-                logger.warning(f"Connection verification failed: {e}")
+                logger.warning(f"Connection verification failed: {e}", exc_info=True)
                 self._connected = False
         return self._connected and bool(self.api_key and self.api_secret)
     
@@ -472,7 +492,8 @@ class BybitClient:
                     'error_type': 'authentication',
                     'environment': 'mainnet',
                     'account_type': self.account_type
-                }
+                },
+                exc_info=True
             )
             return False
             
@@ -488,7 +509,8 @@ class BybitClient:
             self._connected = False
             logger.error(
                 f"API error during connection test: {str(e)}",
-                extra={'error_type': 'api_error', 'error_code': e.error_code}
+                extra={'error_type': 'api_error', 'error_code': e.error_code},
+                exc_info=True
             )
             return False
             
@@ -496,7 +518,8 @@ class BybitClient:
             self._connected = False
             logger.error(
                 f"Unexpected error during connection test: {str(e)}",
-                extra={'error_type': 'unexpected'}
+                extra={'error_type': 'unexpected'},
+                exc_info=True
             )
             return False
     
@@ -570,10 +593,11 @@ class BybitClient:
                         updated_at=datetime.utcnow(),
                     )
 
-            return balances
+                logger.info(f"Fetched balances for {len(balances)} coins: {list(balances.keys())}")
+                return balances
 
         except Exception as e:
-            logger.error(f"Error getting account balance from Bybit: {e}")
+            logger.error(f"Error getting account balance from Bybit: {e}", exc_info=True)
             return {}
 
     def get_current_price(self, symbol: str) -> float:
@@ -594,10 +618,11 @@ class BybitClient:
             if result and "list" in result and result["list"]:
                 price = float(result["list"][0].get("lastPrice", 0))
                 self._price_cache[symbol] = (time.time(), price)
+                logger.debug(f"Fetched price for {symbol}: ${price:.6f}")
                 return price
             return 0.0
         except Exception as e:
-            logger.error(f"Error getting price for {symbol}: {e}")
+            logger.error(f"Error getting price for {symbol}: {e}", exc_info=True)
             return 0.0
 
     def get_current_over_price(self, symbol: str) -> float:
@@ -625,11 +650,43 @@ class BybitClient:
                         "close": float(k[4]),
                         "volume": float(k[5])
                     })
+                logger.debug(f"Fetched {len(klines)} klines for {symbol}")
                 return sorted(klines, key=lambda x: x["time"])
             return []
         except Exception as e:
-            logger.error(f"Error getting klines for {symbol}: {e}")
+            logger.error(f"Error getting klines for {symbol}: {e}", exc_info=True)
             return []
+
+    async def set_leverage(self, symbol: str, leverage: int, mode: str = "CROSS") -> bool:
+        """Set leverage for a symbol"""
+        try:
+            if self.account_type == "UNIFIED":
+                mode = "CROSS"
+                logger.info(f"Unified account, using CROSS mode for leverage setting on {symbol}")
+            
+            params = {
+                "category": "linear",
+                "symbol": symbol,
+                "buyLeverage": str(leverage),
+                "sellLeverage": str(leverage)
+            }
+            
+            result = await asyncio.to_thread(self._make_request, "POST", "/v5/position/set-leverage", params)
+            logger.info(f"Set leverage for {symbol} to {leverage}x in {mode} mode")
+            return True
+            
+        except APIException as e:
+            if e.error_code == "100028":
+                logger.warning(f"Unified account error setting leverage for {symbol}: {e}. Using cross margin mode.")
+                params["marginMode"] = "CROSS"
+                result = await asyncio.to_thread(self._make_request, "POST", "/v5/position/set-leverage", params)
+                logger.info(f"Set leverage for {symbol} to {leverage}x in CROSS mode on retry")
+                return True
+            logger.error(f"Error setting leverage for {symbol}: {e}", exc_info=True)
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error setting leverage for {symbol}: {e}", exc_info=True)
+            return False
 
     async def place_order(
         self,
@@ -649,25 +706,40 @@ class BybitClient:
         try:
             leverage = leverage or 15
 
-            # Determine margin mode for unified/non-unified accounts
-            if self.account_type == "UNIFIED":
-                mode = "CROSS"
-                logger.info(f"Unified account detected, using CROSS margin mode for {symbol}")
-            else:
-                trade_mode = 1 if mode.upper() == "ISOLATED" else 0
-                lev_params = {
-                    "category": "linear",
-                    "symbol": symbol,
-                    "tradeMode": trade_mode,
-                    "buyLeverage": str(leverage),
-                    "sellLeverage": str(leverage)
-                }
-                await asyncio.to_thread(self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
+            # Check balance
+            balances = self.get_account_balance()
+            usdt_balance = balances.get("USDT", None)
+            available_balance = usdt_balance.available if usdt_balance else 0.0
+            if available_balance < 1.0:
+                logger.error(f"Insufficient USDT balance: ${available_balance:.2f}")
+                return {"error": f"Insufficient balance: ${available_balance:.2f}"}
 
-            # Get current price to calculate SL/TP if not provided
+            # Get symbol info for minimum order size
+            result = self._make_request("GET", "/v5/market/instruments-info", {
+                "category": "linear",
+                "symbol": symbol
+            })
+            min_qty = 0.0
+            if result and "list" in result and result["list"]:
+                min_qty = float(result["list"][0].get("lotSizeFilter", {}).get("minOrderQty", 0))
+            if qty < min_qty:
+                logger.error(f"Order quantity {qty} for {symbol} below minimum {min_qty}")
+                return {"error": f"Order quantity {qty} below minimum {min_qty}"}
+
+            # Check if order value meets minimum requirements
             entry_price = self.get_current_price(symbol)
             if entry_price <= 0:
                 raise ValueError(f"Invalid entry price for {symbol}: {entry_price}")
+            order_value = qty * entry_price / leverage
+            if order_value > available_balance:
+                logger.error(f"Order value ${order_value:.2f} exceeds available balance ${available_balance:.2f}")
+                return {"error": f"Order value ${order_value:.2f} exceeds available balance ${available_balance:.2f}"}
+
+            # Set leverage
+            leverage_success = await self.set_leverage(symbol, leverage, mode)
+            if not leverage_success:
+                logger.error(f"Failed to set leverage for {symbol}")
+                return {"error": f"Failed to set leverage for {symbol}"}
 
             # Use provided SL/TP or calculate
             side_lower = side.lower()
@@ -687,7 +759,7 @@ class BybitClient:
                 "symbol": symbol,
                 "side": side.title(),
                 "orderType": "Market",
-                "qty": str(qty),
+                "qty": str(round(qty, 8)),
                 "timeInForce": "IOC",  # Immediate or Cancel for market orders
                 "stopLoss": str(round(stop_loss, 8)) if stop_loss is not None else None,
                 "takeProfit": str(round(take_profit, 8)) if take_profit is not None else None
@@ -697,7 +769,7 @@ class BybitClient:
             result = await asyncio.to_thread(self._make_request, "POST", "/v5/order/create", params)
 
             if result:
-                return {
+                order_result = {
                     "order_id": result.get("orderId"),
                     "symbol": symbol,
                     "accountType": self.account_type,
@@ -712,16 +784,24 @@ class BybitClient:
                     "takeProfit": str(round(take_profit, 8)) if take_profit is not None else None,
                     "margin_mode": mode.upper()
                 }
-            return {}
+                logger.info(f"Placed order for {symbol}: side={side}, qty={qty}, leverage={leverage}x, value=${order_value:.2f}")
+                return order_result
+            return {"error": "Empty response from Bybit API"}
 
         except APIException as e:
             if e.error_code == "100028":
-                logger.warning(f"Unified account error for {symbol}: {e}. Using cross margin mode.")
+                logger.warning(f"Unified account error for {symbol}: {e}. Retrying with cross margin mode.")
                 return await self.place_order(symbol, side, qty, leverage, mode="CROSS", stop_loss=stop_loss, take_profit=take_profit)
-            logger.error(f"Error placing order for {symbol}: {e}")
+            elif e.error_code == "130021":
+                logger.error(f"Insufficient balance for {symbol}: {e}")
+                return {"error": f"Insufficient balance: {e}"}
+            elif e.error_code == "130004":
+                logger.error(f"Order quantity too small for {symbol}: {e}")
+                return {"error": f"Order quantity too small: {e}"}
+            logger.error(f"Error placing order for {symbol}: {e}", exc_info=True)
             return {"error": str(e)}
         except Exception as e:
-            logger.error(f"Unexpected error placing order for {symbol}: {e}")
+            logger.error(f"Unexpected error placing order for {symbol}: {e}", exc_info=True)
             return {"error": str(e)}
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
@@ -732,9 +812,10 @@ class BybitClient:
                 "symbol": symbol,
                 "orderId": order_id
             })
+            logger.info(f"Cancelled order {order_id} for {symbol}")
             return bool(result)
         except Exception as e:
-            logger.error(f"Error canceling order {order_id}: {e}")
+            logger.error(f"Error canceling order {order_id}: {e}", exc_info=True)
             return False
 
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
@@ -758,10 +839,11 @@ class BybitClient:
                         "status": order.get("orderStatus"),
                         "timestamp": datetime.fromtimestamp(int(order.get("createdTime", 0)) / 1000)
                     })
+                logger.debug(f"Fetched {len(orders)} open orders for {symbol or 'all symbols'}")
                 return orders
             return []
         except Exception as e:
-            logger.error(f"Error getting open orders: {e}")
+            logger.error(f"Error getting open orders: {e}", exc_info=True)
             return []
 
     async def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
@@ -787,10 +869,11 @@ class BybitClient:
                             "unrealized_pnl": float(pos.get("unrealisedPnl", 0)),
                             "leverage": float(pos.get("leverage", 15)),
                         })
+                logger.debug(f"Fetched {len(positions)} active positions for {symbol or 'all symbols'}")
                 return positions
             return []
         except Exception as e:
-            logger.error(f"Error getting positions: {e}")
+            logger.error(f"Error getting positions: {e}", exc_info=True)
             return []
 
     async def start_websocket(self, symbols: List[str]):
@@ -821,9 +904,10 @@ class BybitClient:
                                 price = float(ticker_data.get("lastPrice", 0))
                                 if symbol and price > 0:
                                     self._price_cache[symbol] = (time.time(), price)
+                                    logger.debug(f"WebSocket updated price for {symbol}: ${price:.6f}")
                                     
                 except Exception as e:
-                    logger.error(f"WebSocket error: {e}")
+                    logger.error(f"WebSocket error: {e}", exc_info=True)
                     self.ws_connection = None
 
             # Schedule WebSocket in background loop
@@ -832,7 +916,7 @@ class BybitClient:
                 logger.info("WebSocket connection started")
             
         except Exception as e:
-            logger.error(f"Failed to start WebSocket: {e}")
+            logger.error(f"Failed to start WebSocket: {e}", exc_info=True)
 
     def close(self):
         """Close connections and cleanup"""
@@ -841,6 +925,8 @@ class BybitClient:
                 asyncio.run_coroutine_threadsafe(self.ws_connection.close(), self.loop)
             if self.loop:
                 self.loop.call_soon_threadsafe(self.loop.stop)
+            if self.session:
+                self.session.close()
             logger.info("Bybit client closed")
         except Exception as e:
-            logger.error(f"Error closing client: {e}")
+            logger.error(f"Error closing client: {e}", exc_info=True)
