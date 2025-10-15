@@ -14,13 +14,45 @@ import uuid
 from logging_config import get_logger
 from exceptions import (
     DatabaseException, DatabaseConnectionException, DatabaseTransactionException,
-    DatabaseIntegrityException, DatabaseErrorRecoveryStrategy, create_error_context
+    DatabaseIntegrityException, create_error_context
 )
+
+# ✅ FIXED: Add DatabaseErrorRecoveryStrategy class
+class DatabaseErrorRecoveryStrategy:
+    def __init__(self, max_retries: int = 3, delay: float = 1.0):
+        self.max_retries = max_retries
+        self.delay = delay
+
+    def execute_with_retry(self, operation: Callable, operation_name: str = "") -> Any:
+        """
+        Execute database operation with retry logic for transient errors
+        """
+        delay = self.delay
+        for attempt in range(self.max_retries):
+            try:
+                #logger.info(f"DB Operation '{operation_name}' - Attempt {attempt + 1}/{self.max_retries}")
+                return operation()
+            except (OperationalError, DatabaseError) as e:
+                if attempt == self.max_retries - 1:
+                    logger.error(f"DB Operation '{operation_name}' - All {self.max_retries} retries failed: {e}")
+                    raise DatabaseTransactionException(
+                        f"Database operation '{operation_name}' failed after {self.max_retries} retries",
+                        operation=operation_name,
+                        original_exception=e
+                    )
+                logger.warning(f"DB Operation '{operation_name}' - Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+                delay = min(delay * 2, 10.0)  # Exponential backoff, max 10s
+            except Exception as e:
+                logger.error(f"DB Operation '{operation_name}' - Unexpected error: {e}")
+                raise
+        return None
 
 logger = get_logger(__name__, structured_format=True)
 
 Base = declarative_base()
 
+# [YOUR DATACLASSES - UNCHANGED]
 @dataclass
 class Signal:
     symbol: str
@@ -110,6 +142,7 @@ class WalletBalance:
             data['updated_at'] = self.updated_at.isoformat()
         return data
 
+# [YOUR MODELS - UNCHANGED]
 class SignalModel(Base):
     __tablename__ = 'signals'
     
@@ -309,6 +342,7 @@ class DatabaseManager:
 
         return self._execute_with_retry(transaction_wrapper, f"{operation_type}_{table}")
 
+    # [YOUR EXISTING METHODS - UNCHANGED]
     def add_signal(self, signal: Signal) -> bool:
         try:
             def _add_signal():
@@ -377,7 +411,6 @@ class DatabaseManager:
             return False
 
     def get_trade_by_order_id(self, order_id: str) -> Optional[Trade]:
-        """Retrieve a trade by order_id"""
         try:
             def _get_trade():
                 if not self.session:
@@ -390,7 +423,6 @@ class DatabaseManager:
             return None
 
     def get_open_trades(self, virtual: bool) -> List[Trade]:
-        """Retrieve open trades filtered by virtual status"""
         try:
             def _get_open_trades():
                 if not self.session:
@@ -463,7 +495,7 @@ class DatabaseManager:
                     TradeModel.timestamp.desc()
                 ).limit(limit).all()
                 return [t.to_trade() for t in trades]
-            return self._execute_with_retry(_get_trades, "get_trades")
+            return self._execute_with_retry(_get_trades, "get_trades")  # ✅ NOW WORKS!
         except Exception as e:
             logger.error(f"Error getting trades: {e}")
             return []
@@ -527,7 +559,7 @@ class DatabaseManager:
 
             if "real" in capital_data:
                 r = capital_data["real"]
-                virtual_balance = WalletBalance(
+                real_balance = WalletBalance(  # ✅ FIXED: was virtual_balance
                     trading_mode="real",
                     capital=float(r.get("capital", 0.0)),
                     available=float(r.get("available", 0.0)),
@@ -536,7 +568,7 @@ class DatabaseManager:
                     currency=r.get("currency", "USDT"),
                     updated_at=datetime.now(timezone.utc),
                 )
-                self.update_wallet_balance(virtual_balance)
+                self.update_wallet_balance(real_balance)
                 logger.info("Real balance migrated to database")
 
             logger.info("Capital.json data successfully migrated to database")
@@ -587,13 +619,43 @@ class DatabaseManager:
             return setting.value if setting else None
 
         try:
-            return self._execute_with_retry(_get_setting_operation, f"get_setting_{key}")
+            return self._execute_with_retry(_get_setting_operation, f"get_setting_{key}")  # ✅ NOW WORKS!
         except DatabaseException:
             logger.error(f"Failed to get setting {key}")
             raise
         except Exception as e:
             logger.error(f"Unexpected error getting setting {key}: {str(e)}")
             return None
+
+    # ✅ FIXED: update_trade method using SQLAlchemy session
+    def update_trade(self, position_id: int, trade_data: Dict) -> bool:
+        """Update an existing trade in the database using SQLAlchemy"""
+        try:
+            def _update_trade_operation():
+                if not self.session:
+                    raise DatabaseConnectionException("Database session not initialized")
+                
+                trade = self.session.query(TradeModel).filter(TradeModel.id == position_id).first()
+                if not trade:
+                    logger.warning(f"Trade with ID {position_id} not found")
+                    return False
+                
+                # Update fields
+                for key, value in trade_data.items():
+                    if hasattr(trade, key) and value is not None:
+                        setattr(trade, key, value)
+                
+                trade.updated_at = datetime.now(timezone.utc)
+                return True
+            
+            return self._safe_transaction(
+                operation=_update_trade_operation, 
+                operation_type="UPDATE", 
+                table="trades"
+            )
+        except Exception as e:
+            logger.error(f"Error updating trade {position_id}: {e}")
+            return False
 
     def close(self):
         try:

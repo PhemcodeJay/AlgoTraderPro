@@ -15,34 +15,15 @@ logger = get_logger(__name__)
 
 tz_utc3 = timezone(timedelta(hours=3))
 
-def get_symbol_precision(symbol: str) -> float:
-    """Fetch the tick size (price precision) for a symbol from Bybit."""
-    try:
-        url = "https://api.bybit.com/v5/market/instruments-info?category=linear&symbol=" + symbol
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("retCode") == 0:
-            instrument = data["result"]["list"][0]
-            return float(instrument.get("priceFilter", {}).get("tickSize", 0.0001))
-        return 0.0001  # Default tick size
-    except Exception as e:
-        logger.error(f"Error fetching tick size for {symbol}: {e}")
-        return 0.0001
-
-def round_to_precision(value: float, precision: float) -> float:
-    """Round a value to the specified tick size."""
-    return round(value / precision) * precision
-
-def calculate_sl_tp(signal_dict: Dict[str, Any], sl_percent: float = 0.1, tp_percent: float = 0.5) -> Dict[str, Any]:
+def calculate_sl_tp(signal_dict: Dict[str, Any], sl_percent: float = 0.1, tp_percent: float = 0.3) -> Dict[str, Any]:
+    # ... (rest of function remains the same, as it uses the parameters)
     """
     Calculate stop-loss (SL) and take-profit (TP) for a trading signal if missing.
     SL is set to 10% below/above entry price for buy/sell orders.
     TP is set to 50% above/below entry price for buy/sell orders.
-    Rounds to symbol-specific tick size.
     
     Args:
-        signal_dict: Dictionary containing signal data (e.g., entry, side, sl, tp, symbol).
+        signal_dict: Dictionary containing signal data (e.g., entry, side, sl, tp).
         sl_percent: Percentage for stop-loss (default 0.1 for 10%).
         tp_percent: Percentage for take-profit (default 0.5 for 50%).
     
@@ -52,31 +33,27 @@ def calculate_sl_tp(signal_dict: Dict[str, Any], sl_percent: float = 0.1, tp_per
     try:
         # Validate and extract entry price
         entry_price = signal_dict.get("entry")
-        symbol = signal_dict.get("symbol", "UNKNOWN")
         if entry_price is None or not isinstance(entry_price, (int, float)) or entry_price <= 0:
-            logger.error(f"Invalid entry price: {entry_price} for {symbol}. Skipping SL/TP calculation.")
+            logger.error(f"Invalid entry price: {entry_price}. Skipping SL/TP calculation.")
             return signal_dict
 
         # Normalize side to match execute_real_trade (uppercase)
         side = signal_dict.get("side", "Buy").title()
         if side not in ["Buy", "Sell"]:
-            logger.warning(f"Invalid side: {side} for {symbol}. Defaulting to 'Buy'.")
+            logger.warning(f"Invalid side: {side}. Defaulting to 'Buy'.")
             side = "Buy"
             signal_dict["side"] = side
-
-        # Get symbol-specific tick size
-        tick_size = get_symbol_precision(symbol)
 
         # Calculate SL and TP if missing
         if signal_dict.get("sl") is None:
             sl = entry_price * (1 - sl_percent if side == "Buy" else 1 + sl_percent)
-            signal_dict["sl"] = round_to_precision(sl, tick_size)
-            logger.info(f"Calculated SL for {side} order on {symbol}: {signal_dict['sl']:.4f}")
+            signal_dict["sl"] = round(sl, 4)
+            logger.info(f"Calculated SL for {side} order: {signal_dict['sl']:.4f}")
 
         if signal_dict.get("tp") is None:
             tp = entry_price * (1 + tp_percent if side == "Buy" else 1 - tp_percent)
-            signal_dict["tp"] = round_to_precision(tp, tick_size)
-            logger.info(f"Calculated TP for {side} order on {symbol}: {signal_dict['tp']:.4f}")
+            signal_dict["tp"] = round(tp, 4)
+            logger.info(f"Calculated TP for {side} order: {signal_dict['tp']:.4f}")
 
         return signal_dict
 
@@ -118,8 +95,8 @@ def normalize_signal(signal: Any) -> Dict:
             logger.warning(f"Invalid side in signal: {signal_dict['side']}. Defaulting to 'Buy'.")
             signal_dict["side"] = "Buy"
 
-        # Calculate SL (10%) and TP (50%) if missing
-        signal_dict = calculate_sl_tp(signal_dict, sl_percent=0.1, tp_percent=0.5)
+        # Calculate SL (10%) and TP (30%) if missing
+        signal_dict = calculate_sl_tp(signal_dict, sl_percent=0.1, tp_percent=0.3)
 
         logger.debug(f"Normalized signal: {signal_dict}")
         return signal_dict

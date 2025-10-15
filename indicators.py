@@ -3,7 +3,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import numpy as np
 import requests
-from utils import get_symbol_precision, round_to_precision
 
 # Logging using centralized system
 from logging_config import get_logger
@@ -13,47 +12,38 @@ logger = get_logger(__name__)
 INTERVALS = ["1", "3", "5", "15", "30", "60", "120", "240", "360", "720", "D", "W"]
 ML_ENABLED = True  # Feature flag for ML filtering
 
-# Blacklist for high-volatility or low-quality assets (e.g., meme coins like 1000SATS)
-BLACKLIST_SYMBOLS = ["1000SATSUSDT"]  # Add more as needed, e.g., based on patterns or known volatile assets
-
-def get_candles(symbol: str, interval: str, limit: int = 200, retries: int = 3) -> List[Dict]:
-    """Fetch candlestick data from Bybit API with retries"""
-    time.sleep(0.1)  # Small delay to avoid rate limits
-    for attempt in range(retries):
-        try:
-            url = "https://api.bybit.com/v5/market/kline"
-            params = {
-                "category": "linear",
-                "symbol": symbol,
-                "interval": interval,
-                "limit": str(limit)
-            }
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get("retCode") == 0 and "result" in data:
-                klines = []
-                tick_size = get_symbol_precision(symbol)
-                for k in data["result"]["list"]:
-                    klines.append({
-                        "time": int(k[0]),
-                        "open": round_to_precision(float(k[1]), tick_size),
-                        "high": round_to_precision(float(k[2]), tick_size),
-                        "low": round_to_precision(float(k[3]), tick_size),
-                        "close": round_to_precision(float(k[4]), tick_size),
-                        "volume": float(k[5])
-                    })
-                return sorted(klines, key=lambda x: x["time"])
-            logger.warning(f"Invalid response for {symbol}: {data.get('retMsg', 'No message')}")
-            return []
-        except Exception as e:
-            logger.error(f"Attempt {attempt + 1}/{retries} failed for {symbol}: {e}")
-            if attempt < retries - 1:
-                time.sleep(1)  # Wait before retrying
-            continue
-    logger.error(f"Failed to fetch candles for {symbol} after {retries} attempts")
-    return []
+def get_candles(symbol: str, interval: str, limit: int = 200) -> List[Dict]:
+    """Fetch candlestick data from Bybit API"""
+    try:
+        url = "https://api.bybit.com/v5/market/kline"
+        params = {
+            "category": "linear",
+            "symbol": symbol,
+            "interval": interval,
+            "limit": str(limit)
+        }
+        
+        # Pylance: ignore reportCallIssue for timeout parameter as it is valid in requests library
+        response = requests.get(url, params=params, timeout=10)  # type: ignore[call-arg]
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get("retCode") == 0 and "result" in data:
+            klines = []
+            for k in data["result"]["list"]:
+                klines.append({
+                    "time": int(k[0]),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5])
+                })
+            return sorted(klines, key=lambda x: x["time"])
+        return []
+    except Exception as e:
+        logger.error(f"Error fetching candles for {symbol}: {e}")
+        return []
 
 def sma(prices: List[float], period: int) -> List[float]:
     """Simple Moving Average"""
@@ -180,24 +170,8 @@ def bollinger_bands(prices: List[float], period: int = 20, std_dev: float = 2) -
         "lower": lower_band
     }
 
-def atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> List[float]:
-    """Average True Range"""
-    if len(highs) < period:
-        return [0.0] * len(highs)
-    
-    tr_values = []
-    for i in range(len(highs)):
-        if i == 0:
-            tr = highs[0] - lows[0]
-        else:
-            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        tr_values.append(tr)
-    
-    atr_values = sma(tr_values, period)
-    return atr_values
-
 def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
-    """Calculate technical indicators (SMA 20, SMA 200, EMA 9, EMA 21, Bollinger Bands, RSI, Stochastic RSI, Volume, ATR)"""
+    """Calculate technical indicators (SMA 20, SMA 200, EMA 9, EMA 21, Bollinger Bands, RSI, Stochastic RSI, Volume)"""
     try:
         if not candles or len(candles) < 200:
             return {}
@@ -220,33 +194,24 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
         # Volatility indicators
         bb_data = bollinger_bands(closes, period=20, std_dev=2)
         
-        # ATR for dynamic SL/TP
-        atr_14 = atr(highs, lows, closes, 14)
-        
         # Current values (last in arrays)
         current_price = closes[-1]
-        current_sma_20 = sma_20[-1] if sma_20[-1] != 0 else None
-        current_sma_200 = sma_200[-1] if sma_200[-1] != 0 else None
-        current_ema_9 = ema_9[-1] if ema_9[-1] != 0 else None
-        current_ema_21 = ema_21[-1] if ema_21[-1] != 0 else None
+        current_sma_20 = sma_20[-1] if sma_20 else current_price
+        current_sma_200 = sma_200[-1] if sma_200 else current_price
+        current_ema_9 = ema_9[-1] if ema_9 else current_price
+        current_ema_21 = ema_21[-1] if ema_21 else current_price
         current_rsi = rsi_14[-1] if rsi_14 else 50
         current_stoch_k = stoch_rsi_data["k"][-1] if stoch_rsi_data["k"] else 50
         current_stoch_d = stoch_rsi_data["d"][-1] if stoch_rsi_data["d"] else 50
         current_bb_upper = bb_data["upper"][-1] if bb_data["upper"] else 0
         current_bb_lower = bb_data["lower"][-1] if bb_data["lower"] else 0
         current_volume = volumes[-1] if volumes else 0
-        current_atr = atr_14[-1] if atr_14 else 0
-        
-        # Skip if any key indicator is invalid (e.g., defaults due to insufficient data)
-        if None in [current_sma_20, current_sma_200, current_ema_9, current_ema_21] or current_atr == 0:
-            logger.warning("Incomplete indicators, skipping asset")
-            return {}
         
         # Volume analysis
         avg_volume = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else 0
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
         
-        # Trend analysis with short-term downtrend check for profitability
+        # Trend analysis
         trend_score = 0
         if len(sma_20) > 1 and len(sma_200) > 1:
             if sma_20[-1] > sma_200[-1]:
@@ -257,11 +222,6 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
                 trend_score += 1
             if ema_9[-1] > ema_21[-1]:
                 trend_score += 1
-        # Reduce trend score if recent 10-period price change is negative (to avoid buy in downtrends)
-        if len(closes) >= 10:
-            recent_change = (closes[-1] - closes[-10]) / closes[-10] * 100
-            if recent_change < 0:
-                trend_score -= 1  # Penalize for short-term downtrend
         
         return {
             "price": current_price,
@@ -277,16 +237,16 @@ def calculate_indicators(candles: List[Dict]) -> Dict[str, Any]:
             "bb_middle": bb_data["middle"][-1] if bb_data["middle"] else current_price,
             "volume": current_volume,
             "volume_ratio": volume_ratio,
-            "trend_score": max(0, trend_score),  # Ensure non-negative
-            "volatility": ((current_bb_upper - current_bb_lower) / current_price * 100) if current_price > 0 else 0,
-            "atr": current_atr
+            "trend_score": trend_score,
+            "volatility": ((current_bb_upper - current_bb_lower) / current_price * 100) if current_price > 0 else 0
         }
         
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}")
         return {}
 
-def get_top_symbols(limit: int = 50) -> List[str]:
+def get_top_symbols(limit: int = 100) -> List[str]:
+    """Get top USDT trading pairs by volume"""
     try:
         url = "https://api.bybit.com/v5/market/tickers"
         params = {"category": "linear"}
@@ -301,12 +261,10 @@ def get_top_symbols(limit: int = 50) -> List[str]:
             usdt_pairs = []
             for ticker in tickers:
                 symbol = ticker.get("symbol", "")
-                if symbol.endswith("USDT") and symbol not in BLACKLIST_SYMBOLS:
+                if symbol.endswith("USDT"):
                     volume = float(ticker.get("volume24h", 0))
                     price = float(ticker.get("lastPrice", 0))
-                    turnover = float(ticker.get("turnover24h", 0))
-                    # Additional filter: skip very low-price assets (e.g., <0.001) prone to high volatility
-                    if volume > 100000 and price > 0.001 and turnover > 100000:
+                    if volume > 0 and price > 0:
                         usdt_pairs.append({
                             "symbol": symbol,
                             "volume": volume,
@@ -314,9 +272,7 @@ def get_top_symbols(limit: int = 50) -> List[str]:
                         })
             
             usdt_pairs.sort(key=lambda x: x["volume"], reverse=True)
-            symbols = [pair["symbol"] for pair in usdt_pairs[:limit]]
-            logger.info(f"Top {len(symbols)} symbols fetched: {symbols}")
-            return symbols
+            return [pair["symbol"] for pair in usdt_pairs[:limit]]
         
         return []
     except Exception as e:
@@ -324,7 +280,7 @@ def get_top_symbols(limit: int = 50) -> List[str]:
         return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
 
 def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
-    """Comprehensive analysis of a single symbol"""
+    """Comprehensive analysis of a single symbol with SL/TP (10%/50%)"""
     try:
         candles = get_candles(symbol, interval, 200)
         if not candles:
@@ -350,24 +306,24 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
             signals.append("BULLISH_MA_CROSS")
         elif price < sma_200 and ema_9 < ema_21:
             score += 20
-            signals.append("BEARISH_MA_CROSS")  # Fixed typo from original
+            signals.append("BEARISH_MA_CROSS")
         
-        # RSI signals (tightened for profitability in volatile markets)
+        # RSI signals
         rsi = indicators.get("rsi", 50)
-        if rsi < 25:  # Tightened from 30
+        if rsi < 30:
             score += 20
             signals.append("RSI_OVERSOLD")
-        elif rsi > 75:  # Tightened from 70 for overbought
+        elif rsi > 70:
             score += 20
             signals.append("RSI_OVERBOUGHT")
         
-        # Stochastic RSI signals (tightened)
+        # Stochastic RSI signals
         stoch_k = indicators.get("stoch_k", 50)
         stoch_d = indicators.get("stoch_d", 50)
-        if stoch_k < 15 and stoch_k > stoch_d:  # Tightened from 20
+        if stoch_k < 20 and stoch_k > stoch_d:
             score += 20
             signals.append("STOCH_RSI_OVERSOLD")
-        elif stoch_k > 85 and stoch_k < stoch_d:  # Tightened from 80
+        elif stoch_k > 80 and stoch_k < stoch_d:
             score += 20
             signals.append("STOCH_RSI_OVERBOUGHT")
         
@@ -407,6 +363,10 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
             signal_type = "sell"
             side = "Sell"
         
+        # Calculate SL and TP (10% and 30%)
+        sl = price * (1 - 0.1 if side == "Buy" else 1 + 0.1)  # 10% SL (unchanged)
+        tp = price * (1 + 0.3 if side == "Buy" else 1 - 0.3)  # 30% TP
+        
         return {
             "symbol": symbol,
             "interval": interval,
@@ -414,6 +374,8 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
             "signal_type": signal_type,
             "side": side,
             "entry": price,
+            "sl": round(sl, 4),
+            "tp": round(tp, 4),
             "indicators": indicators,
             "signals": signals,
             "analysis_time": time.time()
@@ -423,16 +385,16 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
         logger.error(f"Error analyzing {symbol}: {e}")
         return {}
 
-def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers: int = 10, timeout: int = 120) -> List[Dict]:
+def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers: int = 10) -> List[Dict]:
+    """Scan multiple symbols concurrently"""
     try:
         results = []
-        unfinished = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_symbol = {
                 executor.submit(analyze_symbol, symbol, interval): symbol
                 for symbol in symbols
             }
-            for future in as_completed(future_to_symbol, timeout=timeout):
+            for future in as_completed(future_to_symbol, timeout=60):
                 symbol = future_to_symbol[future]
                 try:
                     result = future.result()
@@ -440,9 +402,6 @@ def scan_multiple_symbols(symbols: List[str], interval: str = "60", max_workers:
                         results.append(result)
                 except Exception as e:
                     logger.error(f"Error analyzing {symbol}: {e}")
-            unfinished = [symbol for future, symbol in future_to_symbol.items() if not future.done()]
-            if unfinished:
-                logger.warning(f"Error scanning symbols: {len(unfinished)} (of {len(symbols)}) futures unfinished: {unfinished}")
         if len(results) < len(symbols):
             logger.warning(f"Only {len(results)} of {len(symbols)} symbols analyzed successfully")
         results.sort(key=lambda x: x.get("score", 0), reverse=True)
