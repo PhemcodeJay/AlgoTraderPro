@@ -280,7 +280,7 @@ def get_top_symbols(limit: int = 100) -> List[str]:
         return ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT", "XRPUSDT"]
 
 def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
-    """Comprehensive analysis of a single symbol with SL/TP (10%/50%)"""
+    """Comprehensive analysis of a single symbol with improved profitability criteria"""
     try:
         candles = get_candles(symbol, interval, 200)
         if not candles:
@@ -294,78 +294,108 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
         score = 0
         signals = []
         
-        # Price vs Moving Averages
+        # Price vs Moving Averages - stricter criteria
         price = indicators.get("price", 0)
         sma_20 = indicators.get("sma_20", price)
         sma_200 = indicators.get("sma_200", price)
         ema_9 = indicators.get("ema_9", price)
         ema_21 = indicators.get("ema_21", price)
         
-        if price > sma_200 and ema_9 > ema_21:
-            score += 20
+        # Require price above both SMA20 and SMA200 for bullish
+        if price > sma_200 and price > sma_20 and ema_9 > ema_21:
+            score += 25
             signals.append("BULLISH_MA_CROSS")
-        elif price < sma_200 and ema_9 < ema_21:
-            score += 20
+        elif price < sma_200 and price < sma_20 and ema_9 < ema_21:
+            score += 25
             signals.append("BEARISH_MA_CROSS")
         
-        # RSI signals
+        # RSI signals - more precise zones
         rsi = indicators.get("rsi", 50)
-        if rsi < 30:
-            score += 20
+        if 25 <= rsi <= 35:  # Sweet spot for oversold
+            score += 25
             signals.append("RSI_OVERSOLD")
-        elif rsi > 70:
-            score += 20
+        elif 65 <= rsi <= 75:  # Sweet spot for overbought
+            score += 25
             signals.append("RSI_OVERBOUGHT")
+        elif rsi < 20 or rsi > 80:  # Too extreme
+            score -= 10
         
-        # Stochastic RSI signals
+        # Stochastic RSI signals - require crossover
         stoch_k = indicators.get("stoch_k", 50)
         stoch_d = indicators.get("stoch_d", 50)
-        if stoch_k < 20 and stoch_k > stoch_d:
-            score += 20
+        if stoch_k < 20 and stoch_k > stoch_d and abs(stoch_k - stoch_d) > 5:
+            score += 25
             signals.append("STOCH_RSI_OVERSOLD")
-        elif stoch_k > 80 and stoch_k < stoch_d:
-            score += 20
+        elif stoch_k > 80 and stoch_k < stoch_d and abs(stoch_k - stoch_d) > 5:
+            score += 25
             signals.append("STOCH_RSI_OVERBOUGHT")
         
-        # Bollinger Bands signals
+        # Bollinger Bands signals - must touch or exceed
         bb_upper = indicators.get("bb_upper", 0)
         bb_lower = indicators.get("bb_lower", 0)
-        if price <= bb_lower:
-            score += 15
+        bb_middle = indicators.get("bb_middle", price)
+        if price <= bb_lower * 1.01:  # At or below lower band
+            score += 20
             signals.append("BB_OVERSOLD")
-        elif price >= bb_upper:
-            score += 15
+        elif price >= bb_upper * 0.99:  # At or above upper band
+            score += 20
             signals.append("BB_OVERBOUGHT")
         
-        # Volume confirmation
+        # Volume confirmation - require strong volume
         volume_ratio = indicators.get("volume_ratio", 1)
-        if volume_ratio > 1.5:
-            score += 10
+        if volume_ratio > 2.0:  # Very high volume
+            score += 20
             signals.append("VOLUME_HIGH")
+        elif volume_ratio > 1.5:
+            score += 10
+            signals.append("VOLUME_MEDIUM")
+        elif volume_ratio < 1.2:  # Low volume - penalize
+            score -= 15
         
-        # Trend confirmation
+        # Trend confirmation - critical for profitability
         trend_score = indicators.get("trend_score", 0)
-        if trend_score >= 3:
-            score += 15
+        if trend_score >= 3:  # Strong bullish trend
+            score += 20
             signals.append("TREND_BULLISH")
-        elif trend_score <= 1:
-            score += 15
+        elif trend_score <= 1:  # Strong bearish trend
+            score += 20
             signals.append("TREND_BEARISH")
+        else:  # Weak trend - avoid
+            score -= 10
         
-        # Determine signal type and side
+        # Volatility check
+        vol = indicators.get("volatility", 0)
+        if vol > 5:  # Too volatile
+            score -= 20
+        elif vol < 0.3:  # Too quiet
+            score -= 15
+        
+        # Determine signal type and side - require multiple confirmations
         signal_type = "neutral"
         side = "Buy"
         
-        if any(s in signals for s in ["RSI_OVERSOLD", "STOCH_RSI_OVERSOLD", "BB_OVERSOLD", "BULLISH_MA_CROSS"]) and "TREND_BULLISH" in signals:
+        buy_signals = ["RSI_OVERSOLD", "STOCH_RSI_OVERSOLD", "BB_OVERSOLD", "BULLISH_MA_CROSS"]
+        sell_signals = ["RSI_OVERBOUGHT", "STOCH_RSI_OVERBOUGHT", "BB_OVERBOUGHT", "BEARISH_MA_CROSS"]
+        
+        buy_count = sum(1 for s in buy_signals if s in signals)
+        sell_count = sum(1 for s in sell_signals if s in signals)
+        
+        # Require at least 2 confirmations + trend + volume
+        if buy_count >= 2 and "TREND_BULLISH" in signals and ("VOLUME_HIGH" in signals or "VOLUME_MEDIUM" in signals):
             signal_type = "buy"
             side = "Buy"
-        elif any(s in signals for s in ["RSI_OVERBOUGHT", "STOCH_RSI_OVERBOUGHT", "BB_OVERBOUGHT", "BEARISH_MA_CROSS"]) and "TREND_BEARISH" in signals:
+        elif sell_count >= 2 and "TREND_BEARISH" in signals and ("VOLUME_HIGH" in signals or "VOLUME_MEDIUM" in signals):
             signal_type = "sell"
             side = "Sell"
+        else:
+            score -= 20  # Penalize weak signals
         
-        # Calculate SL and TP (10% and 30%)
-        sl = price * (1 - 0.1 if side == "Buy" else 1 + 0.1)  # 10% SL (unchanged)
-        tp = price * (1 + 0.3 if side == "Buy" else 1 - 0.3)  # 30% TP
+        # Calculate SL and TP with better ratios
+        sl_percent = 0.08  # 8% stop loss
+        tp_percent = 0.40  # 40% take profit (5:1 R/R)
+        
+        sl = price * (1 - sl_percent if side == "Buy" else 1 + sl_percent)
+        tp = price * (1 + tp_percent if side == "Buy" else 1 - tp_percent)
         
         return {
             "symbol": symbol,

@@ -4,7 +4,7 @@ import asyncio
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 from bybit_client import BybitClient
-from db import db_manager, Trade, WalletBalance
+from db import TradeModel, db_manager, Trade, WalletBalance
 from db import WalletBalance as DBWalletBalance
 from settings import load_settings
 from logging_config import get_trading_logger
@@ -173,14 +173,28 @@ class TradingEngine:
         """Update trading settings"""
         try:
             self.settings.update(new_settings)
+            # Update critical settings
+            self.max_risk_per_trade = new_settings.get("RISK_PCT", self.max_risk_per_trade)
+            self.max_open_positions = new_settings.get("MAX_POSITIONS", self.max_open_positions)
             # Save to file
             with open("settings.json", "w") as f:
                 json.dump(self.settings, f, indent=2)
-            logger.info("Settings updated")
+            logger.info("Settings updated and applied")
             return True
         except Exception as e:
             logger.error(f"Error updating settings: {e}")
             return False
+    
+    def reload_settings(self):
+        """Reload settings from file"""
+        try:
+            from settings import load_settings
+            self.settings = load_settings()
+            self.max_risk_per_trade = self.settings.get("MAX_RISK_PER_TRADE", 0.05)
+            self.max_open_positions = self.settings.get("MAX_OPEN_POSITIONS", 10)
+            logger.info("Trading engine settings reloaded")
+        except Exception as e:
+            logger.error(f"Error reloading settings: {e}")
 
     def get_cached_candles(self, symbol: str, interval: str, limit: int = 100) -> List[Dict]:
         """Get cached candles or fetch new ones"""
@@ -545,6 +559,86 @@ class TradingEngine:
 
         except Exception as e:
             logger.error(f"❌ Error syncing real balance: {e}", exc_info=True)
+            return False
+
+    def sync_real_trades(self):
+        """Sync real positions from Bybit to database"""
+        try:
+            if not self.client.is_connected():
+                logger.warning("Cannot sync trades: Bybit client not connected")
+                return False
+            
+            # Get positions from Bybit
+            async def get_positions():
+                return await self.client.get_positions()
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            positions = loop.run_until_complete(get_positions())
+            loop.close()
+            
+            # Get current DB trades
+            db_trades = self.get_open_real_trades()
+            db_order_ids = {t.order_id for t in db_trades}
+            
+            synced_count = 0
+            
+            for pos in positions:
+                symbol = pos.get("symbol")
+                size = pos.get("size", 0)
+                
+                if size <= 0:
+                    continue
+                
+                # Check if this position exists in DB
+                existing = next((t for t in db_trades if t.symbol == symbol), None)
+                
+                if not existing:
+                    # New position not in DB - add it
+                    trade_data = {
+                        "symbol": symbol,
+                        "side": pos.get("side", "Buy"),
+                        "qty": size,
+                        "entry_price": pos.get("entry_price", 0),
+                        "order_id": f"bybit_{symbol}_{int(datetime.now().timestamp())}",
+                        "virtual": False,
+                        "status": "open",
+                        "leverage": int(pos.get("leverage", 15)),
+                        "strategy": "Bybit",
+                        "timestamp": datetime.now(timezone.utc)
+                    }
+                    
+                    if self.db.add_trade(trade_data):
+                        synced_count += 1
+                        logger.info(f"Synced new position from Bybit: {symbol}")
+            
+            # Check for closed positions
+            bybit_symbols = {p.get("symbol") for p in positions if p.get("size", 0) > 0}
+            for trade in db_trades:
+                if trade.symbol not in bybit_symbols and trade.status == "open":
+                    # Position closed on Bybit but still open in DB
+                    current_price = self.client.get_current_price(trade.symbol)
+                    pnl = self.calculate_virtual_pnl(trade.to_dict())
+                    
+                    from sqlalchemy import update
+                    self.db.session.execute(
+                        update(TradeModel)
+                        .where(TradeModel.order_id == trade.order_id)
+                        .values(
+                            status="closed",
+                            exit_price=current_price,
+                            pnl=pnl,
+                            closed_at=datetime.now(timezone.utc)
+                        )
+                    )
+                    self.db.session.commit()
+                    logger.info(f"Closed position in DB (closed on Bybit): {trade.symbol}")
+            
+            logger.info(f"Synced {synced_count} positions from Bybit")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error syncing real trades: {e}", exc_info=True)
             return False
 
     def execute_virtual_trade(self, signal: Dict, trading_mode: str = "virtual") -> bool:

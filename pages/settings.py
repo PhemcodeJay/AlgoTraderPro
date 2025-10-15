@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 
 
 st.set_page_config(
-    page_title="Settings - AlgoTrader Pro",
+    page_title="Settings - AlgoTraderPro",
     page_icon="⚙️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -125,10 +125,118 @@ def main():
         <p style="color: #888; margin: 0;">Configure Trading Parameters & System Settings</p>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Instructions
+    with st.expander("ℹ️ Settings Configuration Guide", expanded=False):
+        st.markdown("""
+        ### 🎯 Trading Configuration
+        
+        **Risk Management:**
+        - **Leverage**: Multiplier for position size (10-150x). Higher = more risk
+        - **Risk per Trade**: % of capital to risk per position (0.1-10%)
+        - **Max Positions**: Limit concurrent open trades (1-20)
+        - **Take Profit**: Default TP percentage (10-100%)
+        - **Stop Loss**: Default SL percentage (1-20%)
+        - **Max Drawdown**: Portfolio loss limit before stopping (-5% to -50%)
+        
+        **Recommendations:**
+        - Start with low leverage (10-20x)
+        - Risk 1-2% per trade maximum
+        - Keep max positions under 5 for beginners
+        
+        ### 🔍 Signal Generation
+        
+        **Timing:**
+        - **Scan Interval**: How often to check markets (15-1440 min)
+        - **Top N Signals**: Number of best signals to generate (1-50)
+        - **Min Signal Score**: Threshold for signal quality (30-100)
+        
+        **Indicators:**
+        - **RSI Thresholds**: Oversold/overbought levels (10-90)
+        - **Min Volume**: 24h volume filter in USDT (100k-100M)
+        
+        **Symbol Selection:**
+        - Choose which crypto pairs to scan
+        - More symbols = more opportunities but slower scans
+        
+        ### 💰 Capital Management
+        
+        **Virtual Capital:**
+        - Simulated trading balance
+        - Edit freely to test different scenarios
+        - Does not affect real funds
+        
+        **Real Capital:**
+        - Synced from Bybit account
+        - Read-only display
+        - Click "Sync Real Balance" to refresh from exchange
+        - Shows available balance and used margin
+        
+        ### 🔑 API Configuration
+        
+        **Setting up Bybit API:**
+        1. Log into Bybit.com
+        2. Go to Account & Security → API Management
+        3. Create new API key with these permissions:
+           - Read wallet balance
+           - Place/modify/cancel orders
+           - View trading history
+        4. Copy API Key and Secret
+        5. Paste into settings form
+        6. Click "Test API Connection" to verify
+        
+        **Security:**
+        - Keys are stored in environment variables
+        - Never share your credentials
+        - Use IP whitelist on Bybit if possible
+        
+        ### 🔔 Notifications
+        
+        **Available Channels:**
+        - **Discord**: Get alerts via Discord webhook
+        - **Telegram**: Receive messages from custom bot
+        - **WhatsApp**: SMS notifications (requires setup)
+        
+        **Setup:**
+        1. Enter credentials for desired channel
+        2. Click "Test" button to verify
+        3. Save settings to enable notifications
+        
+        **What gets notified:**
+        - New signals generated
+        - Trades executed
+        - Positions closed
+        - Errors or warnings
+        
+        ### 💾 Saving Changes
+        
+        - Each tab has a "Save" button
+        - Click to apply and persist changes
+        - Settings take effect immediately
+        - Some changes may require page refresh
+        
+        ### ⚠️ Important
+        
+        - Always test in Virtual Mode first
+        - Verify API connection before real trading
+        - Save settings after making changes
+        - Monitor performance and adjust as needed
+        """)
+    
+    st.divider()
+    
+    # Get current trading mode from session state
+    trading_mode = st.session_state.get("trading_mode", "virtual")
 
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Settings Navigation")
+        
+        # Show current mode prominently
+        mode_color = "🟢" if trading_mode == "virtual" else "🟡"
+        st.info(f"{mode_color} **Current Mode:** {trading_mode.title()}")
+        
+        st.divider()
 
         # System status
         env_valid = validate_env()
@@ -151,7 +259,11 @@ def main():
     try:
         # Initialize engine and Bybit client
         engine = TradingEngine() if "engine" not in st.session_state else st.session_state.engine
-        bybit_client = BybitClient()
+        
+        # Initialize Bybit client if not already in session state
+        if "bybit_client" not in st.session_state:
+            st.session_state.bybit_client = BybitClient()
+        bybit_client = st.session_state.bybit_client
 
         # Load settings and capital data
         current_settings = load_settings()
@@ -337,11 +449,19 @@ def main():
                         "MIN_SIGNAL_SCORE": int(min_signal_score),
                         "RSI_OVERSOLD": int(rsi_oversold),
                         "RSI_OVERBOUGHT": int(rsi_overbought),
-                        "MIN_VOLUME": int(min_volume),
+                        "MIN_VOLUME": float(min_volume),
                         "SYMBOLS": selected_symbols
                     })
                     if save_settings(new_settings):
-                        st.success("✅ Signal settings saved successfully!")
+                        # Reload settings in automated trader
+                        from app import get_automated_trader
+                        auto_trader = get_automated_trader()
+
+                        # Update automated trader scan settings
+                        auto_trader.scan_interval = int(scan_interval * 60)
+                        auto_trader.top_n_signals = int(top_n_signals)
+
+                        st.success("✅ Signal settings saved and applied successfully!")
                         st.rerun()
                     else:
                         st.error("❌ Failed to save settings")
@@ -444,7 +564,6 @@ def main():
                 # Current env/session values
                 current_key = os.getenv("BYBIT_API_KEY", st.session_state.get("BYBIT_API_KEY", ""))
                 current_secret = os.getenv("BYBIT_API_SECRET", st.session_state.get("BYBIT_API_SECRET", ""))
-                current_mainnet = os.getenv("BYBIT_MAINNET", "false").lower() == "true"
                 current_account_type = os.getenv("BYBIT_ACCOUNT_TYPE", st.session_state.get("BYBIT_ACCOUNT_TYPE", "UNIFIED"))
 
                 # ✅ / ❌ Status
@@ -454,19 +573,11 @@ def main():
                 secret_status = "✅ Configured" if current_secret else "❌ Not Set"
                 st.metric("API Secret", secret_status)
 
-                mode_text = "🧪 Mainnet" if current_mainnet else "🔴 Testnet"
-                st.metric("Trading Mode", mode_text)
+                st.info("🧪 **Mainnet Only** - This system is configured for mainnet trading only")
 
                 # Editable inputs
                 api_key = st.text_input("Update API Key", value=current_key, type="password")
                 api_secret = st.text_input("Update API Secret", value=current_secret, type="password")
-
-                mainnet_mode = st.radio(
-                    "Trading Mode",
-                    options=[True, False],
-                    index=0 if current_mainnet else 1,
-                    format_func=lambda x: "🧪 Mainnet" if x else "🔴 Testnet"
-                )
 
                 account_type = st.selectbox(
                     "Account Type",
@@ -475,11 +586,31 @@ def main():
                 )
 
                 if st.button("💾 Save Keys"):
+                    # Update session state
                     st.session_state["BYBIT_API_KEY"] = api_key
                     st.session_state["BYBIT_API_SECRET"] = api_secret
-                    st.session_state["BYBIT_MAINNET"] = mainnet_mode
+                    st.session_state["BYBIT_MAINNET"] = True
                     st.session_state["BYBIT_ACCOUNT_TYPE"] = account_type
-                    st.success("✅ API keys saved in session")
+
+                    # Update environment variables
+                    os.environ["BYBIT_API_KEY"] = api_key
+                    os.environ["BYBIT_API_SECRET"] = api_secret
+                    os.environ["BYBIT_ACCOUNT_TYPE"] = account_type
+                    os.environ["BYBIT_MAINNET"] = "true"
+
+                    # Reinitialize Bybit client with new credentials
+                    try:
+                        st.session_state.bybit_client = BybitClient()
+                        if st.session_state.bybit_client.is_connected():
+                            # Reinitialize engine with new client
+                            if "engine" in st.session_state:
+                                st.session_state.engine.client = st.session_state.bybit_client
+                            st.success("✅ API keys saved and client reinitialized successfully!")
+                        else:
+                            st.warning("⚠️ API keys saved but connection test failed. Check credentials.")
+                    except Exception as e:
+                        st.error(f"Failed to reinitialize client: {e}")
+                        logger.error(f"Client reinitialization failed: {e}", exc_info=True)
 
             # ---------------- RIGHT SIDE: CONNECTION STATUS ----------------
             with col2:
@@ -492,7 +623,7 @@ def main():
                             os.environ["BYBIT_API_KEY"] = api_key
                             os.environ["BYBIT_API_SECRET"] = api_secret
                             os.environ["BYBIT_ACCOUNT_TYPE"] = account_type
-                            os.environ["BYBIT_MAINNET"] = "true" if mainnet_mode else "false"
+                            os.environ["BYBIT_MAINNET"] = "true"
 
                             # Recreate client with new values
                             bybit_client = BybitClient()
@@ -551,94 +682,135 @@ def main():
 
             with col1:
                 st.markdown("### 📱 Discord")
-                discord_url = os.getenv("DISCORD_WEBHOOK_URL", "")
-                discord_status = "✅ Configured" if discord_url else "❌ Not Set"
+                current_discord_url = os.getenv("DISCORD_WEBHOOK_URL", st.session_state.get("DISCORD_WEBHOOK_URL", ""))
+                discord_status = "✅ Configured" if current_discord_url else "❌ Not Set"
                 st.metric("Discord Webhook", discord_status)
+
+                discord_url = st.text_input(
+                    "Discord Webhook URL", 
+                    value=current_discord_url, 
+                    type="password",
+                    help="Get this from your Discord server settings > Integrations > Webhooks"
+                )
+
                 if st.button("📤 Test Discord"):
-                    try:
-                        from notifications import send_discord
-                        test_signal = [{
-                            'Symbol': 'BTCUSDT',
-                            'Type': 'Buy',
-                            'Side': 'LONG',
-                            'Score': '85.0',
-                            'Entry': 45000.00,
-                            'TP': 46000.00,
-                            'SL': 44000.00,
-                            'Market': 'Test',
-                            'Time': 'Test Signal'
-                        }]
-                        send_discord(test_signal)
-                        st.success("✅ Discord test sent!")
-                    except Exception as e:
-                        st.error(f"Discord test failed: {e}")
+                    if discord_url:
+                        try:
+                            os.environ["DISCORD_WEBHOOK_URL"] = discord_url
+                            from notifications import send_discord
+                            test_signal = [{
+                                'Symbol': 'BTCUSDT',
+                                'Type': 'Buy',
+                                'Side': 'LONG',
+                                'Score': '85.0',
+                                'Entry': 45000.00,
+                                'TP': 46000.00,
+                                'SL': 44000.00,
+                                'Market': 'Test',
+                                'Time': 'Test Signal'
+                            }]
+                            send_discord(test_signal)
+                            st.success("✅ Discord test sent!")
+                        except Exception as e:
+                            st.error(f"Discord test failed: {e}")
+                    else:
+                        st.warning("⚠️ Please enter Discord webhook URL first")
 
                 st.markdown("### 📞 WhatsApp")
-                whatsapp_number = os.getenv("WHATSAPP_TO", "")
-                whatsapp_status = "✅ Configured" if whatsapp_number else "❌ Not Set"
+                current_whatsapp = os.getenv("WHATSAPP_TO", st.session_state.get("WHATSAPP_TO", ""))
+                whatsapp_status = "✅ Configured" if current_whatsapp else "❌ Not Set"
                 st.metric("WhatsApp Number", whatsapp_status)
+
+                whatsapp_number = st.text_input(
+                    "WhatsApp Phone Number", 
+                    value=current_whatsapp,
+                    help="Enter phone number with country code (e.g., 1234567890)"
+                )
 
             with col2:
                 st.markdown("### 📨 Telegram")
-                telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                telegram_chat = os.getenv("TELEGRAM_CHAT_ID", "")
-                telegram_status = "✅ Configured" if telegram_token and telegram_chat else "❌ Not Set"
+                current_telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", st.session_state.get("TELEGRAM_BOT_TOKEN", ""))
+                current_telegram_chat = os.getenv("TELEGRAM_CHAT_ID", st.session_state.get("TELEGRAM_CHAT_ID", ""))
+                telegram_status = "✅ Configured" if current_telegram_token and current_telegram_chat else "❌ Not Set"
                 st.metric("Telegram Bot", telegram_status)
-                if st.button("📤 Test Telegram"):
-                    try:
-                        from notifications import send_telegram
-                        test_signal = [{
-                            'Symbol': 'BTCUSDT',
-                            'Type': 'Buy',
-                            'Side': 'LONG',
-                            'Score': '85.0',
-                            'Entry': 45000.00,
-                            'TP': 46000.00,
-                            'SL': 44000.00,
-                            'Market': 'Test',
-                            'Time': 'Test Signal'
-                        }]
-                        send_telegram(test_signal)
-                        st.success("✅ Telegram test sent!")
-                    except Exception as e:
-                        st.error(f"Telegram test failed: {e}")
 
-                st.markdown("### ⚙️ Notification Settings")
+                telegram_token = st.text_input(
+                    "Telegram Bot Token", 
+                    value=current_telegram_token,
+                    type="password",
+                    help="Get this from @BotFather on Telegram"
+                )
+
+                telegram_chat = st.text_input(
+                    "Telegram Chat ID", 
+                    value=current_telegram_chat,
+                    help="Get this from @userinfobot on Telegram"
+                )
+
+                if st.button("📤 Test Telegram"):
+                    if telegram_token and telegram_chat:
+                        try:
+                            os.environ["TELEGRAM_BOT_TOKEN"] = telegram_token
+                            os.environ["TELEGRAM_CHAT_ID"] = telegram_chat
+                            from notifications import send_telegram
+                            test_signal = [{
+                                'Symbol': 'BTCUSDT',
+                                'Type': 'Buy',
+                                'Side': 'LONG',
+                                'Score': '85.0',
+                                'Entry': 45000.00,
+                                'TP': 46000.00,
+                                'SL': 44000.00,
+                                'Market': 'Test',
+                                'Time': 'Test Signal'
+                            }]
+                            send_telegram(test_signal)
+                            st.success("✅ Telegram test sent!")
+                        except Exception as e:
+                            st.error(f"Telegram test failed: {e}")
+                    else:
+                        st.warning("⚠️ Please enter both Telegram Bot Token and Chat ID")
+
+                st.markdown("### ⚙️ General Settings")
                 notifications_enabled = st.checkbox(
                     "Enable Notifications",
                     value=current_settings.get("NOTIFICATION_ENABLED", True),
                     help="Enable/disable all notifications"
                 )
 
-            with st.expander("📖 Notification Setup Guide"):
-                st.markdown("""
-                **Discord Setup:**
-                1. Create a Discord webhook in your server
-                2. Set `DISCORD_WEBHOOK_URL` environment variable
-
-                **Telegram Setup:**
-                1. Create a Telegram bot via @BotFather
-                2. Get your chat ID by messaging @userinfobot
-                3. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
-
-                **WhatsApp Setup:**
-                1. Set `WHATSAPP_TO` with your phone number (e.g., 1234567890)
-                2. Notifications will open WhatsApp Web automatically
-                """)
-
             if st.button("💾 Save Notification Settings", type="primary"):
                 try:
+                    # Save to session state
+                    st.session_state["DISCORD_WEBHOOK_URL"] = discord_url
+                    st.session_state["TELEGRAM_BOT_TOKEN"] = telegram_token
+                    st.session_state["TELEGRAM_CHAT_ID"] = telegram_chat
+                    st.session_state["WHATSAPP_TO"] = whatsapp_number
+
+                    # Update environment variables for current session
+                    os.environ["DISCORD_WEBHOOK_URL"] = discord_url
+                    os.environ["TELEGRAM_BOT_TOKEN"] = telegram_token
+                    os.environ["TELEGRAM_CHAT_ID"] = telegram_chat
+                    os.environ["WHATSAPP_TO"] = whatsapp_number
+
+                    # Reload notifications module to pick up new credentials
+                    import importlib
+                    import notifications
+                    importlib.reload(notifications)
+
+                    # Save enabled status to settings
                     new_settings = current_settings.copy()
                     new_settings.update({
                         "NOTIFICATION_ENABLED": notifications_enabled
                     })
                     if save_settings(new_settings):
-                        st.success("✅ Notification settings saved!")
+                        st.success("✅ Notification settings saved and reloaded!")
+                        st.info("💡 To persist these settings permanently, add them to your Replit Secrets")
                         st.rerun()
                     else:
                         st.error("❌ Failed to save settings")
                 except Exception as e:
                     st.error(f"Error saving settings: {e}")
+                    logger.error(f"Notification settings save error: {e}", exc_info=True)
 
         # System information footer
         st.markdown("---")
@@ -652,7 +824,7 @@ def main():
             st.info(f"**Database:** SQLite/PostgreSQL")
         with info_col3:
             st.info(f"**Environment:** {'Production' if not os.getenv('BYBIT_MAINNET') else 'Live'}")
-            st.info(f"**Version:** AlgoTrader Pro v1.0")
+            st.info(f"**Version:** AlgoTrader Pro v1.5")
 
     except Exception as e:
         st.error(f"Settings page error: {e}")

@@ -30,30 +30,62 @@ def calculate_signal_score(analysis: Dict[str, Any]) -> float:
     score = analysis.get("score", 0)
     indicators = analysis.get("indicators", {})
 
+    # RSI - more strict scoring
     rsi = indicators.get("rsi", 50)
-    if 20 <= rsi <= 30 or 70 <= rsi <= 80:
-        score += 10
-    elif rsi < 20 or rsi > 80:
+    if 25 <= rsi <= 35:  # Strong oversold but not extreme
+        score += 15
+    elif 65 <= rsi <= 75:  # Strong overbought but not extreme
+        score += 15
+    elif rsi < 20 or rsi > 80:  # Too extreme - risky
         score += 5
+    elif 40 <= rsi <= 60:  # Neutral zone - less opportunity
+        score -= 5
 
+    # MACD - stronger signals only
     macd_hist = indicators.get("macd_histogram", 0)
-    if abs(macd_hist) > 0.01:
+    if abs(macd_hist) > 0.02:  # Stronger momentum
+        score += 15
+    elif abs(macd_hist) > 0.01:
         score += 8
 
+    # Volume - require strong volume confirmation
     vol_ratio = indicators.get("volume_ratio", 1)
-    if vol_ratio > 2:
-        score += 12
+    if vol_ratio > 2.5:  # Very high volume
+        score += 20
+    elif vol_ratio > 2:
+        score += 15
     elif vol_ratio > 1.5:
-        score += 6
-
-    vol = indicators.get("volatility", 0)
-    if 0.5 <= vol <= 3:
-        score += 5
-    elif vol > 5:
+        score += 8
+    elif vol_ratio < 1.2:  # Low volume - risky
         score -= 10
 
+    # Volatility - prefer moderate volatility
+    vol = indicators.get("volatility", 0)
+    if 1 <= vol <= 2.5:  # Sweet spot
+        score += 10
+    elif 0.5 <= vol < 1:
+        score += 5
+    elif vol > 5:  # Too volatile
+        score -= 15
+    elif vol < 0.3:  # Too quiet
+        score -= 10
+
+    # Trend alignment - crucial for profitability
     trend_score = indicators.get("trend_score", 0)
-    score += trend_score * 3
+    if trend_score >= 3:  # Strong trend alignment
+        score += 20
+    elif trend_score >= 2:
+        score += 10
+    elif trend_score <= 1:  # Weak trend
+        score -= 10
+
+    # EMA alignment bonus
+    ema_9 = indicators.get("ema_9", 0)
+    ema_21 = indicators.get("ema_21", 0)
+    if ema_9 > 0 and ema_21 > 0:
+        ema_diff = abs(ema_9 - ema_21) / ema_21
+        if ema_diff > 0.01:  # Clear separation
+            score += 10
 
     return min(100, max(0, score))
 
@@ -62,39 +94,52 @@ def enhance_signal(analysis: Dict[str, Any]) -> Any:
     price = indicators.get("price", 0)
     atr = indicators.get("atr", 0)
     side = analysis.get("side", "BUY")
-    leverage = 15
+    leverage = 10  # More conservative leverage
     atr_multiplier = 2
-    risk_reward = 2
-
-    # Trade parameters
-    sl_percent = 0.1    # Stop Loss: 10% below entry for buy, above entry for sell (unchanged)
-    tp_percent = 0.3   # Take Profit: 30% above entry for buy, below entry for sell
+    
+    # More profitable risk/reward ratios
+    sl_percent = 0.08    # Tighter stop loss: 8%
+    tp_percent = 0.40    # Higher take profit: 40% (5:1 R/R ratio)
+    
+    # Calculate based on volatility for better entries
+    vol = indicators.get("volatility", 0)
+    if vol > 3:  # High volatility - wider stops
+        sl_percent = 0.12
+        tp_percent = 0.50
+    elif vol < 1:  # Low volatility - tighter stops
+        sl_percent = 0.05
+        tp_percent = 0.25
 
     if side.lower() == "buy":
-        sl = price * (1 - sl_percent)   # Stop Loss 10% below entry (unchanged)
-        tp = price * (1 + tp_percent)   # Take Profit 30% above entry
-        liq = price * (1 - 0.9 / leverage)    # Liquidation formula remains the same
+        sl = price * (1 - sl_percent)
+        tp = price * (1 + tp_percent)
+        liq = price * (1 - 0.9 / leverage)
     else:
-        sl = price * (1 + sl_percent)   # Stop Loss 10% above entry (unchanged)
-        tp = price * (1 - tp_percent)   # Take Profit 30% below entry
-        liq = price * (1 + 0.9 / leverage)    # Liquidation formula for short
+        sl = price * (1 + sl_percent)
+        tp = price * (1 - tp_percent)
+        liq = price * (1 + 0.9 / leverage)
 
-    print(f"SL: {sl}, TP: {tp}, LIQ: {liq}")
-
-    trail = atr
-    margin_usdt = 2.0
+    # Dynamic trail based on ATR
+    trail = max(atr * 1.5, price * 0.03) if atr > 0 else price * 0.03
+    
+    # Calculate margin based on account size (more conservative)
+    margin_usdt = 3.0  # Slightly higher margin for better entries
 
     bb_upper = indicators.get("bb_upper", 0)
     bb_lower = indicators.get("bb_lower", 0)
     bb_slope = "Expanding" if bb_upper - bb_lower > price * 0.02 else "Contracting"
 
-    vol = indicators.get("volatility", 0)
     if vol < 1:
         market_type = "Low Vol"
     elif vol < 3:
         market_type = "Normal"
     else:
         market_type = "High Vol"
+
+    # Calculate actual risk/reward ratio
+    risk = abs(price - sl)
+    reward = abs(tp - price)
+    risk_reward = round(reward / risk, 2) if risk > 0 else 0
 
     enhanced = analysis.copy()
     enhanced.update({

@@ -26,7 +26,7 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 st.set_page_config(
-    page_title="Trades - AlgoTrader Pro",
+    page_title="Trades - AlgoTraderPro",
     page_icon="💼",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -46,26 +46,26 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
     """Close a trade with proper error handling, including closing real trades on Bybit."""
     try:
         engine = get_engine()
-        
+
         # Get trade from database
         open_trades = [t for t in db_manager.get_trades(limit=1000) if t.status == "open"]
         trade = next((t for t in open_trades if str(t.id) == str(trade_id) or str(t.order_id) == str(trade_id)), None)
-        
+
         if not trade:
             st.error(f"Trade {trade_id} not found")
             return False
-        
+
         # Initialize variables
         current_price = engine.client.get_current_price(trade.symbol)
         pnl = 0.0
-        
+
         # Handle real trades
         if not virtual:
             try:
                 # Fetch position data
                 positions = await engine.client.get_positions(symbol=trade.symbol)
                 position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
-                
+
                 if position:
                     # Close position on Bybit
                     close_side = "Sell" if trade.side.upper() in ["BUY", "LONG"] else "Buy"
@@ -99,7 +99,7 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
                             st.error(f"Failed to close position for {trade.symbol}: {e}")
                             logger.error(f"Failed to close position for {trade.symbol}: {e}", exc_info=True)
                             return False
-                    
+
                     # Use Bybit's unrealized PnL and mark price
                     pnl = float(position.get("unrealized_pnl", 0.0))
                     current_price = float(position.get("mark_price", current_price))
@@ -113,13 +113,13 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
         else:
             # Virtual trade: Calculate PnL
             pnl = engine.calculate_virtual_pnl(trade.to_dict())
-        
+
         # Update trade in database
         if not db_manager.session:
             logger.error("Database session not initialized")
             st.error("Database session not initialized")
             return False
-        
+
         try:
             db_manager.session.execute(
                 update(TradeModel)
@@ -138,18 +138,18 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
             logger.error(f"Database error updating trade {trade.order_id}: {e}", exc_info=True)
             st.error(f"Database error updating trade: {e}")
             return False
-        
+
         if success:
             # Update virtual balance if it's a virtual trade
             if virtual:
                 engine.update_virtual_balances(pnl)
-            
+
             st.success(f"✅ Trade closed successfully! PnL: ${pnl:.2f}")
             return True
         else:
             st.error("❌ Failed to close trade in database")
             return False
-            
+
     except Exception as e:
         st.error(f"Error closing trade: {e}")
         logger.error(f"Error closing trade {trade_id}: {e}", exc_info=True)
@@ -158,48 +158,50 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
 async def display_trade_management():
     """Display trade management interface for virtual and real trades."""
     engine = get_engine()
-    
+
     # Trading mode switch
     col1, col2 = st.columns(2)
-    
+
     with col1:
         st.subheader("🎮 Virtual Trades")
         virtual_trades = engine.get_open_virtual_trades()
-        
+
         if virtual_trades:
             for i, trade in enumerate(virtual_trades):
                 with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
                     current_price = engine.client.get_current_price(trade.symbol)
                     current_pnl = engine.calculate_virtual_pnl(trade.to_dict())
-                    
+
                     pnl_color = "🟢" if current_pnl > 0 else "🔴" if current_pnl < 0 else "🟡"
-                    
+
                     col_a, col_b = st.columns(2)
-                    
+
                     with col_a:
                         st.write(f"**Quantity:** {trade.qty:.6f}")
                         st.write(f"**Score:** {trade.score or 0:.1f}%")
                         st.write(f"**Current Price:** ${current_price:.4f}")
                         st.write(f"**SL:** ${trade.sl:.4f}" if trade.sl else "N/A")
                         st.write(f"**TP:** ${trade.tp:.4f}" if trade.tp else "N/A")
-                    
+
                     with col_b:
                         st.write(f"**Current PnL:** {pnl_color} ${current_pnl:.2f}")
                         st.write(f"**Status:** {trade.status.title()}")
                         st.write(f"**Trail:** ${trade.trail:.4f}" if trade.trail else "N/A")
                         st.write(f"**Liquidation:** ${trade.liquidation:.4f}" if trade.liquidation else "N/A")
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
-                    
+
                     if st.button("❌ Close", key=f"close_virtual_{trade.id}"):
                         if await close_trade_safely(str(trade.id), virtual=True):
                             st.rerun()
         else:
             st.info("No open virtual trades")
-    
+
     with col2:
         st.subheader("💰 Real Trades")
+        # Sync real trades first
+        engine.sync_real_trades()
         real_trades = engine.get_open_real_trades()
-        
+
         if real_trades:
             for i, trade in enumerate(real_trades):
                 with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
@@ -208,53 +210,53 @@ async def display_trade_management():
                         positions = await engine.client.get_positions(symbol=trade.symbol)
                         position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
                         current_price = float(position.get("mark_price", engine.client.get_current_price(trade.symbol))) if position else engine.client.get_current_price(trade.symbol)
-                        current_pnl = float(position.get("unrealisedPnl", 0.0)) if position else 0.0
+                        current_pnl = float(position.get("unrealized_pnl", 0.0)) if position else 0.0
                     except Exception as e:
                         logger.warning(f"Failed to fetch real position data for {trade.symbol}: {e}")
                         st.warning(f"Could not fetch real-time data for {trade.symbol}. Using fallback price.")
                         current_price = engine.client.get_current_price(trade.symbol)
                         current_pnl = 0.0
-                    
+
                     pnl_color = "🟢" if current_pnl > 0 else "🔴" if current_pnl < 0 else "🟡"
-                    
+
                     col_a, col_b = st.columns(2)
-                    
+
                     with col_a:
                         st.write(f"**Quantity:** {trade.qty:.6f}")
                         st.write(f"**Score:** {trade.score or 0:.1f}%")
                         st.write(f"**Current Price:** ${current_price:.4f}")
                         st.write(f"**SL:** ${trade.sl:.4f}" if trade.sl else "N/A")
                         st.write(f"**TP:** ${trade.tp:.4f}" if trade.tp else "N/A")
-                    
+
                     with col_b:
                         st.write(f"**Current PnL:** {pnl_color} ${current_pnl:.2f}")
                         st.write(f"**Status:** {trade.status.title()}")
                         st.write(f"**Trail:** ${trade.trail:.4f}" if trade.trail else "N/A")
                         st.write(f"**Liquidation:** ${trade.liquidation:.4f}" if trade.liquidation else "N/A")
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
-                    
+
                     if st.button("❌ Close", key=f"close_real_{trade.id}"):
                         if await close_trade_safely(str(trade.id), virtual=False):
                             st.rerun()
         else:
             st.info("No open real trades")
 
-async def display_manual_trading():
+def display_manual_trading():
     """Display manual trading interface"""
     st.subheader("📝 Manual Trade Entry")
-    
+
     engine = get_engine()
     symbols = get_usdt_symbols(50)
-    
+
     col1, col2 = st.columns(2)
-    
+
     with col1:
         symbol = st.selectbox("Symbol", symbols, key="manual_symbol")
         side = st.selectbox("Side", ["Buy", "Sell"], key="manual_side")
         qty = st.number_input("Quantity", min_value=0.001, value=0.01, key="manual_qty")
         order_type = st.selectbox("Order Type", ["Market", "Limit"], key="manual_order_type")
         price = st.number_input("Price (for Limit orders)", min_value=0.0, key="manual_price") if order_type == "Limit" else None
-    
+
     with col2:
         leverage = st.number_input("Leverage", min_value=1, max_value=100, value=10, key="manual_leverage")
         stop_loss = st.number_input("Stop Loss Price", min_value=0.0, key="manual_sl")
@@ -262,21 +264,21 @@ async def display_manual_trading():
         trail = st.number_input("Trailing Stop Price", min_value=0.0, key="manual_trail")
         margin_usdt = st.number_input("Margin (USDT)", min_value=0.0, value=5.0, key="manual_margin")
         trading_mode = st.selectbox("Execution Mode", ["virtual", "real"], key="manual_mode")
-    
+
     if st.button("🚀 Place Order", type="primary"):
         if qty <= 0:
             st.error("Invalid quantity")
             return
-        
+
         try:
             # Get current price if market order or no price specified
             current_price = engine.client.get_current_price(symbol)
             entry_price = price if order_type == "Limit" and price else current_price
-            
+
             if entry_price <= 0:
                 st.error("Invalid entry price")
                 return
-            
+
             # Calculate trail and liquidation if not provided
             trail_value = trail if trail > 0 else (
                 abs(take_profit - entry_price) / 2 if take_profit > 0 else 0.0
@@ -286,7 +288,7 @@ async def display_manual_trading():
                 else entry_price * (1 + 0.9 / leverage)
             ) if leverage > 0 else 0.0
             margin_value = margin_usdt if margin_usdt > 0 else (entry_price * qty) / leverage
-            
+
             # Create trade data
             trade_data = {
                 "symbol": symbol,
@@ -305,16 +307,16 @@ async def display_manual_trading():
                 "margin_usdt": margin_value if margin_value > 0 else None,
                 "margin_mode": "CROSS" if trading_mode == "real" else None
             }
-            
+
             # Add to database
             success = db_manager.add_trade(trade_data)
-            
+
             if not success:
                 st.error("❌ Failed to place order in database")
                 return
-            
+
             st.success(f"✅ {trading_mode.title()} order placed: {symbol} {side} @ ${entry_price:.4f}")
-            
+
             # Handle trade execution based on mode
             if trading_mode == "virtual":
                 # Update balance for virtual trades
@@ -334,59 +336,59 @@ async def display_manual_trading():
                     session.commit()
                     return
             else:
-                # Execute real trade on Bybit
-                try:
-                    success = await engine.execute_real_trade([trade_data])
-                    if success:
-                        # Sync trades after execution
-                        await asyncio.sleep(2)
-                        engine.get_open_real_trades()
-                        logger.info(f"Synced real trades to DB after executing manual trade for {symbol}")
-                    else:
-                        st.error("❌ Failed to execute real trade on Bybit")
-                        # Rollback DB entry
-                        session = db_manager._get_session()
-                        session.execute(
-                            update(TradeModel)
-                            .where(TradeModel.order_id == trade_data["order_id"])
-                            .values(status="failed")
-                        )
-                        session.commit()
-                        return
-                except APIException as e:
-                    if e.error_code == "100028":
-                        logger.warning(f"Unified account error for manual trade {symbol}: {e}. Retrying with cross margin mode.")
-                        trade_data["margin_mode"] = "CROSS"
+                # Execute real trade on Bybit using asyncio
+                async def execute_real():
+                    try:
                         success = await engine.execute_real_trade([trade_data])
                         if success:
+                            # Sync trades after execution
                             await asyncio.sleep(2)
-                            engine.get_open_real_trades()
-                            logger.info(f"Synced real trades to DB after retrying manual trade for {symbol}")
+                            engine.sync_real_trades()
+                            logger.info(f"Synced real trades to DB after executing manual trade for {symbol}")
+                            return True
                         else:
-                            st.error("❌ Retry failed to execute real trade on Bybit")
-                            # Rollback DB entry
-                            session = db_manager._get_session()
-                            session.execute(
-                                update(TradeModel)
-                                .where(TradeModel.order_id == trade_data["order_id"])
-                                .values(status="failed")
-                            )
-                            session.commit()
-                            return
-                    else:
-                        st.error(f"❌ Failed to execute real trade on Bybit: {e}")
-                        # Rollback DB entry
-                        session = db_manager._get_session()
-                        session.execute(
-                            update(TradeModel)
-                            .where(TradeModel.order_id == trade_data["order_id"])
-                            .values(status="failed")
-                        )
-                        session.commit()
-                        return
-            
+                            st.error("❌ Failed to execute real trade on Bybit")
+                            return False
+                    except APIException as e:
+                        if e.error_code == "100028":
+                            logger.warning(f"Unified account error for manual trade {symbol}: {e}. Retrying with cross margin mode.")
+                            trade_data["margin_mode"] = "CROSS"
+                            success = await engine.execute_real_trade([trade_data])
+                            if success:
+                                await asyncio.sleep(2)
+                                engine.sync_real_trades()
+                                logger.info(f"Synced real trades to DB after retrying manual trade for {symbol}")
+                                return True
+                            else:
+                                st.error("❌ Retry failed to execute real trade on Bybit")
+                                return False
+                        else:
+                            st.error(f"❌ Failed to execute real trade on Bybit: {e}")
+                            return False
+                    except Exception as e:
+                        st.error(f"❌ Error executing real trade: {e}")
+                        logger.error(f"Real trade execution error: {e}", exc_info=True)
+                        return False
+
+                # Run async function
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                success = loop.run_until_complete(execute_real())
+                loop.close()
+
+                if not success:
+                    # Rollback DB entry
+                    session = db_manager._get_session()
+                    session.execute(
+                        update(TradeModel)
+                        .where(TradeModel.order_id == trade_data["order_id"])
+                        .values(status="failed")
+                    )
+                    session.commit()
+                    return
+
             st.rerun()
-                
+
         except Exception as e:
             st.error(f"Order placement error: {e}")
             logger.error(f"Manual order error: {e}", exc_info=True)
@@ -399,153 +401,165 @@ async def display_manual_trading():
             )
             session.commit()
 
-async def display_automation_tab():
+def display_automation_tab():
     """Display automation controls"""
     st.subheader("🤖 Automated Trading")
-    
+
     automated_trader = get_automated_trader()
-    
+
     # Get current status
     try:
-        status = await automated_trader.get_status()
+        status = asyncio.run(automated_trader.get_status())
         is_running = status.get("is_running", False)
     except Exception as e:
         logger.error(f"Error getting automation status: {e}")
         is_running = False
         status = {}
-    
+
     # Status display
     status_col1, status_col2, status_col3 = st.columns(3)
-    
+
     with status_col1:
         status_text = "🟢 Running" if is_running else "🔴 Stopped"
         st.metric("Automation Status", status_text)
-    
+
     with status_col2:
         current_positions = status.get("current_positions", 0)
         max_positions = status.get("max_positions", 5)
         st.metric("Positions", f"{current_positions}/{max_positions}")
-    
+
     with status_col3:
         scan_interval = status.get("scan_interval", 300) / 60
         st.metric("Scan Interval", f"{scan_interval:.0f}min")
-    
+
     # Settings
     st.markdown("### ⚙️ Automation Settings")
-    
+
     settings_col1, settings_col2 = st.columns(2)
-    
+
     with settings_col1:
         new_max_positions = st.number_input("Max Positions", 1, 10, max_positions, key="auto_max_pos")
         new_risk_per_trade = st.number_input("Risk per Trade (%)", 0.5, 5.0, 
                                            status.get("risk_per_trade", 0.02) * 100, 
                                            step=0.1, key="auto_risk")
-    
+
     with settings_col2:
         new_scan_interval = st.number_input("Scan Interval (minutes)", 1, 60, int(scan_interval), key="auto_interval")
         min_signal_score = st.number_input("Min Signal Score", 50, 90, 65, key="auto_min_score")
-    
+
     # Control buttons
     control_col1, control_col2, control_col3 = st.columns(3)
-    
+
     with control_col1:
         if st.button("🚀 Start Automation", disabled=is_running):
+            # Check trading mode and warn if real
+            trading_mode = db_manager.get_setting("trading_mode") or "virtual"
+            if trading_mode == "real":
+                st.warning("⚠️ REAL MODE: Automation will place LIVE trades on Bybit with real funds!")
+
             with st.spinner("Starting automation..."):
                 try:
                     # Update settings
                     automated_trader.max_positions = new_max_positions
                     automated_trader.risk_per_trade = new_risk_per_trade / 100
                     automated_trader.scan_interval = new_scan_interval * 60
-                    
-                    success = await automated_trader.start()
+
+                    success = asyncio.run(automated_trader.start())
                     if success:
-                        st.success("✅ Automation started!")
+                        mode_msg = "REAL" if trading_mode == "real" else "Virtual"
+                        st.success(f"✅ {mode_msg} automation started! Will execute multiple trades per scan.")
                         st.rerun()
                     else:
                         st.error("❌ Failed to start automation")
                 except Exception as e:
                     st.error(f"Start error: {e}")
-    
+
     with control_col2:
-        if st.button("⏹️ Stop Automation", disabled=not is_running):
+        if st.button("⏹️ Stop Automation", disabled=not is_running, key="stop_auto_btn"):
             with st.spinner("Stopping automation..."):
                 try:
-                    success = await automated_trader.stop()
+                    success = asyncio.run(automated_trader.stop())
                     if success:
                         st.success("✅ Automation stopped!")
+                        time.sleep(0.5)
                         st.rerun()
                     else:
                         st.error("❌ Failed to stop automation")
                 except Exception as e:
                     st.error(f"Stop error: {e}")
-    
+
     with control_col3:
         if st.button("🔄 Reset Stats"):
             try:
-                await automated_trader.reset_stats()
+                asyncio.run(automated_trader.reset_stats())
                 st.success("✅ Statistics reset!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Reset error: {e}")
-    
-    # Countdown timer
-    if is_running:
-        st.markdown("### ⏱️ Scan Countdown")
-        placeholder = st.empty()
-        try:
-            status = await automated_trader.get_status()
-            last_scan_str = status['stats'].get('last_scan')
-            if last_scan_str:
-                last_scan = datetime.strptime(last_scan_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                elapsed = (datetime.now(timezone.utc) - last_scan).total_seconds()
-                remaining = status['scan_interval'] - elapsed
-                if remaining < 0:
-                    remaining = 0
-                    placeholder.warning("Scan overdue! Checking status...")
-                else:
-                    mins, secs = divmod(int(remaining), 60)
-                    placeholder.info(f"⏳ Next scan in {mins:02d}:{secs:02d} | Last scan: {last_scan_str}")
+
+    # Countdown timer with live updates
+    st.markdown("### ⏱️ Scan Countdown")
+    countdown_placeholder = st.empty()
+
+    try:
+        status = asyncio.run(automated_trader.get_status())
+        last_scan_str = status['stats'].get('last_scan')
+        scan_interval = status.get('scan_interval', 300)
+
+        if is_running and last_scan_str:
+            last_scan = datetime.strptime(last_scan_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            elapsed = (datetime.now(timezone.utc) - last_scan).total_seconds()
+            remaining = max(0, scan_interval - elapsed)
+
+            mins, secs = divmod(int(remaining), 60)
+            if remaining > 0:
+                countdown_placeholder.info(f"⏳ Next scan in {mins:02d}:{secs:02d} | Last scan: {last_scan_str}")
             else:
-                placeholder.info("⏳ Initial scan pending...")
-        except Exception as e:
-            placeholder.error(f"Status error: {e}")
-        
-        # Live update mechanism
-        if 'last_rerun' not in st.session_state:
-            st.session_state.last_rerun = 0
-        if time.time() - st.session_state.last_rerun > 1 and is_running:
-            st.session_state.last_rerun = time.time()
-            time.sleep(0.5)
-            st.rerun()
-    
+                countdown_placeholder.warning("⏳ Scan in progress...")
+        elif is_running:
+            countdown_placeholder.info("⏳ Initial scan pending...")
+        else:
+            countdown_placeholder.info("⏸️ Automation stopped")
+
+    except Exception as e:
+        countdown_placeholder.error(f"Status error: {e}")
+
+    # Auto-refresh every second when running
+    if is_running:
+        if 'countdown_key' not in st.session_state:
+            st.session_state.countdown_key = 0
+        time.sleep(1)
+        st.session_state.countdown_key += 1
+        st.rerun()
+
     # Performance summary
     if is_running or status.get("stats", {}).get("total_trades", 0) > 0:
         st.markdown("### 📊 Performance Summary")
-        
+
         performance = automated_trader.get_performance_summary()
-        
+
         perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
-        
+
         with perf_col1:
             st.metric("Total Trades", performance.get("total_trades", 0))
-        
+
         with perf_col2:
             win_rate = performance.get("win_rate", 0)
             st.metric("Win Rate", f"{win_rate}%")
-        
+
         with perf_col3:
             total_pnl = performance.get("total_pnl", 0)
             st.metric("Total PnL", f"${total_pnl:.2f}")
-        
+
         with perf_col4:
             runtime = performance.get("runtime", "N/A")
             st.metric("Runtime", runtime)
-        
+
         # Recent activity
         if is_running:
             st.markdown("### 🕐 Recent Activity")
             recent_trades = db_manager.get_trades(limit=5)
-            
+
             if recent_trades:
                 activity_data = []
                 for trade in recent_trades:
@@ -557,38 +571,176 @@ async def display_automation_tab():
                         "Status": trade.status.title(),
                         "Type": "Virtual" if trade.virtual else "Real"
                     })
-                
+
                 st.dataframe(pd.DataFrame(activity_data), height=200)
             else:
                 st.info("No recent activity")
 
-async def main():
+def main():
+    # Apply black background theme
+    st.markdown("""
+    <style>
+        .stApp {
+            background-color: #000000;
+            color: #ffffff;
+        }
+        .stSidebar {
+            background-color: #1a1a1a;
+        }
+        .stTextInput>div>div>input, .stNumberInput>div>div>input, .stTextArea>div>textarea, .stSelectbox>div>div>div {
+            background-color: #1a1a1a;
+            color: #ffffff;
+            border: 1px solid #333333;
+        }
+        .stButton>button {
+            background-color: #00ff88;
+            color: #000000;
+        }
+        .stButton>button:hover {
+            background-color: #00cc6a;
+        }
+        .stDataFrame {
+            background-color: #1a1a1a;
+            border: 1px solid #333333;
+        }
+        h1, h2, h3, h4, h5, h6 {
+            color: #00ff88 !important;
+        }
+        .stMetric {
+            background-color: #1a1a1a;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .stTabs [data-baseweb="tab-list"] {
+            background-color: #000000;
+        }
+        .stTabs [data-baseweb="tab"] {
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        .stTabs [data-baseweb="tab"]:hover {
+            background-color: #2a2a2a;
+        }
+        .stTabs [data-baseweb="tab"][aria-selected="true"] {
+            background-color: #00ff88;
+            color: #000000;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
     st.markdown("""
     <div style="text-align: center; padding: 1rem 0; border-bottom: 2px solid #00ff88; margin-bottom: 2rem;">
         <h1 style="color: #00ff88; margin: 0;">💼 Trading Center</h1>
         <p style="color: #888; margin: 0;">Complete Trade Management & Automation</p>
     </div>
     """, unsafe_allow_html=True)
-    
+
+    # Instructions
+    with st.expander("ℹ️ Trade Management Guide", expanded=False):
+        st.markdown("""
+        ### 📋 Page Overview
+
+        **Five tabs for complete trade control:**
+
+        1. **🔄 Open Positions**: Monitor and close active trades
+        2. **📜 Trade History**: Review all past trades and performance
+        3. **📝 Manual Trading**: Place custom trades with your own parameters
+        4. **🤖 Automation**: Enable automated signal scanning and execution
+        5. **📊 Statistics**: View comprehensive trading metrics
+
+        ### 🔄 Managing Open Positions
+
+        **Virtual Mode:**
+        - View all simulated open trades
+        - Close positions manually at current market price
+        - Track unrealized PnL in real-time
+        - TP/SL levels are displayed but not enforced automatically
+
+        **Real Mode:**
+        - Syncs with actual Bybit positions
+        - Close positions to execute real market orders
+        - Unrealized PnL reflects actual account value
+        - TP/SL orders are placed on Bybit exchange
+
+        ### 📝 Manual Trading
+
+        **Steps to place a manual trade:**
+        1. Select trading symbol from dropdown
+        2. Choose Long (buy) or Short (sell)
+        3. Enter custom Entry, TP, and SL prices
+        4. Click "Execute Trade" to place order
+
+        **Tips:**
+        - Use current market price as reference
+        - Set realistic TP/SL based on volatility
+        - In real mode, ensure sufficient balance
+
+        ### 🤖 Automation Setup
+
+        **How automated trading works:**
+        1. Set countdown timer (minutes)
+        2. Click "Start Automated Trading"
+        3. System scans markets when countdown reaches zero
+        4. Top signals are auto-executed (virtual or real mode)
+        5. Process repeats continuously
+
+        **Controls:**
+        - **Start**: Begins countdown and automation
+        - **Stop**: Halts all automated activity
+        - **Countdown Display**: Shows time until next scan
+
+        **Safety Features:**
+        - Max position limits prevent over-trading
+        - Risk percentage caps position sizes
+        - Emergency stop button available in sidebar
+
+        ### 📊 Understanding Statistics
+
+        - **Win Rate**: Percentage of profitable trades
+        - **Total Trades**: Number of completed trades
+        - **Average PnL**: Mean profit/loss per trade
+        - **Total PnL**: Cumulative profit/loss
+        - **Capital Usage**: How much balance is allocated to positions
+
+        ### ⚠️ Important Notes
+
+        - **Virtual trades** don't affect real funds
+        - **Real trades** execute on Bybit immediately
+        - Always verify mode before trading
+        - Use emergency stop if needed
+        """)
+
+    st.divider()
+
+    # Initialize engine
+    engine = st.session_state.get("engine")
+    if not engine:
+        st.error("Trading engine not initialized")
+        return
+
+    # Get current trading mode from session state
+    trading_mode = st.session_state.get("trading_mode", "virtual")
+
     # Sidebar
     with st.sidebar:
         st.header("💼 Trading Controls")
-        
-        # Current trading mode display
-        current_mode = st.session_state.get('trading_mode', 'virtual')
-        st.metric("Current Mode", current_mode.title())
-        
+
+        # Show current mode prominently
+        mode_color = "🟢" if trading_mode == "virtual" else "🟡"
+        st.info(f"{mode_color} **Current Mode:** {trading_mode.title()}")
+
+        st.divider()
+
         # Quick stats
         try:
-            engine = get_engine()
             open_virtual = len(engine.get_open_virtual_trades())
             open_real = len(engine.get_open_real_trades())
-            
+
             st.metric("Open Virtual", open_virtual)
             st.metric("Open Real", open_real)
-            
+
             # Load balance from DB
-            if current_mode == "virtual":
+            if trading_mode == "virtual":
                 wallet_balance = db.get_wallet_balance("virtual")
                 capital_val = wallet_balance.capital if wallet_balance else 100.0
                 available_val = wallet_balance.available if wallet_balance else 100.0
@@ -610,11 +762,11 @@ async def main():
                 except Exception as e:
                     logger.error(f"Failed to fetch real balance from Bybit: {e}")
                     capital_val = available_val = 0.0
-            
+
             available_val = max(available_val, 0.0)
             used_val = max(capital_val - available_val, 0.0)
-            
-            if current_mode == "virtual":
+
+            if trading_mode == "virtual":
                 st.metric("💻 Virtual Capital", f"${capital_val:.2f}")
                 st.metric("💻 Virtual Available", f"${available_val:.2f}")
                 st.metric("💻 Virtual Used", f"${used_val:.2f}")
@@ -622,22 +774,22 @@ async def main():
                 st.metric("🏦 Real Capital", f"${capital_val:.2f}")
                 st.metric("🏦 Real Available", f"${available_val:.2f}")
                 st.metric("🏦 Real Used Margin", f"${used_val:.2f}")
-        
+
         except Exception as e:
             st.error(f"Error loading stats: {e}")
-        
+
         st.divider()
-        
+
         # Navigation
         if st.button("📊 Dashboard"):
             st.switch_page("app.py")
-        
+
         if st.button("🎯 Generate Signals"):
             st.switch_page("pages/signals.py")
-        
+
         if st.button("📈 Performance"):
             st.switch_page("pages/performance.py")
-    
+
     # Main content tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔄 Open Positions", 
@@ -646,18 +798,18 @@ async def main():
         "🤖 Automation", 
         "📊 Statistics"
     ])
-    
+
     with tab1:
         # Run async function in Streamlit
-        await display_trade_management()
-    
+        asyncio.run(display_trade_management())
+
     with tab2:
         st.subheader("📜 Trading History")
-        
+
         # Get all closed trades
         engine = get_engine()
         closed_trades = engine.get_closed_virtual_trades() + engine.get_closed_real_trades()
-        
+
         if closed_trades:
             # Convert to displayable format
             history_data = []
@@ -679,10 +831,46 @@ async def main():
                     "Mode": "Virtual" if trade.virtual else "Real",
                     "Status": "✅" if pnl > 0 else "❌" if pnl < 0 else "➖"
                 })
-            
+
             df = pd.DataFrame(history_data)
-            st.dataframe(df, height=500)
             
+            # Pagination
+            if 'history_page' not in st.session_state:
+                st.session_state.history_page = 0
+
+            items_per_page = 10
+            total_pages = (len(df) - 1) // items_per_page + 1
+            start_idx = st.session_state.history_page * items_per_page
+            end_idx = start_idx + items_per_page
+            page_df = df.iloc[start_idx:end_idx]
+
+            # Display in card grid
+            cols = st.columns(3)
+            for index, row in page_df.iterrows():
+                with cols[index % 3]:
+                    st.markdown(f"""
+                    <div style="border: 1px solid #262730; border-radius: 10px; padding: 12px; margin-bottom: 10px; background: #1E1E1E;">
+                        <h4 style="margin: 0; color: #00ff88;">{row['Symbol']}</h4>
+                        <p style="margin: 5px 0; font-size: 13px;"><b>{row['Side']}</b> | {row['Status']}</p>
+                        <p style="margin: 5px 0; font-size: 12px;">Entry: {row['Entry']} | Exit: {row['Exit']}</p>
+                        <p style="margin: 5px 0; font-size: 12px;">PnL: {row['PnL']}</p>
+                        <p style="margin: 5px 0; font-size: 11px; color: #888;">{row['Date']} | {row['Mode']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            # Pagination controls
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col1:
+                if st.button("⬅️ Prev", key="prev_history", disabled=st.session_state.history_page == 0):
+                    st.session_state.history_page -= 1
+                    st.rerun()
+            with col2:
+                st.markdown(f"<p style='text-align: center;'>Page {st.session_state.history_page + 1} of {total_pages}</p>", unsafe_allow_html=True)
+            with col3:
+                if st.button("Next ➡️", key="next_history", disabled=st.session_state.history_page >= total_pages - 1):
+                    st.session_state.history_page += 1
+                    st.rerun()
+
             # Export option
             csv = df.to_csv(index=False)
             st.download_button(
@@ -693,66 +881,66 @@ async def main():
             )
         else:
             st.info("No trading history available. Start trading to see your history here!")
-    
+
     with tab3:
-        await display_manual_trading()
-    
+        display_manual_trading()
+
     with tab4:
-        await display_automation_tab()
-    
+        display_automation_tab()
+
     with tab5:
         st.subheader("📊 Trading Statistics")
-        
+
         # Calculate comprehensive stats
         engine = get_engine()
         all_trades = engine.get_closed_virtual_trades() + engine.get_closed_real_trades()
-        
+
         if all_trades:
             metrics = calculate_portfolio_metrics([t.to_dict() for t in all_trades])
-            
+
             # Main metrics
             metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-            
+
             with metric_col1:
                 st.metric("Total Trades", metrics['total_trades'])
-            
+
             with metric_col2:
                 st.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
-            
+
             with metric_col3:
-                st.metric("Total P&L", f"${metrics['total_pnl']:.2f}")
-            
+                st.metric("Total PnL", f"${metrics['total_pnl']:.2f}")
+
             with metric_col4:
-                st.metric("Avg P&L/Trade", f"${metrics['avg_pnl']:.2f}")
-            
+                st.metric("Avg PnL/Trade", f"${metrics['avg_pnl']:.2f}")
+
             # Additional metrics
             st.markdown("### 🎯 Detailed Statistics")
-            
+
             detail_col1, detail_col2 = st.columns(2)
-            
+
             with detail_col1:
                 st.metric("Profitable Trades", metrics['profitable_trades'])
                 st.metric("Best Trade", f"${metrics['best_trade']:.2f}")
-            
+
             with detail_col2:
                 losing_trades = metrics['total_trades'] - metrics['profitable_trades']
                 st.metric("Losing Trades", losing_trades)
                 st.metric("Worst Trade", f"${metrics['worst_trade']:.2f}")
-            
+
             # Performance by symbol
             st.markdown("### 📈 Performance by Symbol")
-            
+
             symbol_performance = {}
             for trade in all_trades:
                 symbol = trade.symbol
                 pnl = trade.pnl or 0
-                
+
                 if symbol not in symbol_performance:
                     symbol_performance[symbol] = {'trades': 0, 'total_pnl': 0}
-                
+
                 symbol_performance[symbol]['trades'] += 1
                 symbol_performance[symbol]['total_pnl'] += pnl
-            
+
             if symbol_performance:
                 symbol_data = []
                 for symbol, data in symbol_performance.items():
@@ -762,10 +950,10 @@ async def main():
                         "Total PnL": f"${data['total_pnl']:.2f}",
                         "Avg PnL": f"${data['total_pnl'] / data['trades']:.2f}"
                     })
-                
+
                 st.dataframe(pd.DataFrame(symbol_data))
         else:
             st.info("No trading statistics available. Complete some trades to see detailed analytics!")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

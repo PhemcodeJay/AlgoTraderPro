@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass
 from logging_config import get_trading_logger
 from exceptions import (
-    APIException, APIConnectionException, APIRateLimitException, 
+    APIException, APIConnectionException, APIRateLimitException,
     APIAuthenticationException, APITimeoutException, APIDataException,
     APIErrorRecoveryStrategy, create_error_context
 )
@@ -42,7 +42,7 @@ class BybitClient:
         # Optional sanity check
         if os.getenv("BYBIT_MAINNET", "true").lower() != "true":
             raise ValueError("Mainnet only mode is enabled. Please set BYBIT_MAINNET=true")
-        
+
         # Connection and session management
         self.session: Optional[requests.Session] = None
         self.ws_connection = None
@@ -50,52 +50,52 @@ class BybitClient:
         self._price_cache = {}
         self._connected = False
         self._connection_lock = threading.Lock()
-        
+
         # Rate limiting
         self.rate_limit = RateLimitInfo()
         self.rate_limit_lock = threading.Lock()
-        
+
         # Error handling
         self.recovery_strategy = APIErrorRecoveryStrategy(max_retries=3, delay=1.0)
         self.last_error_time = None
         self.consecutive_errors = 0
-        
+
         # Timeout configuration
         self.request_timeout = 30  # seconds
         self.connect_timeout = 10  # seconds
-        
+
         # Health monitoring
         self.last_successful_request = None
         self.total_requests = 0
         self.successful_requests = 0
         self.failed_requests = 0
-        
+
         # Initialize connection
         self._initialize_session()
         self._test_connection()  # Test connection during initialization
-        
+
         # Start background event loop for WebSocket
         self._start_background_loop()
-        
+
         logger.info(f"BybitClient initialized - Environment: mainnet - Account Type: {self.account_type}")
-    
+
     def _initialize_session(self):
         """Initialize HTTP session with proper configuration"""
         try:
             self.session = requests.Session()
-            
-            # Configure adapters for connection pooling and retries  
+
+            # Configure adapters for connection pooling and retries
             adapter = requests.adapters.HTTPAdapter(
                 pool_connections=10,
                 pool_maxsize=10,
                 max_retries=0  # We handle retries manually
             )
-            
+
             self.session.mount('https://', adapter)
             self.session.mount('http://', adapter)
-            
+
             logger.info("HTTP session initialized with connection pooling")
-            
+
         except Exception as e:
             error_context = create_error_context(
                 module=__name__,
@@ -116,7 +116,7 @@ class BybitClient:
                 self.loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self.loop)
                 self.loop.run_forever()
-            
+
             thread = threading.Thread(target=run_loop, daemon=True)
             thread.start()
             logger.info("Background event loop started")
@@ -136,7 +136,7 @@ class BybitClient:
         """Get authenticated headers"""
         timestamp = str(int(time.time() * 1000))
         signature = self._generate_signature(params, timestamp)
-        
+
         return {
             "X-BAPI-API-KEY": self.api_key,
             "X-BAPI-SIGN": signature,
@@ -150,19 +150,19 @@ class BybitClient:
         """Check and enforce rate limits"""
         with self.rate_limit_lock:
             now = time.time()
-            
+
             # Reset minute counter if needed
             if now - self.rate_limit.minute_start >= 60:
                 self.rate_limit.minute_start = now
                 self.rate_limit.minute_count = 0
-            
+
             # Check per-second rate limit
             time_since_last = now - self.rate_limit.last_request_time
             if time_since_last < 1.0 / self.rate_limit.requests_per_second:
                 sleep_time = (1.0 / self.rate_limit.requests_per_second) - time_since_last
                 time.sleep(sleep_time)
                 now = time.time()
-            
+
             # Check per-minute rate limit
             if self.rate_limit.minute_count >= self.rate_limit.requests_per_minute:
                 sleep_time = 60 - (now - self.rate_limit.minute_start)
@@ -171,13 +171,13 @@ class BybitClient:
                     time.sleep(sleep_time)
                     self.rate_limit.minute_start = time.time()
                     self.rate_limit.minute_count = 0
-            
+
             # Update counters
             self.rate_limit.last_request_time = time.time()
             self.rate_limit.minute_count += 1
-            
+
             return True
-    
+
     def _validate_api_credentials(self) -> bool:
         """Validate API credentials are present"""
         if not self.api_key or not self.api_secret:
@@ -186,12 +186,12 @@ class BybitClient:
                 context=create_error_context(module=__name__, function='_validate_api_credentials')
             )
         return True
-    
+
     def _handle_api_error(self, response_data: Dict, endpoint: str) -> None:
         """Handle API error responses"""
         ret_code = response_data.get("retCode", -1)
         ret_msg = response_data.get("retMsg", "Unknown error")
-        
+
         # Map specific error codes to exceptions
         if ret_code == 10001:
             raise APIDataException(
@@ -234,50 +234,50 @@ class BybitClient:
                     extra_data={'endpoint': endpoint, 'ret_code': ret_code}
                 )
             )
-    
+
     def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict:
         """Make authenticated API request with comprehensive error handling"""
         # Validate credentials
         self._validate_api_credentials()
-        
+
         # Check rate limits
         self._check_rate_limit()
-        
+
         url = f"{self.base_url}{endpoint}"
         params = params or {}
         start_time = time.time()
-        
+
         # Track request
         self.total_requests += 1
-        
+
         for attempt in range(self.recovery_strategy.max_retries + 1):
             try:
                 with self._connection_lock:
                     if not self.session:
                         raise APIConnectionException("HTTP session not initialized", endpoint=endpoint)
-                    
+
                     if method.upper() == "GET":
                         query_string = "&".join([f"{k}={v}" for k, v in params.items()])
                         headers = self._get_headers(query_string)
                         response = self.session.get(
-                            url, 
-                            params=params, 
-                            headers=headers, 
+                            url,
+                            params=params,
+                            headers=headers,
                             timeout=(self.connect_timeout, self.request_timeout)
                         )
                     else:
                         params_str = json.dumps(params) if params else ""
                         headers = self._get_headers(params_str)
                         response = self.session.post(
-                            url, 
-                            json=params, 
-                            headers=headers, 
+                            url,
+                            json=params,
+                            headers=headers,
                             timeout=(self.connect_timeout, self.request_timeout)
                         )
-                
+
                 # Calculate response time
                 response_time = (time.time() - start_time) * 1000
-                
+
                 # Check HTTP status
                 if response.status_code == 429:
                     retry_after = int(response.headers.get('Retry-After', 60))
@@ -290,9 +290,9 @@ class BybitClient:
                             extra_data={'endpoint': endpoint, 'attempt': attempt}
                         )
                     )
-                
+
                 response.raise_for_status()
-                
+
                 # Parse JSON response
                 try:
                     data = response.json()
@@ -306,16 +306,16 @@ class BybitClient:
                             extra_data={'endpoint': endpoint, 'status_code': response.status_code}
                         )
                     )
-                
+
                 # Check API response code
                 if data.get("retCode") != 0:
                     self._handle_api_error(data, endpoint)
-                
+
                 # Success - update statistics
                 self.successful_requests += 1
                 self.last_successful_request = datetime.now()
                 self.consecutive_errors = 0
-                
+
                 # Log successful request
                 logger.info(
                     f"API request successful: {method} {endpoint}",
@@ -327,13 +327,13 @@ class BybitClient:
                         'attempt': attempt + 1
                     }
                 )
-                
+
                 return data.get("result", {})
-                
+
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 self.failed_requests += 1
                 self.consecutive_errors += 1
-                
+
                 if not self.recovery_strategy.should_retry(e, attempt):
                     raise APITimeoutException(
                         f"Request timeout for {endpoint} after {attempt + 1} attempts: {str(e)}",
@@ -345,7 +345,7 @@ class BybitClient:
                         ),
                         original_exception=e
                     )
-                
+
                 # Wait before retry
                 if attempt < self.recovery_strategy.max_retries:
                     retry_delay = self.recovery_strategy.get_delay(attempt)
@@ -354,13 +354,13 @@ class BybitClient:
                         extra={'endpoint': endpoint, 'attempt': attempt + 1, 'retry_delay': retry_delay}
                     )
                     time.sleep(retry_delay)
-                
+
             except requests.exceptions.HTTPError as e:
                 self.failed_requests += 1
                 self.consecutive_errors += 1
-                
+
                 status_code = e.response.status_code if e.response else None
-                
+
                 if status_code == 401:
                     raise APIAuthenticationException(
                         f"Authentication failed for {endpoint}: {str(e)}",
@@ -393,16 +393,16 @@ class BybitClient:
                         ),
                         original_exception=e
                     )
-            
+
             except Exception as e:
                 self.failed_requests += 1
                 self.consecutive_errors += 1
-                
+
                 logger.error(
                     f"Unexpected error in API request to {endpoint}: {str(e)}",
                     extra={'endpoint': endpoint, 'attempt': attempt + 1}
                 )
-                
+
                 raise APIException(
                     f"Unexpected error for {endpoint}: {str(e)}",
                     context=create_error_context(
@@ -412,7 +412,7 @@ class BybitClient:
                     ),
                     original_exception=e
                 )
-        
+
         # Should not reach here, but just in case
         raise APIException(
             f"Maximum retry attempts exceeded for {endpoint}",
@@ -422,7 +422,7 @@ class BybitClient:
                 extra_data={'endpoint': endpoint, 'max_retries': self.recovery_strategy.max_retries}
             )
         )
-    
+
     async def _make_request_async(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict:
         """Async wrapper around _make_request using asyncio.to_thread"""
         return await asyncio.to_thread(self._make_request, method, endpoint, params)
@@ -437,7 +437,7 @@ class BybitClient:
                 logger.warning(f"Connection verification failed: {e}")
                 self._connected = False
         return self._connected and bool(self.api_key and self.api_secret)
-    
+
     def _test_connection(self) -> bool:
         """Test API connection with comprehensive error handling"""
         try:
@@ -449,7 +449,7 @@ class BybitClient:
             # Use a simple endpoint for connection testing
             result = self._make_request("GET", "/v5/market/time", {})
             self._connected = True
-            
+
             logger.info(
                 "API connection test successful",
                 extra={
@@ -459,7 +459,7 @@ class BybitClient:
                 }
             )
             return True
-            
+
         except APIAuthenticationException as e:
             self._connected = False
             logger.error(
@@ -471,7 +471,7 @@ class BybitClient:
                 }
             )
             return False
-            
+
         except APIRateLimitException as e:
             self._connected = False
             logger.warning(
@@ -479,7 +479,7 @@ class BybitClient:
                 extra={'error_type': 'rate_limit', 'retry_after': e.retry_after}
             )
             return False
-            
+
         except APIException as e:
             self._connected = False
             logger.error(
@@ -487,7 +487,7 @@ class BybitClient:
                 extra={'error_type': 'api_error', 'error_code': e.error_code}
             )
             return False
-            
+
         except Exception as e:
             self._connected = False
             logger.error(
@@ -495,7 +495,7 @@ class BybitClient:
                 extra={'error_type': 'unexpected'}
             )
             return False
-    
+
     def get_connection_health(self) -> Dict[str, Any]:
         """Get comprehensive connection health information"""
         health_info = {
@@ -527,7 +527,7 @@ class BybitClient:
             health_info['status'] = 'degraded'
         else:
             health_info['status'] = 'healthy'
-            
+
         return health_info
 
     from typing import TYPE_CHECKING, Dict
@@ -586,7 +586,7 @@ class BybitClient:
                 "category": "linear",
                 "symbol": symbol
             })
-            
+
             if result and "list" in result and result["list"]:
                 price = float(result["list"][0].get("lastPrice", 0))
                 self._price_cache[symbol] = (time.time(), price)
@@ -609,7 +609,7 @@ class BybitClient:
                 "interval": interval,
                 "limit": str(limit)
             })
-            
+
             if result and "list" in result:
                 klines = []
                 for k in result["list"]:
@@ -633,81 +633,113 @@ class BybitClient:
         side: str,
         qty: float,
         leverage: Optional[int] = 15,
-        mode: str = "CROSS"  # Default to CROSS for unified accounts
+        mode: str = "CROSS",
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None
     ) -> Dict:
         """
-        Place a market trading order with leverage, cross margin mode for unified accounts,
-        automatically calculates TP (25% from entry) and SL (5% from entry).
+        Place a market trading order with leverage and optional TP/SL.
+        If TP/SL not provided, calculates them automatically.
         """
         try:
             leverage = leverage or 15
 
-            # Determine margin mode for unified/non-unified accounts
-            if self.account_type == "UNIFIED":
-                mode = "CROSS"
-                logger.info(f"Unified account detected, using CROSS margin mode for {symbol}")
-                loop = asyncio.get_running_loop()
-            else:
-                trade_mode = 1 if mode.upper() == "ISOLATED" else 0
-                lev_params = {
-                    "category": "linear",
-                    "symbol": symbol,
-                    "tradeMode": trade_mode,
-                    "buyLeverage": str(leverage),
-                    "sellLeverage": str(leverage)
-                }
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._make_request, "POST", "/v5/position/switch-isolated", lev_params)
-
-            # Get current price to calculate SL/TP
+            # Get current price
             entry_price = self.get_current_price(symbol)
+            if entry_price <= 0:
+                logger.error(f"Invalid entry price for {symbol}: {entry_price}")
+                return {"error": "Invalid entry price"}
 
-            # Calculate stop loss and take profit
+            # Calculate stop loss and take profit if not provided
             side_lower = side.lower()
-            if side_lower == "buy":
-                stop_loss = entry_price * 0.90  # 10% below entry (unchanged)
-                take_profit = entry_price * 1.30  # 30% above entry
-            else:
-                stop_loss = entry_price * 1.10  # 10% above entry (unchanged)
-                take_profit = entry_price * 0.70  # 30% below entry
+            if not stop_loss:
+                stop_loss = entry_price * 0.90 if side_lower == "buy" else entry_price * 1.10
+            if not take_profit:
+                take_profit = entry_price * 1.30 if side_lower == "buy" else entry_price * 0.70
 
-            # Build order params
+            # Round prices to 2 decimal places
+            stop_loss = round(stop_loss, 2)
+            take_profit = round(take_profit, 2)
+
+            # Build order params - Market order first
             params = {
                 "category": "linear",
                 "symbol": symbol,
                 "side": side.title(),
                 "orderType": "Market",
                 "qty": str(qty),
-                "timeInForce": "IOC",  # Immediate or Cancel for market orders
-                "stopLoss": str(stop_loss),
-                "takeProfit": str(take_profit)
+                "timeInForce": "GTC"  # Good Till Cancel
             }
 
-            # Place order
+            # Get event loop
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            # Place market order
+            logger.info(f"Placing market order: {symbol} {side} qty={qty}")
             result = await loop.run_in_executor(None, self._make_request, "POST", "/v5/order/create", params)
 
-            if result:
-                return {
-                    "order_id": result.get("orderId"),
+            if not result or not result.get("orderId"):
+                logger.error(f"Failed to place market order for {symbol}: {result}")
+                return {"error": "Failed to place market order"}
+
+            order_id = result.get("orderId")
+            logger.info(f"Market order placed: {order_id}")
+
+            # Wait for order to fill
+            await asyncio.sleep(1)
+
+            # Set TP/SL via position trading stop
+            try:
+                tp_sl_params = {
+                    "category": "linear",
                     "symbol": symbol,
-                    "accountType": self.account_type,
-                    "side": side,
-                    "qty": qty,
-                    "price": entry_price,
-                    "status": "pending",
-                    "timestamp": datetime.now(),
-                    "virtual": False,
-                    "leverage": leverage,
-                    "stopLoss": str(stop_loss),
                     "takeProfit": str(take_profit),
-                    "margin_mode": mode.upper()
+                    "stopLoss": str(stop_loss),
+                    "tpTriggerBy": "MarkPrice",
+                    "slTriggerBy": "MarkPrice",
+                    "positionIdx": 0  # One-way mode
                 }
-            return {}
+
+                tp_sl_result = await loop.run_in_executor(
+                    None,
+                    self._make_request,
+                    "POST",
+                    "/v5/position/trading-stop",
+                    tp_sl_params
+                )
+
+                if tp_sl_result:
+                    logger.info(f"TP/SL set for {symbol}: TP={take_profit}, SL={stop_loss}")
+                else:
+                    logger.warning(f"Failed to set TP/SL for {symbol}")
+
+            except Exception as e:
+                logger.warning(f"Error setting TP/SL for {symbol}: {e}")
+
+            return {
+                "order_id": order_id,
+                "symbol": symbol,
+                "accountType": self.account_type,
+                "side": side,
+                "qty": qty,
+                "price": entry_price,
+                "status": "filled",
+                "timestamp": datetime.now(),
+                "virtual": False,
+                "leverage": leverage,
+                "stopLoss": stop_loss,
+                "takeProfit": take_profit,
+                "margin_mode": mode.upper()
+            }
 
         except APIException as e:
             if e.error_code == "100028":
                 logger.warning(f"Unified account error for {symbol}: {e}. Using cross margin mode.")
-                return await self.place_order(symbol, side, qty, leverage, mode="CROSS")
+                return await self.place_order(symbol, side, qty, leverage, mode="CROSS", stop_loss=stop_loss, take_profit=take_profit)
             logger.error(f"Error placing order for {symbol}: {e}")
             return {"error": str(e)}
         except Exception as e:
@@ -733,9 +765,9 @@ class BybitClient:
             params = {"category": "linear"}
             if symbol:
                 params["symbol"] = symbol
-                
+
             result = self._make_request("GET", "/v5/order/realtime", params)
-            
+
             if result and "list" in result:
                 orders = []
                 for order in result["list"]:
@@ -795,14 +827,14 @@ class BybitClient:
                 try:
                     async with websockets.connect(uri) as websocket:
                         self.ws_connection = websocket
-                        
+
                         # Subscribe to tickers
                         subscribe_msg = {
                             "op": "subscribe",
                             "args": [f"tickers.{symbol}" for symbol in symbols]
                         }
                         await websocket.send(json.dumps(subscribe_msg))
-                        
+
                         async for message in websocket:
                             data = json.loads(message)
                             if data.get("topic", "").startswith("tickers."):
@@ -811,7 +843,7 @@ class BybitClient:
                                 price = float(ticker_data.get("lastPrice", 0))
                                 if symbol and price > 0:
                                     self._price_cache[symbol] = (time.time(), price)
-                                    
+
                 except Exception as e:
                     logger.error(f"WebSocket error: {e}")
                     self.ws_connection = None
@@ -820,7 +852,7 @@ class BybitClient:
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(websocket_handler(), self.loop)
                 logger.info("WebSocket connection started")
-            
+
         except Exception as e:
             logger.error(f"Failed to start WebSocket: {e}")
 

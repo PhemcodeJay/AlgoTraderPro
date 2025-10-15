@@ -12,11 +12,57 @@ logger = get_logger(__name__)
 
 # Configure Streamlit page
 st.set_page_config(
-    page_title="AlgoTrader Pro",
+    page_title="AlgoTradePro v1.5",
     page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Custom CSS for theme support
+def inject_custom_css(theme="dark"):
+    if theme == "light":
+        st.markdown("""
+        <style>
+        .stApp {
+            background-color: #ffffff;
+            color: #000000;
+        }
+        .stSidebar {
+            background-color: #f0f2f6;
+        }
+        .stMetric {
+            background-color: #f0f2f6;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        h1, h2, h3, h4, h5, h6 {
+            color: #262730 !important;
+        }
+        .stMarkdown {
+            color: #262730;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <style>
+        .stApp {
+            background-color: #0e1117;
+            color: #ffffff;
+        }
+        .stSidebar {
+            background-color: #262730;
+        }
+        .stMetric {
+            background-color: #262730;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        h1, h2, h3, h4, h5, h6 {
+            color: #9eec0dff !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
 # --- Session State Initialization ---
 if "trading_mode" not in st.session_state:
@@ -31,6 +77,8 @@ if "engine" not in st.session_state:
     st.session_state.engine = None
 if "has_real_trades" not in st.session_state:
     st.session_state.has_real_trades = None  # Cache for db_has_any_trade
+if "theme" not in st.session_state:
+    st.session_state.theme = "dark"
 
 # --- Initialize trading engine ---
 def initialize_engine():
@@ -180,6 +228,9 @@ def get_wallet_balance() -> dict:
     return balance_data
 
 def main():
+    # Apply theme
+    inject_custom_css(st.session_state.theme)
+    
     # Initialize engine
     if not initialize_engine():
         st.stop()
@@ -194,8 +245,99 @@ def main():
             logger.error(f"Failed to load trading mode from DB: {e}", exc_info=True)
             st.session_state.trading_mode = "virtual"
 
+    # --- Application Overview ---
+    with st.expander("📖 How AlgoTrader Pro Works", expanded=False):
+        st.markdown("""
+        ## 🚀 AlgoTrader Pro - Cryptocurrency Algorithmic Trading Platform
+        
+        **AlgoTrader Pro** is a comprehensive trading system that automates cryptocurrency trading on Bybit exchange using technical analysis and machine learning.
+        
+        ### 🎯 Core Features
+        
+        #### 1. **Dual Trading Modes**
+        - **Virtual Mode (Paper Trading)**: Practice trading with simulated capital without risking real money
+        - **Real Mode (Live Trading)**: Execute actual trades on Bybit with real funds
+        - Switch between modes anytime using the sidebar dropdown
+        
+        #### 2. **Signal Generation**
+        - Scans multiple cryptocurrency pairs (BTC, ETH, SOL, DOGE, etc.)
+        - Analyzes technical indicators: RSI, MACD, Bollinger Bands, SMA, EMA, Volume
+        - Uses XGBoost machine learning to score and filter high-quality signals
+        - Automatically identifies long/short opportunities with entry, TP, and SL levels
+        
+        #### 3. **Automated Trading**
+        - Execute trades automatically based on generated signals
+        - Configure countdown timers for periodic signal scanning
+        - Risk management with position sizing, leverage control, and drawdown limits
+        - Real-time monitoring of open positions and automatic TP/SL management
+        
+        #### 4. **Portfolio Management**
+        - Track virtual and real capital separately
+        - Monitor available balance, used margin, and PnL
+        - Real-time synchronization with Bybit account balances
+        - Comprehensive trade history and performance analytics
+        
+        ### 📊 Page Navigation
+        
+        - **Dashboard**: Overview of portfolio, recent signals, trades, and market data
+        - **Signals**: Generate new trading signals and execute manual trades
+        - **Trades**: Manage open positions, view history, and enable automation
+        - **Performance**: Detailed analytics, charts, and performance metrics
+        - **Settings**: Configure trading parameters, API keys, and notifications
+        
+        ### 🔐 Getting Started
+        
+        1. **Set up API Keys** (Settings → API Configuration):
+           - Add your Bybit API key and secret
+           - Test connection before enabling real trading
+        
+        2. **Configure Trading Parameters** (Settings → Trading):
+           - Set leverage, risk percentage, and position limits
+           - Adjust TP/SL percentages
+        
+        3. **Generate Signals** (Signals Page):
+           - Click "Generate New Signals" to scan markets
+           - Review signal scores and entry/exit levels
+           - Execute trades manually or enable automation
+        
+        4. **Monitor Performance** (Dashboard & Performance):
+           - Track win rate, total PnL, and open positions
+           - Analyze trade history and equity curves
+        
+        ### ⚠️ Important Notes
+        
+        - **Start with Virtual Mode**: Test strategies risk-free before trading real funds
+        - **API Permissions**: Ensure Bybit API has trading permissions enabled
+        - **Risk Management**: Never risk more than you can afford to lose
+        - **Real Mode**: Only switch to real mode when confident with the system
+        
+        ### 💡 Tips for Success
+        
+        - Use the automation countdown to scan markets periodically
+        - Monitor signal scores - higher scores indicate stronger opportunities
+        - Set appropriate stop-losses to protect capital
+        - Review performance metrics regularly to refine strategy
+        - Keep API credentials secure and never share them
+        """)
+    
+    st.divider()
+
     # --- Sidebar ---
     with st.sidebar:
+        # Theme toggle at the top
+        st.markdown("### 🎨 Appearance")
+        theme_option = st.selectbox(
+            "Theme",
+            ["Dark", "Light"],
+            index=0 if st.session_state.theme == "dark" else 1,
+            help="Switch between dark and light themes"
+        )
+        
+        if (theme_option.lower() != st.session_state.theme):
+            st.session_state.theme = theme_option.lower()
+            st.rerun()
+        
+        st.divider()
         st.markdown("### 🎛️ Trading Controls")
 
         # --- Mode selector ---
@@ -316,6 +458,10 @@ def main():
             logger.info("Emergency stop triggered, cache cleared")
             st.rerun()
 
+    # --- Ensure mode is always in session state for all pages ---
+    if "trading_mode" not in st.session_state:
+        st.session_state.trading_mode = "virtual"
+    
     # --- Main dashboard ---
     try:
         from pages.dashboard import main as dashboard_main
@@ -327,7 +473,7 @@ def main():
     # Footer
     st.markdown("---")
     st.markdown(
-        f"<div style='text-align:center;color:#888;'>AlgoTrader Pro v1.0 | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>",
+        f"<div style='text-align:center;color:#888;'>AlgoTraderPro v1.5 | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>",
         unsafe_allow_html=True
     )
 

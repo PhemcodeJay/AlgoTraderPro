@@ -133,6 +133,19 @@ class AutomatedTrader:
             logger.info("Trading statistics reset")
         except Exception as e:
             logger.error(f"Error resetting stats: {e}", exc_info=True)
+    
+    def reload_settings(self):
+        """Reload settings from file"""
+        try:
+            settings = load_settings()
+            self.scan_interval = settings.get("SCAN_INTERVAL", 300)
+            self.top_n_signals = settings.get("TOP_N_SIGNALS", 5)
+            self.max_positions = self.engine.max_open_positions
+            self.risk_per_trade = self.engine.max_risk_per_trade
+            self.leverage = self.engine.settings.get("LEVERAGE", 15)
+            logger.info("Automated trader settings reloaded")
+        except Exception as e:
+            logger.error(f"Error reloading settings: {e}", exc_info=True)
 
     async def _trading_loop(self, status_container=None):
         """Main automated trading loop"""
@@ -208,6 +221,12 @@ class AutomatedTrader:
                 # Convert signal to dict if needed
                 signal_dict = signal if isinstance(signal, dict) else signal.to_dict()
                 
+                # Ensure all required fields for real trades
+                if trading_mode == "real":
+                    signal_dict["qty"] = signal_dict.get("qty", position_size)
+                    signal_dict["leverage"] = signal_dict.get("leverage", self.leverage)
+                    signal_dict["margin_mode"] = signal_dict.get("margin_mode", "CROSS")
+                
                 valid_signals.append(signal_dict)
                 current_positions += 1  # Optimistic increment for batch limiting
             
@@ -218,27 +237,43 @@ class AutomatedTrader:
                         success = self.engine.execute_virtual_trade(sig)
                         if success:
                             executed += 1
-                            logger.info(f"Trade executed for {sig['symbol']} in {trading_mode} mode")
+                            logger.info(f"Virtual trade executed for {sig['symbol']}")
                     self.stats["trades_executed"] += executed
+                    logger.info(f"Executed {executed}/{len(valid_signals)} virtual trades")
                 else:
+                    # Execute real trades in batch
                     try:
-                        executed = await self.engine.execute_real_trade(valid_signals)
+                        logger.info(f"Attempting to execute {len(valid_signals)} real trades in batch")
+                        executed = await self.engine.execute_real_trade(valid_signals, trading_mode="real")
                         self.stats["trades_executed"] += executed
+                        
                         if executed > 0:
+                            # Sync trades and balance after execution
                             await asyncio.sleep(2)
-                            self.engine.get_open_real_trades()
-                            logger.info(f"Synced real trades to DB after executing batch of {executed} trades")
+                            self.engine.sync_real_trades()
+                            self.engine.sync_real_balance()
+                            logger.info(f"Successfully executed {executed}/{len(valid_signals)} real trades and synced to DB")
+                        else:
+                            logger.warning(f"Failed to execute any real trades from batch of {len(valid_signals)}")
+                            
                     except APIException as e:
                         if e.error_code == "100028":
                             logger.warning(f"Unified account error for batch: {e}. Retrying with cross margin mode.")
+                            # Retry with CROSS margin mode
                             for sig in valid_signals:
                                 sig["margin_mode"] = "CROSS"
-                            executed = await self.engine.execute_real_trade(valid_signals)
+                            executed = await self.engine.execute_real_trade(valid_signals, trading_mode="real")
                             self.stats["trades_executed"] += executed
+                            
                             if executed > 0:
                                 await asyncio.sleep(2)
-                                self.engine.get_open_real_trades()
-                                logger.info(f"Synced real trades to DB after retrying batch")
+                                self.engine.sync_real_trades()
+                                self.engine.sync_real_balance()
+                                logger.info(f"Successfully executed {executed}/{len(valid_signals)} real trades on retry")
+                        else:
+                            logger.error(f"API error executing real trades: {e}")
+                    except Exception as e:
+                        logger.error(f"Unexpected error executing real trades: {e}", exc_info=True)
             
         except Exception as e:
             logger.error(f"Error in scan and trade: {e}", exc_info=True)
