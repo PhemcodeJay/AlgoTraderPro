@@ -239,7 +239,7 @@ async def display_trade_management():
         else:
             st.info("No open real trades")
 
-def display_manual_trading():
+async def display_manual_trading():
     """Display manual trading interface"""
     st.subheader("📝 Manual Trade Entry")
     
@@ -399,7 +399,7 @@ def display_manual_trading():
             )
             session.commit()
 
-def display_automation_tab():
+async def display_automation_tab():
     """Display automation controls"""
     st.subheader("🤖 Automated Trading")
     
@@ -407,7 +407,7 @@ def display_automation_tab():
     
     # Get current status
     try:
-        status = asyncio.run(automated_trader.get_status())
+        status = await automated_trader.get_status()
         is_running = status.get("is_running", False)
     except Exception as e:
         logger.error(f"Error getting automation status: {e}")
@@ -457,7 +457,7 @@ def display_automation_tab():
                     automated_trader.risk_per_trade = new_risk_per_trade / 100
                     automated_trader.scan_interval = new_scan_interval * 60
                     
-                    success = asyncio.run(automated_trader.start())
+                    success = await automated_trader.start()
                     if success:
                         st.success("✅ Automation started!")
                         st.rerun()
@@ -470,7 +470,7 @@ def display_automation_tab():
         if st.button("⏹️ Stop Automation", disabled=not is_running):
             with st.spinner("Stopping automation..."):
                 try:
-                    success = asyncio.run(automated_trader.stop())
+                    success = await automated_trader.stop()
                     if success:
                         st.success("✅ Automation stopped!")
                         st.rerun()
@@ -482,7 +482,7 @@ def display_automation_tab():
     with control_col3:
         if st.button("🔄 Reset Stats"):
             try:
-                asyncio.run(automated_trader.reset_stats())
+                await automated_trader.reset_stats()
                 st.success("✅ Statistics reset!")
                 st.rerun()
             except Exception as e:
@@ -493,7 +493,7 @@ def display_automation_tab():
         st.markdown("### ⏱️ Scan Countdown")
         placeholder = st.empty()
         try:
-            status = asyncio.run(automated_trader.get_status())
+            status = await automated_trader.get_status()
             last_scan_str = status['stats'].get('last_scan')
             if last_scan_str:
                 last_scan = datetime.strptime(last_scan_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
@@ -562,7 +562,7 @@ def display_automation_tab():
             else:
                 st.info("No recent activity")
 
-def main():
+async def main():
     st.markdown("""
     <div style="text-align: center; padding: 1rem 0; border-bottom: 2px solid #00ff88; margin-bottom: 2rem;">
         <h1 style="color: #00ff88; margin: 0;">💼 Trading Center</h1>
@@ -649,7 +649,7 @@ def main():
     
     with tab1:
         # Run async function in Streamlit
-        asyncio.run(display_trade_management())
+        await display_trade_management()
     
     with tab2:
         st.subheader("📜 Trading History")
@@ -695,10 +695,10 @@ def main():
             st.info("No trading history available. Start trading to see your history here!")
     
     with tab3:
-        display_manual_trading()
+        await display_manual_trading()
     
     with tab4:
-        display_automation_tab()
+        await display_automation_tab()
     
     with tab5:
         st.subheader("📊 Trading Statistics")
@@ -768,4 +768,4 @@ def main():
             st.info("No trading statistics available. Complete some trades to see detailed analytics!")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

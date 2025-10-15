@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 import asyncio
 from ml import MLFilter
+from sqlalchemy import update
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
