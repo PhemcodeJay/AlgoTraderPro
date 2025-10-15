@@ -15,7 +15,8 @@ logger = get_logger(__name__)
 
 tz_utc3 = timezone(timedelta(hours=3))
 
-def calculate_sl_tp(signal_dict: Dict[str, Any], sl_percent: float = 0.1, tp_percent: float = 0.5) -> Dict[str, Any]:
+def calculate_sl_tp(signal_dict: Dict[str, Any], sl_percent: float = 0.1, tp_percent: float = 0.3) -> Dict[str, Any]:
+    # ... (rest of function remains the same, as it uses the parameters)
     """
     Calculate stop-loss (SL) and take-profit (TP) for a trading signal if missing.
     SL is set to 10% below/above entry price for buy/sell orders.
@@ -94,8 +95,8 @@ def normalize_signal(signal: Any) -> Dict:
             logger.warning(f"Invalid side in signal: {signal_dict['side']}. Defaulting to 'Buy'.")
             signal_dict["side"] = "Buy"
 
-        # Calculate SL (10%) and TP (50%) if missing
-        signal_dict = calculate_sl_tp(signal_dict, sl_percent=0.1, tp_percent=0.5)
+        # Calculate SL (10%) and TP (30%) if missing
+        signal_dict = calculate_sl_tp(signal_dict, sl_percent=0.1, tp_percent=0.3)
 
         logger.debug(f"Normalized signal: {signal_dict}")
         return signal_dict

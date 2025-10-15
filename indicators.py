@@ -363,9 +363,9 @@ def analyze_symbol(symbol: str, interval: str = "60") -> Dict[str, Any]:
             signal_type = "sell"
             side = "Sell"
         
-        # Calculate SL and TP (10% and 50%)
-        sl = price * (1 - 0.1 if side == "Buy" else 1 + 0.1)
-        tp = price * (1 + 0.5 if side == "Buy" else 1 - 0.5)
+        # Calculate SL and TP (10% and 30%)
+        sl = price * (1 - 0.1 if side == "Buy" else 1 + 0.1)  # 10% SL (unchanged)
+        tp = price * (1 + 0.3 if side == "Buy" else 1 - 0.3)  # 30% TP
         
         return {
             "symbol": symbol,

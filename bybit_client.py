@@ -665,13 +665,11 @@ class BybitClient:
             # Calculate stop loss and take profit
             side_lower = side.lower()
             if side_lower == "buy":
-                stop_loss = entry_price * 0.90  # 10% below entry
-                take_profit = entry_price * 1.50  # 50% above entry
-            elif side_lower == "sell":
-                stop_loss = entry_price * 1.10  # 10% above entry
-                take_profit = entry_price * 0.50  # 50% below entry
+                stop_loss = entry_price * 0.90  # 10% below entry (unchanged)
+                take_profit = entry_price * 1.30  # 30% above entry
             else:
-                raise ValueError("side must be 'buy' or 'sell'")
+                stop_loss = entry_price * 1.10  # 10% above entry (unchanged)
+                take_profit = entry_price * 0.70  # 30% below entry
 
             # Build order params
             params = {

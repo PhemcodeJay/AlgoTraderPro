@@ -9,7 +9,7 @@ from db import WalletBalance as DBWalletBalance
 from settings import load_settings
 from logging_config import get_trading_logger
 from exceptions import (
-    TradingException, create_error_context
+    APIException, TradingException, create_error_context
 )
 
 logger = get_trading_logger('engine')
@@ -600,19 +600,23 @@ class TradingEngine:
             logger.error(f"Error executing virtual trade: {e}", exc_info=True)
             return False
             
-    async def execute_real_trade(self, signals: List[Dict], trading_mode: str = "real") -> bool:
+    # Modified engine.py (execute_real_trade function)
+
+    async def execute_real_trade(self, signals: List[Dict], trading_mode: str = "real") -> int:
         """Execute multiple real trades on Bybit based on a list of signals, with 10% SL and 50% TP."""
         try:
             if not self.is_trading_enabled():
                 logger.error("Trading is disabled or emergency stop is active")
-                return False
+                return 0
 
             if not signals or not isinstance(signals, list):
                 logger.error("Signals must be a non-empty list of dictionaries")
-                return False
+                return 0
 
             success_count = 0
             total_trades = len(signals)
+            
+            open_trades = self.get_open_real_trades()
             
             for signal in signals:
                 symbol = signal.get("symbol")
@@ -621,14 +625,14 @@ class TradingEngine:
                     continue
 
                 side = signal.get("side", "Buy").upper()  # Normalize to uppercase
-                entry_price = signal.get("entry") or self.client.get_current_price(symbol)  # Fixed: Removed await
+                entry_price = signal.get("entry") or self.client.get_current_price(symbol)
                 if entry_price <= 0:
                     logger.error(f"Invalid entry price for {symbol}")
                     continue
 
                 # Percentage-based SL and TP
-                sl_percent = 0.1  # 10% stop loss
-                tp_percent = 0.5  # 50% take profit
+                sl_percent = 0.1  # 10% stop loss (unchanged)
+                tp_percent = 0.3  # 30% take profit
 
                 if side == "BUY":
                     stop_loss = round(entry_price * (1 - sl_percent), 4)
@@ -644,7 +648,6 @@ class TradingEngine:
                     continue
 
                 # Check position limits
-                open_trades = self.get_open_real_trades()
                 if len(open_trades) >= self.max_open_positions:
                     logger.warning(f"Max open positions ({self.max_open_positions}) reached. Skipping trade for {symbol}")
                     continue
@@ -663,7 +666,7 @@ class TradingEngine:
                     side=side,
                     qty=position_size,
                     leverage=signal.get("leverage", 15),
-                    mode="CROSS"  # Use CROSS for unified accounts
+                    mode=signal.get("margin_mode", "CROSS")  # Use provided mode or default to CROSS
                 )
 
                 if "error" in order_response or not order_response.get("order_id"):
@@ -693,7 +696,7 @@ class TradingEngine:
                 }
 
                 # Save trade to database
-                success = self.db.add_trade(trade_data)  # Fixed: Removed await
+                success = self.db.add_trade(trade_data)
                 if success:
                     logger.info(
                         f"Real trade executed: {symbol} {side} @ {entry_price:.2f}, "
@@ -703,6 +706,7 @@ class TradingEngine:
                         f"Margin: {trade_data['margin_usdt']} USDT"
                     )
                     success_count += 1
+                    open_trades.append(Trade(**trade_data))  # Update local open_trades for next checks
                     self._consecutive_failures = 0
                     self.trade_count += 1
                     self.successful_trades += 1
@@ -716,13 +720,20 @@ class TradingEngine:
 
             # Log overall result
             logger.info(f"Executed {success_count}/{total_trades} real trades successfully")
-            return success_count > 0
+            return success_count
 
+        except APIException as e:
+            if e.error_code == "100028":
+                raise  # Propagate for batch retry in caller
+            logger.error(f"APIException executing real trades: {e}", exc_info=True)
+            self._consecutive_failures += 1
+            self.failed_trades += 1
+            return 0
         except Exception as e:
             logger.error(f"Error executing real trades: {e}", exc_info=True)
             self._consecutive_failures += 1
             self.failed_trades += 1
-            return False
+            return 0
 
     def close(self):
         """Clean up resources"""
