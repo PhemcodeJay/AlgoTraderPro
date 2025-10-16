@@ -451,7 +451,7 @@ class BybitClient:
             self._connected = True
 
             logger.info(
-                "API connection test successful",
+                f"API connection test successful",
                 extra={
                     'endpoint': '/v5/market/time',
                     'environment': 'mainnet',
@@ -792,6 +792,8 @@ class BybitClient:
             params = {"category": "linear"}
             if symbol:
                 params["symbol"] = symbol
+            else:
+                params["settleCoin"] = "USDT"  # Default to USDT for linear contracts
 
             result = await self._make_request_async("GET", "/v5/position/list", params)
 
@@ -861,6 +863,8 @@ class BybitClient:
         try:
             if self.ws_connection and self.loop:
                 asyncio.run_coroutine_threadsafe(self.ws_connection.close(), self.loop)
+            if self.session:
+                self.session.close()
             if self.loop:
                 self.loop.call_soon_threadsafe(self.loop.stop)
             logger.info("Bybit client closed")
