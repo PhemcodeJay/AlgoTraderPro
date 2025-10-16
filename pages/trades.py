@@ -155,7 +155,7 @@ async def close_trade_safely(trade_id: str, virtual: bool = True) -> bool:
         logger.error(f"Error closing trade {trade_id}: {e}", exc_info=True)
         return False
 
-async def display_trade_management():
+def display_trade_management():
     """Display trade management interface for virtual and real trades."""
     engine = get_engine()
 
@@ -191,15 +191,21 @@ async def display_trade_management():
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
 
                     if st.button("❌ Close", key=f"close_virtual_{trade.id}"):
-                        if await close_trade_safely(str(trade.id), virtual=True):
-                            st.rerun()
+                        asyncio.run(close_trade_safely(str(trade.id), virtual=True))
+                        st.rerun()
         else:
             st.info("No open virtual trades")
 
     with col2:
         st.subheader("💰 Real Trades")
-        # Sync real trades first
-        engine.sync_real_trades()
+        # Sync real trades with Bybit and show feedback
+        with st.spinner("Syncing real trades with Bybit..."):
+            success = engine.sync_real_trades()
+            if success:
+                st.success("✅ Successfully synced real trades from Bybit")
+            else:
+                st.error("❌ Failed to sync real trades from Bybit")
+
         real_trades = engine.get_open_real_trades()
 
         if real_trades:
@@ -207,7 +213,7 @@ async def display_trade_management():
                 with st.expander(f"{trade.symbol} {trade.side} - ${trade.entry_price:.4f}"):
                     # Fetch real-time position data from Bybit
                     try:
-                        positions = await engine.client.get_positions(symbol=trade.symbol)
+                        positions = asyncio.run(engine.client.get_positions(symbol=trade.symbol))
                         position = next((p for p in positions if p["side"].upper() == trade.side.upper()), None)
                         current_price = float(position.get("mark_price", engine.client.get_current_price(trade.symbol))) if position else engine.client.get_current_price(trade.symbol)
                         current_pnl = float(position.get("unrealized_pnl", 0.0)) if position else 0.0
@@ -236,10 +242,10 @@ async def display_trade_management():
                         st.write(f"**Margin:** ${trade.margin_usdt:.2f}" if trade.margin_usdt else "N/A")
 
                     if st.button("❌ Close", key=f"close_real_{trade.id}"):
-                        if await close_trade_safely(str(trade.id), virtual=False):
-                            st.rerun()
+                        asyncio.run(close_trade_safely(str(trade.id), virtual=False))
+                        st.rerun()
         else:
-            st.info("No open real trades")
+            st.info("No open real trades on Bybit")
 
 def display_manual_trading():
     """Display manual trading interface"""
@@ -336,47 +342,16 @@ def display_manual_trading():
                     session.commit()
                     return
             else:
-                # Execute real trade on Bybit using asyncio
-                async def execute_real():
-                    try:
-                        success = await engine.execute_real_trade([trade_data])
-                        if success:
-                            # Sync trades after execution
-                            await asyncio.sleep(2)
-                            engine.sync_real_trades()
-                            logger.info(f"Synced real trades to DB after executing manual trade for {symbol}")
-                            return True
-                        else:
-                            st.error("❌ Failed to execute real trade on Bybit")
-                            return False
-                    except APIException as e:
-                        if e.error_code == "100028":
-                            logger.warning(f"Unified account error for manual trade {symbol}: {e}. Retrying with cross margin mode.")
-                            trade_data["margin_mode"] = "CROSS"
-                            success = await engine.execute_real_trade([trade_data])
-                            if success:
-                                await asyncio.sleep(2)
-                                engine.sync_real_trades()
-                                logger.info(f"Synced real trades to DB after retrying manual trade for {symbol}")
-                                return True
-                            else:
-                                st.error("❌ Retry failed to execute real trade on Bybit")
-                                return False
-                        else:
-                            st.error(f"❌ Failed to execute real trade on Bybit: {e}")
-                            return False
-                    except Exception as e:
-                        st.error(f"❌ Error executing real trade: {e}")
-                        logger.error(f"Real trade execution error: {e}", exc_info=True)
-                        return False
-
-                # Run async function
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                success = loop.run_until_complete(execute_real())
-                loop.close()
-
-                if not success:
+                # Execute real trade on Bybit
+                success = asyncio.run(engine.execute_real_trade([trade_data]))
+                if success:
+                    # Sync trades after execution
+                    time.sleep(2)
+                    engine.sync_real_trades()
+                    logger.info(f"Synced real trades to DB after executing manual trade for {symbol}")
+                    st.success(f"✅ Real trade executed and synced for {symbol}")
+                else:
+                    st.error("❌ Failed to execute real trade on Bybit")
                     # Rollback DB entry
                     session = db_manager._get_session()
                     session.execute(
@@ -657,7 +632,7 @@ def main():
         - TP/SL levels are displayed but not enforced automatically
 
         **Real Mode:**
-        - Syncs with actual Bybit positions
+        - Syncs with all Bybit positions, including non-bot-initiated trades
         - Close positions to execute real market orders
         - Unrealized PnL reflects actual account value
         - TP/SL orders are placed on Bybit exchange
@@ -715,8 +690,8 @@ def main():
     # Initialize engine
     engine = st.session_state.get("engine")
     if not engine:
-        st.error("Trading engine not initialized")
-        return
+        engine = get_engine()
+        st.session_state.engine = engine
 
     # Get current trading mode from session state
     trading_mode = st.session_state.get("trading_mode", "virtual")
@@ -800,8 +775,7 @@ def main():
     ])
 
     with tab1:
-        # Run async function in Streamlit
-        asyncio.run(display_trade_management())
+        display_trade_management()
 
     with tab2:
         st.subheader("📜 Trading History")

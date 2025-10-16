@@ -572,10 +572,8 @@ class TradingEngine:
             async def get_positions():
                 return await self.client.get_positions()
             
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            positions = loop.run_until_complete(get_positions())
-            loop.close()
+            # Run async function in Streamlit's synchronous context
+            positions = asyncio.run(get_positions())
             
             # Get current DB trades
             db_trades = self.get_open_real_trades()
